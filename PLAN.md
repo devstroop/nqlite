@@ -113,3 +113,8 @@ Every milestone ships with:
 - 2026-08-03: repo created github.com/devstroop/nqlite (public, default main);
   branch model live (main → develop → feat/*, PRs + CI protection);
   16 worktrees under /mnt/ext1/nqlite-worktrees/; kanban at docs/KANBAN.md.
+- 2026-08-03: **wave-1** merged — ir-plan, engine-core, nql-parser, grammar-spec,
+  + end-to-end integration tests + `;` separators. nql→engine pipeline proven.
+- 2026-08-03: **wave-2** merged — vector-index (VectorIndex trait, brute-force
+  default, feature-gated HNSW), fuzzing (proptest + cargo-fuzz), repl (nql-cli).
+  Released to main via PR #13. 45+ tests across 4 crates + nql-cli.
