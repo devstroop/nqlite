@@ -9,4 +9,5 @@ description = "nqlite engine — deterministic storage + indexes + execution of 
 nql = { path = "../nql" }
 nql-ir = { path = "../nql-ir" }
 serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
