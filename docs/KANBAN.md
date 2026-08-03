@@ -32,7 +32,12 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## In Progress
 
-(none — wave-3 to be pulled from backlog)
+- [ ] **feat/analyzer-planner** — Analyzer: plan validation (table-decl order,
+      dim checks) + SELECT enrichment (auto-Order::Similarity). (wave-3: parallel)
+- [ ] **feat/benchmarks** — criterion harness: ingest, knn_bf, select, relate.
+      (wave-3: parallel)
+- [ ] **feat/feedback** — `::votes`/`::feedback` operators + vote_counts /
+      feedback_score in engine (D9). (wave-3: parallel)
 
 ## Review
 
