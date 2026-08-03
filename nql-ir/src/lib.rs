@@ -238,6 +238,19 @@ pub enum Filter {
     FieldEquals { field: String, value: Value },
     /// `WHERE embedding IS NOT NULL` — only records with vectors.
     HasEmbedding,
+    /// `WHERE ::bm25(<field>, "<query>") [AND k = <N>]` — deterministic BM25
+    /// lexical scoring over the given text field. Every row of the table is
+    /// returned (this filter scores rather than prunes); rows are ordered by
+    /// descending BM25 score with ties broken by ascending `RecordId`, and
+    /// `k`, when present, caps the number of returned rows.
+    Bm25 {
+        /// Body field whose `Value::Str` content is tokenized and scored.
+        field: String,
+        /// Raw query text; tokenized identically to document content.
+        query: String,
+        /// Optional result cap (like `knn.k`). `None` = no cap from the filter.
+        k: Option<usize>,
+    },
 }
 
 /// Deterministic ordering operators (pure arithmetic — see docs/decisions.md D9).
