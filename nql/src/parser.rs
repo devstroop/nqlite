@@ -83,6 +83,10 @@ pub fn parse(input: &str) -> Result<Plan, NqlError> {
     let mut p = Parser::new(tokens);
     let mut plan = Vec::new();
     while !p.at_eof() {
+        p.skip_semis();
+        if p.at_eof() {
+            break;
+        }
         plan.push(p.parse_statement()?);
     }
     Ok(plan)
@@ -121,6 +125,13 @@ impl Parser {
 
     fn at_eof(&self) -> bool {
         matches!(self.peek_tok(), Token::Eof)
+    }
+
+    /// Skip any run of `;` statement separators (also tolerates trailing `;`).
+    fn skip_semis(&mut self) {
+        while matches!(self.peek_tok(), Token::Semi) {
+            self.idx += 1;
+        }
     }
 
     fn bump(&mut self) -> Spanned {
@@ -607,6 +618,7 @@ fn describe(t: &Token) -> String {
         Token::RBrace => "`}`".into(),
         Token::LBracket => "`[`".into(),
         Token::RBracket => "`]`".into(),
+        Token::Semi => "`;`".into(),
         Token::Comma => "`,`".into(),
         Token::Arrow => "`->`".into(),
         Token::Plus => "`+`".into(),
