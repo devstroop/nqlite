@@ -108,3 +108,8 @@ Every milestone ships with:
 
 - 2026-08-03: workspace scaffolded (/mnt/ext1/nqlite-workspace), philosophy
   locked (docs/decisions.md), research kicked off (delegated), PLAN skeleton.
+- 2026-08-03: research completed directly (docs/research.md + Appendix A);
+  decisions D1–D9 locked; nql-ir value types shipped (main baseline).
+- 2026-08-03: repo created github.com/devstroop/nqlite (public, default main);
+  branch model live (main → develop → feat/*, PRs + CI protection);
+  16 worktrees under /mnt/ext1/nqlite-worktrees/; kanban at docs/KANBAN.md.
