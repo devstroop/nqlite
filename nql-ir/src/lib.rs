@@ -215,7 +215,7 @@ pub enum Statement {
 }
 
 /// A SELECT with optional vector kNN, field filter, deterministic ordering, limit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Select {
     pub table: String,
     pub knn: Option<Knn>,
@@ -255,15 +255,3 @@ pub enum Order {
 
 /// A plan is a sequence of statements executed atomically (one transaction).
 pub type Plan = Vec<Statement>;
-
-impl Default for Select {
-    fn default() -> Self {
-        Self {
-            table: String::new(),
-            knn: None,
-            filter: None,
-            order: None,
-            limit: None,
-        }
-    }
-}
