@@ -188,3 +188,82 @@ mod tests {
         assert_eq!(back, rec);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The Plan / Statement contract (the seam between nql and nqlite)
+// ---------------------------------------------------------------------------
+// A `Plan` is what `nql` (front-end) produces and `nqlite` (engine) executes.
+// It lives in nql-ir so both halves compile against the SAME types. Any change
+// to this section is a contract change: update nql and nqlite in lockstep.
+
+/// A complete nql statement (M0 slice).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Statement {
+    /// Declare a table and optional vector dimension for its embedding column.
+    CreateTable {
+        table: String,
+        vector_dim: Option<usize>,
+    },
+    /// Insert/upsert a record (BYO vector: `embedding` field, never computed here).
+    Insert(Record),
+    /// Create a named, directed relation edge.
+    Relate(RelationEdge),
+    /// Select records (optionally kNN + filter + order + limit).
+    Select(Select),
+    /// Delete a record (and its incident edges).
+    Forget { id: RecordId },
+}
+
+/// A SELECT with optional vector kNN, field filter, deterministic ordering, limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Select {
+    pub table: String,
+    pub knn: Option<Knn>,
+    pub filter: Option<Filter>,
+    pub order: Option<Order>,
+    pub limit: Option<usize>,
+}
+
+/// Vector kNN clause: `WHERE vector::similarity(embedding, $q) AND k = N`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Knn {
+    pub query: Vec<f32>,
+    pub k: usize,
+}
+
+/// Field-level filter on record body values (M0: equality only).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Filter {
+    /// `WHERE <field> = <value>`
+    FieldEquals { field: String, value: Value },
+    /// `WHERE embedding IS NOT NULL` — only records with vectors.
+    HasEmbedding,
+}
+
+/// Deterministic ordering operators (pure arithmetic — see docs/decisions.md D9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Order {
+    /// Cosine similarity (descending) vs the kNN query vector.
+    Similarity,
+    /// α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback (agent-tuned α..δ).
+    Salience,
+    /// Laplace-smoothed mean of `:voted` edge values on the record.
+    Score,
+    /// created_at (descending).
+    Recency,
+}
+
+/// A plan is a sequence of statements executed atomically (one transaction).
+pub type Plan = Vec<Statement>;
+
+impl Default for Select {
+    fn default() -> Self {
+        Self {
+            table: String::new(),
+            knn: None,
+            filter: None,
+            order: None,
+            limit: None,
+        }
+    }
+}
