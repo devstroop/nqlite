@@ -32,7 +32,12 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## In Progress
 
-(none — wave-2 to be pulled from backlog)
+- [ ] **feat/vector-index** — `VectorIndex` trait; brute-force exact default;
+      feature-gated HNSW. (wave-2: parallel)
+- [ ] **feat/fuzzing** — proptest properties + cargo-fuzz harness for nql parser.
+      (wave-2: parallel)
+- [ ] **feat/repl** — new `nql-cli` member: interactive REPL + `--script` runner.
+      (wave-2: parallel)
 
 ## Review
 
