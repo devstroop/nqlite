@@ -249,8 +249,23 @@ pub enum Order {
     Salience,
     /// Laplace-smoothed mean of `:voted` edge values on the record.
     Score,
+    /// Net up−down vote count over `:voted` edges (descending; tie-break by RecordId).
+    Votes,
+    /// Time-decayed recent feedback over `:voted` edges (descending; tie-break by RecordId).
+    Feedback,
     /// created_at (descending).
     Recency,
+}
+
+/// Aggregated vote counts over a record's `:voted` edges (`(voter)->:voted {value:+1|-1}->(record)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoteCounts {
+    /// Edges with `value == +1`.
+    pub up: u64,
+    /// Edges with `value == -1`.
+    pub down: u64,
+    /// `up - down`.
+    pub net: i64,
 }
 
 /// A plan is a sequence of statements executed atomically (one transaction).
