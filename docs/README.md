@@ -1,17 +1,22 @@
-# docs/
+# docs/ — knowledge base
 
-Design documentation for nqlite. Kept in sync with the code.
+Everything about nqlite lives here (README.md stays compact by design).
 
 ## Index
 
-- `decisions.md` — locked design intent, non-negotiables, open decisions (D1..D7).
-- `research.md` — (in progress) external research findings: embedded/vector
-  engines, query-language design + hardening, agent-context memory patterns,
-  each with concrete sources.
-- `comparison.md` — (planned) position vs sqlite-vec, LanceDB, Chroma, SurrealDB.
+| File | What it is |
+|---|---|
+| [decisions.md](decisions.md) | Locked design intent: non-negotiables, mental model, decisions D1–D9 |
+| [research.md](research.md) | External research with sources; competitive landscape, engines, grammar, agent-memory |
+| [comparison.md](comparison.md) | Position vs sqlite-vec, LanceDB, Chroma, SurrealDB |
+| [KANBAN.md](KANBAN.md) | Local kanban: feature breakdown, status per module |
+| [README.md](README.md) | This index |
 
-## How this stays honest
+## Process notes
 
-Per project convention, docs reflect the current state of the code. If an
-experiment diverges (e.g. we pick `USearch` over `hnswlib-rs`), update the
-relevant doc the same PR that changes the code.
+- **README.md** (repo root) stays state-independent. Roadmap/status live here.
+- **PLAN.md** (repo root) is the milestone roadmap.
+- **KANBAN.md** is the local kanban maintained during development; syncs with
+  PLAN.md milestones.
+- Docs stay in sync with code — an experiment that changes a decision updates
+  the relevant doc in the same PR.
