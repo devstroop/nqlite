@@ -32,18 +32,18 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## In Progress
 
-- [ ] **feat/nql-parser** — nql front-end: tokenizer + AST for the M0 slice
-      (create/insert/select/relate/knn/match). winnow-based. Storage-agnostic.
-      (wave-1: being built in parallel)
-- [ ] **feat/engine-core** — nqlite in-memory Store + executor: insert/select
-      over records; deterministic iteration order. (wave-1: being built in parallel)
-- [ ] **feat/grammar-spec** — spec/nql.md full grammar + operator semantics.
-      (wave-1: being built in parallel)
+(none — wave-2 to be pulled from backlog)
 
 ## Review
 
-- [x] **feat/ir-plan** — Plan/Statement contract (nql↔nqlite seam). Merged into
-      develop via PR #1 (2026-08-03).
+- [x] **feat/nql-parser** — nql front-end: lexer + recursive-descent parser,
+      M0 grammar slice, line/column errors, 27 tests. Merged into develop via
+      PR #5 (2026-08-03).
+- [x] **feat/engine-core** — nqlite engine: Database::execute over Store
+      (create/insert/relate/select/forget, kNN, filters, deterministic order,
+      Laplace ::score), 12 tests. Merged into develop via PR #4 (2026-08-03).
+- [x] **feat/grammar-spec** — spec/nql.md grammar + semantics. Merged into
+      develop via PR #6 (2026-08-03).
 
 ## Done
 
@@ -52,6 +52,8 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 - [x] **feat/ir-value-types** — nql-ir contract: RecordId/Value/VectorSpec/
       RelationEdge/Record/Store + serde. (In `main` baseline; shipped with the
       scaffold commit — see git log 8155316.)
+- [x] **feat/ir-plan** — Plan/Statement contract (nql↔nqlite seam). Merged
+      into develop via PR #1 (2026-08-03).
 
 ## Milestone mapping
 

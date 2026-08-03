@@ -22,6 +22,8 @@ pub enum Token {
     RBrace,
     LBracket,
     RBracket,
+    /// Statement separator `;` (allowed between statements, skipped by parser).
+    Semi,
     Comma,
     /// `->`
     Arrow,
@@ -133,6 +135,10 @@ impl<'a> Lexer<'a> {
             Some(b'[') => {
                 self.bump();
                 Token::LBracket
+            }
+            Some(b';') => {
+                self.bump();
+                Token::Semi
             }
             Some(b']') => {
                 self.bump();
