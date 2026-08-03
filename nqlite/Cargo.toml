@@ -5,9 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "nqlite engine — deterministic storage + indexes + execution of nql Plans. Zero LLM dependency."
 
+[features]
+default = []
+# Opt-in approximate vector index (HNSW). NOT the default: exact brute-force
+# (BruteForceVectorIndex) remains the deterministic engine default.
+hnsw = ["dep:fast-hnsw"]
+
 [dependencies]
 nql = { path = "../nql" }
 nql-ir = { path = "../nql-ir" }
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Pure-Rust HNSW, only compiled with the `hnsw` feature (see src/index.rs).
+fast-hnsw = { version = "1.0.1", optional = true }

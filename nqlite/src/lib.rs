@@ -14,12 +14,26 @@
 //! - All ordered queries break numeric ties by ascending [`RecordId`]
 //!   (`Ord`), and unordered scans return since `BTreeMap` key order.
 //! - No network, no LLM, no `rand`, no wall-clock in any execution path.
+//!
+//! # Vector index swap point
+//!
+//! kNN SELECTs run through the [`VectorIndex`] trait ([`index`] module). The
+//! default [`BruteForceVectorIndex`] is an exact, deterministic cosine scan,
+//! which is what keeps the engine's determinism guarantee. An approximate
+//! `HnswVectorIndex` is compiled only with the opt-in `hnsw` cargo feature
+//! (`cargo build --features hnsw`) and is **never** the engine default —
+//! approximate search can miss true neighbours. To swap the retrieval
+//! strategy, replace the concrete index in `engine::build_default_index`.
 
 pub mod engine;
 pub mod error;
+pub mod index;
 
 pub use engine::{cosine_similarity, execute_plan, execute_statement, QueryResult, ScoredRecord};
 pub use error::{Error, Result};
+#[cfg(feature = "hnsw")]
+pub use index::HnswVectorIndex;
+pub use index::{BruteForceVectorIndex, VectorIndex};
 // Facade: re-export the shared IR contract (RecordId, Value, Record, Store,
 // Statement, Select, Knn, Filter, Order, Plan, ...) so callers can use
 // `nqlite::Value` instead of reaching into `nql_ir` directly.
