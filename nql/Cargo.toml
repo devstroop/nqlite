@@ -9,3 +9,6 @@ description = "nql neural query language — parser + AST front-end (storage-agn
 nql-ir = { path = "../nql-ir" }
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"

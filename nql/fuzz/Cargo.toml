@@ -1,0 +1,28 @@
+[package]
+name = "nql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+# Documented cargo-fuzz metadata.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nql]
+path = ".."
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+# Detached from the nqlite workspace: `cargo test --workspace` / `cargo clippy --workspace`
+# from the repo root ignore this crate (it is not a workspace `member`). It is built
+# standalone with cargo-fuzz under nightly only: `cargo +nightly fuzz run fuzz_parser`.
+#
+# `fuzz_target` (libfuzzer-sys) expands to `fn main() {}` when not built with
+# `--cfg fuzzing`, so `cargo build` of this crate still succeeds on stable.
+[workspace]

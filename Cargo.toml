@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["nql", "nql-ir", "nqlite"]
+members = ["nql", "nql-ir", "nqlite", "nql-cli"]
 
 [workspace.package]
 version = "0.1.0"
