@@ -32,11 +32,18 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## In Progress
 
-(none — first feature to be pulled from backlog)
+- [ ] **feat/nql-parser** — nql front-end: tokenizer + AST for the M0 slice
+      (create/insert/select/relate/knn/match). winnow-based. Storage-agnostic.
+      (wave-1: being built in parallel)
+- [ ] **feat/engine-core** — nqlite in-memory Store + executor: insert/select
+      over records; deterministic iteration order. (wave-1: being built in parallel)
+- [ ] **feat/grammar-spec** — spec/nql.md full grammar + operator semantics.
+      (wave-1: being built in parallel)
 
 ## Review
 
-(none)
+- [x] **feat/ir-plan** — Plan/Statement contract (nql↔nqlite seam). Merged into
+      develop via PR #1 (2026-08-03).
 
 ## Done
 
