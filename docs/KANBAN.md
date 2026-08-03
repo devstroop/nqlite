@@ -32,18 +32,16 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## In Progress
 
-- [ ] **feat/vector-index** — `VectorIndex` trait; brute-force exact default;
-      feature-gated HNSW. (wave-2: parallel)
-- [ ] **feat/fuzzing** — proptest properties + cargo-fuzz harness for nql parser.
-      (wave-2: parallel)
-- [ ] **feat/repl** — new `nql-cli` member: interactive REPL + `--script` runner.
-      (wave-2: parallel)
+(none — wave-3 to be pulled from backlog)
 
 ## Review
 
-- [x] **feat/nql-parser** — nql front-end: lexer + recursive-descent parser,
-      M0 grammar slice, line/column errors, 27 tests. Merged into develop via
-      PR #5 (2026-08-03).
+- [x] **feat/vector-index** — `VectorIndex` trait; brute-force exact default;
+      feature-gated HNSW (fast-hnsw, seeded). Merged via PR #10 (2026-08-03).
+- [x] **feat/fuzzing** — proptest properties (never-panic, round-trip, error
+      positions) + detached cargo-fuzz harness. Merged via PR #11 (2026-08-03).
+- [x] **feat/repl** — `nql-cli` member: REPL + `--script` runner. Merged via
+      PR #12 (2026-08-03).
 - [x] **feat/engine-core** — nqlite engine: Database::execute over Store
       (create/insert/relate/select/forget, kNN, filters, deterministic order,
       Laplace ::score), 12 tests. Merged into develop via PR #4 (2026-08-03).
