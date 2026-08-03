@@ -5,19 +5,27 @@
 //! network, no LLM. Sorting is stable and always tie-broken by ascending
 //! [`RecordId`] string form, so a given plan + store yields byte-identical
 //! results every time it runs.
+//!
+//! kNN similarity is computed through the [`VectorIndex`] trait (see
+//! [`crate::index`]): the default [`BruteForceVectorIndex`] is an exact,
+//! deterministic cosine scan, which keeps this module's determinism
+//! guarantee. An approximate HNSW index exists behind the opt-in `hnsw`
+//! feature but is never selected by the engine.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
-use nql_ir::{Filter, Order, Record, Select, Statement, Store};
+use nql_ir::{Filter, Order, Record, RecordId, Select, Statement, Store};
 
 use crate::error::{Error, Result};
+use crate::index::{BruteForceVectorIndex, VectorIndex};
 
 /// One selected record plus its computed match score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredRecord {
     pub record: Record,
     /// Match score as defined by the select's ordering operator (see
-    /// [`compute_score`]); `0.0` when the select has no score-producing
+    /// `compute_score`); `0.0` when the select has no score-producing
     /// operator and no kNN query.
     pub score: f32,
 }
@@ -53,7 +61,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Execute a whole [`Plan`] against `store`, applying statements in order and
+/// Execute a whole `Plan` against `store`, applying statements in order and
 /// collecting one [`QueryResult`] per `SELECT` (DML/DDL statements contribute
 /// nothing to the output).
 pub fn execute_plan(store: &mut Store, plan: &[Statement]) -> Result<Vec<QueryResult>> {
@@ -128,15 +136,37 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 
 /// Scan `store.records` for the select's table, apply the filter, compute
 /// per-row scores, order, and limit — all deterministically.
+///
+/// When the select carries a kNN clause, similarity is produced by the
+/// configured [`VectorIndex`] (default: exact [`BruteForceVectorIndex`])
+/// rather than an inline cosine scan. The index is rebuilt from the filtered
+/// candidates on every call, so the result stays a pure, deterministic
+/// function of `(store, select)`.
 fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
-    let mut rows: Vec<ScoredRecord> = store
+    let candidates: Vec<Record> = store
         .records
         .values()
         .filter(|r| r.id.table == sel.table)
         .filter(|r| matches_filter(r, sel.filter.as_ref()))
-        .map(|r| ScoredRecord {
-            record: r.clone(),
-            score: compute_score(store, sel, r),
+        .cloned()
+        .collect();
+
+    // Rank every embedded candidate against the query through the index.
+    // Non-embedded records are absent from the index and fall back to a
+    // similarity of `0.0`, exactly as the inline scan did.
+    let knn_sims: Option<BTreeMap<RecordId, f32>> = sel.knn.as_ref().map(|knn| {
+        let index = build_default_index(&candidates);
+        index
+            .search(&knn.query, candidates.len())
+            .into_iter()
+            .collect()
+    });
+
+    let mut rows: Vec<ScoredRecord> = candidates
+        .into_iter()
+        .map(|record| {
+            let score = compute_score(store, sel, &record, knn_sims.as_ref());
+            ScoredRecord { record, score }
         })
         .collect();
 
@@ -146,6 +176,22 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         rows.truncate(limit);
     }
     rows
+}
+
+/// Build the default vector index (exact brute-force) over the embeddings of
+/// the given candidate records.
+///
+/// This is the engine's swap point for alternative [`VectorIndex`]
+/// implementations (e.g. the feature-gated, approximate `HnswVectorIndex`):
+/// swap the concrete type here and the rest of the engine is unchanged.
+fn build_default_index(records: &[Record]) -> Box<dyn VectorIndex> {
+    let mut index = BruteForceVectorIndex::default();
+    for r in records {
+        if let Some(emb) = &r.embedding {
+            index.upsert(r.id.clone(), emb.clone());
+        }
+    }
+    Box::new(index)
 }
 
 /// Apply the select's deterministic ordering. Stable sorts guarantee equal
@@ -208,10 +254,15 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
 /// - `Order::Salience` without kNN → the normalized score alone.
 /// - Anything else → cosine similarity vs the kNN query (`0.0` when there is
 ///   no kNN clause, or when the record has no embedding / zero-norm vector).
-fn compute_score(store: &Store, sel: &Select, rec: &Record) -> f32 {
+fn compute_score(
+    store: &Store,
+    sel: &Select,
+    rec: &Record,
+    knn_sims: Option<&BTreeMap<RecordId, f32>>,
+) -> f32 {
     let similarity = match &sel.knn {
-        Some(knn) => match &rec.embedding {
-            Some(emb) => cosine_similarity(emb, &knn.query),
+        Some(_) => match knn_sims {
+            Some(sims) => sims.get(&rec.id).copied().unwrap_or(0.0),
             None => 0.0,
         },
         None => 0.0,
