@@ -1,0 +1,15 @@
+[package]
+name = "nql-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nql REPL + script runner for nqlite (deterministic, zero-LLM)."
+
+[[bin]]
+name = "nql"
+path = "src/main.rs"
+
+[dependencies]
+nql = { path = "../nql" }
+nql-ir = { path = "../nql-ir" }
+nqlite = { path = "../nqlite" }
