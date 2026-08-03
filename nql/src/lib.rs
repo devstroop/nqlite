@@ -4,6 +4,9 @@
 //! slice. See [`parser`] for the accepted grammar and [`parse`] / [`parse_statement`]
 //! for the public entry points.
 
+pub mod analyzer;
+#[cfg(test)]
+mod analyzer_tests;
 pub mod lexer;
 pub mod parser;
 #[cfg(test)]
@@ -11,4 +14,5 @@ mod proptests;
 #[cfg(test)]
 mod tests;
 
+pub use analyzer::{AnalysisError, Analyzer};
 pub use parser::{parse, parse_statement, NqlError};

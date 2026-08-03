@@ -19,3 +19,14 @@ thiserror.workspace = true
 tracing.workspace = true
 # Pure-Rust HNSW, only compiled with the `hnsw` feature (see src/index.rs).
 fast-hnsw = { version = "1.0.1", optional = true }
+
+[dev-dependencies]
+# Benchmark harness (see benches/). Benches are gated by the same CI checks as
+# the rest of the workspace (`cargo clippy --workspace --all-targets`).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+# Criterion provides its own runner via criterion_main!; the default libtest
+# bench harness would conflict.
+harness = false

@@ -15,7 +15,9 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use nql_ir::{Filter, Order, Record, RecordId, Select, Statement, Store};
+use nql_ir::{
+    Filter, Order, Record, RecordId, RelationEdge, Select, Statement, Store, Value, VoteCounts,
+};
 
 use crate::error::{Error, Result};
 use crate::index::{BruteForceVectorIndex, VectorIndex};
@@ -247,6 +249,8 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
 ///
 /// - `Order::Score` → Laplace-smoothed mean of the `:voted` edge weights
 ///   pointing at the record: `(sum + 1) / (n + 2)` — `0.5` with zero votes.
+/// - `Order::Votes` → net up−down vote count (see [`vote_counts`]).
+/// - `Order::Feedback` → time-decayed recent feedback (see [`feedback_score`]).
 /// - `Order::Salience` with kNN → `0.7 * similarity + 0.3 * normalized_score`,
 ///   where `normalized_score` is the Laplace score clamped to `[0, 1]`
 ///   (weights are treated as `[0, 1]` confidence values; the clamp keeps the
@@ -270,6 +274,8 @@ fn compute_score(
 
     match sel.order.as_ref() {
         Some(Order::Score) => score_of(store, rec),
+        Some(Order::Votes) => vote_counts(store, &rec.id).net as f32,
+        Some(Order::Feedback) => feedback_score(store, &rec.id),
         Some(Order::Salience) if sel.knn.is_some() => {
             0.7 * similarity + 0.3 * score_of(store, rec).clamp(0.0, 1.0)
         }
@@ -294,6 +300,90 @@ fn score_of(store: &Store, rec: &Record) -> f32 {
         }
     }
     (sum + 1.0) / (n as f32 + 2.0)
+}
+
+/// The `:voted` edges pointing **at** `id`, in store (append) order.
+///
+/// A vote is a directed edge `(voter)->:voted {value:+1|-1, weight:0..1}->(record)`
+/// (see docs/decisions.md D9); only edges whose `name == ":voted"` and whose
+/// `to` is the record count. Iteration order is the store's append order,
+/// which is deterministic for a given store.
+fn votes_toward<'a>(store: &'a Store, id: &RecordId) -> Vec<&'a RelationEdge> {
+    store
+        .edges
+        .iter()
+        .filter(|e| e.name == "voted" && e.to == *id)
+        .collect()
+}
+
+/// The signed vote value of an edge: `+1` for `value:+1`, `-1` for `value:-1`,
+/// `0` for anything else (missing prop, other value). `value` lives in the
+/// edge's `props` map, as produced by `RELATE ... SET value = <n>`.
+fn vote_value(props: &BTreeMap<String, Value>) -> i8 {
+    match props.get("value") {
+        Some(Value::Int(1)) | Some(Value::Float(1.0)) => 1,
+        Some(Value::Int(-1)) | Some(Value::Float(-1.0)) => -1,
+        _ => 0,
+    }
+}
+
+/// Aggregate vote counts over a record's `:voted` edges.
+///
+/// Deterministic: iterates `store.edges` in append order and only counts
+/// `value == +1` (up) and `value == -1` (down) votes pointing at `id`;
+/// `net = up - down`.
+pub fn vote_counts(store: &Store, id: &RecordId) -> VoteCounts {
+    let mut up = 0u64;
+    let mut down = 0u64;
+    for edge in votes_toward(store, id) {
+        match vote_value(&edge.props) {
+            1 => up += 1,
+            -1 => down += 1,
+            _ => {}
+        }
+    }
+    VoteCounts {
+        up,
+        down,
+        net: up as i64 - down as i64,
+    }
+}
+
+/// Time-decayed recent feedback over a record's `:voted` edges.
+///
+/// `Σ sign(v) · decay(created_at)` where `sign` is `+1` for upvotes and `-1`
+/// for downvotes (see [`vote_value`]) and
+///
+/// ```text
+/// decay(t) = 1 / (1 + λ · (now − t)),   λ = 1.0
+/// ```
+///
+/// with `now` = the **maximum `created_at` over all `:voted` edges in the
+/// store**. Using the data's own max as "now" (instead of wall-clock) keeps
+/// the score a pure, deterministic function of the store: the same input
+/// always yields the same output, and `created_at` is treated as arbitrary
+/// time units (engine convention: seconds; tests use synthetic units). A vote
+/// at `now` contributes its full sign; each unit of age halves the
+/// contribution (age 1 → 1/2, age 2 → 1/3, …). A record with no `:voted`
+/// edges scores `0.0`.
+pub fn feedback_score(store: &Store, id: &RecordId) -> f32 {
+    let lambda = 1.0f32;
+    let mut now: Option<i64> = None;
+    for edge in &store.edges {
+        if edge.name == "voted" {
+            now = Some(now.map_or(edge.created_at, |n| n.max(edge.created_at)));
+        }
+    }
+    let Some(now) = now else {
+        return 0.0;
+    };
+    let mut total = 0.0f32;
+    for edge in votes_toward(store, id) {
+        let sign = vote_value(&edge.props) as f32;
+        let age = now.saturating_sub(edge.created_at) as f32;
+        total += sign * (1.0 / (1.0 + lambda * age));
+    }
+    total
 }
 
 #[cfg(test)]
@@ -797,5 +887,104 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].rows.len(), 2);
         assert_eq!(results[1].rows.len(), 3); // sees the insert in the same plan
+    }
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Id, RecordId, RelationEdge, Value};
+
+    use super::{feedback_score, vote_counts, Store};
+
+    fn rid(s: &str) -> RecordId {
+        RecordId::parse(s).unwrap()
+    }
+
+    fn vote(from: &str, to: &str, value: i64, weight: f32, created_at: i64) -> RelationEdge {
+        RelationEdge {
+            from: rid(from),
+            name: "voted".into(),
+            to: rid(to),
+            created_at,
+            weight: Some(weight),
+            props: BTreeMap::from([("value".into(), Value::Int(value))]),
+        }
+    }
+
+    fn store_with_edges(edges: Vec<RelationEdge>) -> Store {
+        Store {
+            edges,
+            ..Store::default()
+        }
+    }
+
+    #[test]
+    fn vote_counts_aggregates_up_down_net() {
+        let s = store_with_edges(vec![
+            vote("agent:1", "doc:1", 1, 1.0, 0),
+            vote("agent:2", "doc:1", 1, 1.0, 0),
+            vote("agent:3", "doc:1", -1, 1.0, 0),
+            vote("agent:4", "doc:2", 1, 1.0, 0), // different target: ignored
+        ]);
+        let c = vote_counts(&s, &rid("doc:1"));
+        assert_eq!(c.up, 2);
+        assert_eq!(c.down, 1);
+        assert_eq!(c.net, 1);
+    }
+
+    #[test]
+    fn vote_counts_zero_when_no_votes() {
+        let s = store_with_edges(vec![]);
+        let c = vote_counts(&s, &rid("doc:1"));
+        assert_eq!((c.up, c.down, c.net), (0, 0, 0));
+    }
+
+    #[test]
+    fn feedback_score_prefers_recent_positive() {
+        // recent +1 edges outweigh old -1 edge
+        let s = store_with_edges(vec![
+            vote("agent:a", "doc:1", 1, 1.0, 100),
+            vote("agent:b", "doc:1", 1, 1.0, 200),
+            vote("agent:c", "doc:1", -1, 1.0, 0),
+        ]);
+        let recent = feedback_score(&s, &rid("doc:1"));
+        let old = feedback_score(&s, &rid("doc:2")); // no votes
+        assert!(
+            recent > old,
+            "recent positives should score higher than none"
+        );
+        assert!(recent > 0.0);
+    }
+
+    #[test]
+    fn feedback_score_deterministic() {
+        let s = store_with_edges(vec![
+            vote("agent:a", "doc:1", 1, 0.5, 10),
+            vote("agent:b", "doc:1", -1, 0.9, 20),
+        ]);
+        let s2 = s.clone();
+        assert_eq!(
+            feedback_score(&s, &rid("doc:1")),
+            feedback_score(&s2, &rid("doc:1"))
+        );
+    }
+
+    #[test]
+    fn non_voted_edges_ignored() {
+        let e = RelationEdge {
+            name: "mentions".into(), // not a vote
+            ..vote("agent:a", "doc:1", 1, 1.0, 0)
+        };
+        let s = store_with_edges(vec![e]);
+        let c = vote_counts(&s, &rid("doc:1"));
+        assert_eq!(c.net, 0);
+    }
+
+    #[test]
+    fn id_imports_work() {
+        // guard: Id import stays usable (numeric id construction)
+        let _ = Id::Num(1);
     }
 }

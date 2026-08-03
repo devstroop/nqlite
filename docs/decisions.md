@@ -125,6 +125,11 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   - Salience gets a fourth deterministic term:
     `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback_score`
     (weights α..δ are agent-side knobs).
+  - **LANDED (2026-08-03)**: `Order::Votes` + `Order::Feedback` in nql-ir;
+    `vote_counts` (up/down/net over `:voted` edges) and `feedback_score`
+    (time-decayed: Σ sign·1/(1+λ·age), `now` = max created_at in store — pure,
+    deterministic, no wall-clock) in the engine; parser accepts
+    `ORDER BY ::votes | ::feedback`.
   - Poisoning/drift: votes carry voter + trust weight; engine stores, agent
     decides trust policy; deterministic decay for old votes.
 

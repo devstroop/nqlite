@@ -342,9 +342,11 @@ impl Parser {
                         "salience" => Order::Salience,
                         "score" => Order::Score,
                         "recency" => Order::Recency,
+                        "votes" => Order::Votes,
+                        "feedback" => Order::Feedback,
                         _ => {
                             return Err(self.err_here(format!(
-                                "unknown ORDER BY key `{o}` (expected similarity, salience, score, or recency)"
+                                "unknown ORDER BY key `{o}` (expected similarity, salience, score, recency, votes, or feedback)"
                             )));
                         }
                     });
