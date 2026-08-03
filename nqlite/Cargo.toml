@@ -1,0 +1,12 @@
+[package]
+name = "nqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nqlite engine — deterministic storage + indexes + execution of nql Plans. Zero LLM dependency."
+
+[dependencies]
+nql = { path = "../nql" }
+nql-ir = { path = "../nql-ir" }
+serde.workspace = true
+tracing.workspace = true

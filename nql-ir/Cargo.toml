@@ -1,0 +1,9 @@
+[package]
+name = "nql-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nqlite shared Plan/IR and value types — produced by nql (front-end), executed by nqlite (engine)."
+
+[dependencies]
+serde.workspace = true

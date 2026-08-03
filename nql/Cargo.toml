@@ -1,0 +1,11 @@
+[package]
+name = "nql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nql neural query language — parser + AST front-end (storage-agnostic)."
+
+[dependencies]
+nql-ir = { path = "../nql-ir" }
+serde.workspace = true
+thiserror.workspace = true
