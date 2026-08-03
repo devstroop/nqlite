@@ -109,6 +109,70 @@ is *outside*).
    crash-safe, reproducible — something mem0/Letta/Lance/chroma can't claim
    because the LLM is in their write path.
 
+## Appendix A — Salvaged from the failed delegation batch (traces only, 2026-08-03)
+
+The parallel research batch (deleg_d3bf401b) hit HTTP 500 on final synthesis for
+all three tasks; briefs were lost. Their raw tool-traces survived and confirm/
+extend the primary research above. Notable extra sources + facts worth keeping:
+
+1. **langmem (LangChain's memory library)** — conceptual guide is the cleanest
+   modern statement of the agent-memory model:
+   - Taxonomy: **semantic** (facts/knowledge), **episodic** (past experiences),
+     **procedural** (system behavior/persona). Storage: collections (searched at
+     runtime) vs profiles (strict-schema, looked up directly).
+   - Every memory op = "accept conversation + current memory state, **prompt an
+     LLM** to expand/consolidate, respond with updated state" — i.e. the LLM is
+     IN the write path. Confirms our zero-LLM-in-engine moat.
+   - **Recall design rule (usable verbatim in nqlite)**: "memory relevance is
+     more than semantic similarity. Recall should combine similarity with
+     'importance' of the memory, and the memory's 'strength' = f(how recently /
+     frequently it was used)."
+     => maps directly to a deterministic nqlite `::salience` operator:
+     `score = α·similarity + β·strength(recency, frequency) + γ·importance`,
+     where importance is a number the AGENT writes (engine never invents it).
+   - Source: https://raw.githubusercontent.com/langchain-ai/langmem/main/docs/docs/concepts/conceptual_guide.md
+
+2. **Zep — "beyond static knowledge graphs"** (blog.getzep.com): argues KG
+   usefulness for agents requires temporal edges ("started_on / ended_on"),
+   confidence, and provenance — all first-class edge properties. Supports nqlite
+   putting **time + weight/provenance on relation edges** (not just on records).
+   Source: https://blog.getzep.com/beyond-static-knowledge-graphs/
+
+3. **Chroma storage layout** (cookbook.chromadb.dev/core/storage-layout):
+   Chroma persists via SQLite (metadata/WAL) + segment dirs (HNSW index files)
+   — i.e. the two-engine bolt-on pattern, confirming the "one transaction"
+   differentiation. Source: https://cookbook.chromadb.dev/core/storage-layout/
+
+4. **Qdrant indexing docs** (qdrant.tech/documentation/manage-data/indexing):
+   HNSW params m / ef_construct / ef_search; payload index + full-text index for
+   filtered search — concrete knobs to expose in our `VectorIndex` trait later.
+
+5. **SurrealDB vector index + local engine docs**
+   (surrealdb.com/docs/learn/data-models/vector-search/vector-indexes,
+   docs.rs/surrealdb/.../engine/local/struct.RocksDb.html): vector index via
+   HNSW under the hood; local engine = RocksDB-backed. Confirms our own-file
+   choice as the differentiator vs their KV-backend approach.
+
+6. **Parser engineering sources** (for nql front-end):
+   - sqlparser-rs (apache/datafusion-sqlparser-rs) — the de-facto Rust SQL
+     parser; reference for dialect/spec structure.
+   - winnow (github.com/winnow-rs/winnow) — maintained nom successor; better
+     errors, streaming; candidate for nql parser base.
+   - cargo-fuzz structure-aware fuzzing (rust-fuzz.github.io/book/cargo-fuzz/
+     structure-aware-fuzzing.html) — for grammar fuzzing with structured inputs.
+   - proptest (docs.rs/proptest) — property-testing for deterministic invariants.
+   - SQLite `WITH` (sqlite.org/lang_with.html) + Cypher variable-length paths
+     (neo4j.com/docs/cypher-manual/current/patterns/variable-length-paths/) —
+     reference semantics for nql recursive `CLOSURE`/`MATCH *1..n`.
+
+7. **pgvector benchmark** (markaicode.com/benchmarks/postgresql-pgvector-benchmark)
+   and Qdrant system-design (markaicode.com/architecture/...) — useful baseline
+   numbers for the benchmark harness in M1.
+
+8. Other crates surfaced: `iqdb-ivf` (IVF in Rust), `hamming`, `numkong`,
+   `stringzilla` (SIMD string libs — possible FTS accelerator later),
+   `mini-qdrant` (educational HNSW/Qdrant clone), duckdb-rs (columnar reference).
+
 ## Sources
 - SurrealDB dbdb.io entry (2026-08) — https://dbdb.io/db/surrealdb
 - SurrealDB homepage / docs (2026-08) — https://surrealdb.com

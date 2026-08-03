@@ -61,6 +61,11 @@ Goal: prove the whole thing works end-to-end in one file, offline, deterministic
 - [ ] Evolution the three indexes into the same transaction boundary.
 - [ ] Replace in-memory vector w/ an embedded ANN (HNSW) — evaluate hnswlib-rs /
       USearch / instant-distance (see docs/research).
+- [ ] Feedback operators (D9): `::votes`, `::score` (Laplace-smoothed mean),
+      `::feedback` (decayed) — pure deterministic aggregation over `:voted` edges.
+- [ ] Feedback-as-ground-truth regression harness: (query, retrieved, relevance)
+      triples → recall@K / precision@K vs real usage data; catches retrieval
+      regressions on grammar/index/fusion changes.
 - [ ] Fuzz the parser (`cargo-fuzz`) and storage (proptest invariants).
 - [ ] Benchmark harness vs sqlite-vec, LanceDB, Chroma (ingest TPS, P95 kNN,
       recall@10, cold-open latency).

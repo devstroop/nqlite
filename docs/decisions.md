@@ -107,6 +107,26 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   determinism), swap to HNSW behind a `VectorIndex` trait in M1. Candidate
   crates: `fast-hnsw` (leading: actively maintained, better recall/QPS), or
   `USearch`. Keep the trait so we can A/B and swap.
+- D9. (new) Feedback / upvote-downvote as first-class signal:
+  - **A vote is just an edge** — no new storage machinery:
+    `(voter)->:voted {value:+1|-1, weight:0..1, created_at}->(record)`.
+    Provenance, time, per-voter granularity, and one-transaction all come free.
+  - Deterministic engine operators (allowed — pure arithmetic, zero-LLM):
+    `::votes(record)` → (up, down, net); `::score(record)` → **Laplace-smoothed
+    mean** (M1 default: robust with few votes; Wilson lower bound deferred to
+    ranking-API milestone); `::feedback(record)` → time-decayed recent feedback.
+    Determinism discipline: fixed iteration order (BTree), tie-break by
+    RecordId, no races in aggregation (snapshot isolation).
+  - **Regression story**: feedback becomes ground-truth (query, retrieved,
+    relevance) triples in the same store → recall@K/precision@K regression tests
+    against real usage data in the M1 benchmark harness; bootstrap set for a
+    future agent-side reranker. The *learning* (weight tuning α..δ, reranker
+    training) lives in the agent layer, never in the engine.
+  - Salience gets a fourth deterministic term:
+    `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback_score`
+    (weights α..δ are agent-side knobs).
+  - Poisoning/drift: votes carry voter + trust weight; engine stores, agent
+    decides trust policy; deterministic decay for old votes.
 
 ## 6. Benchmark targets (aspirational, tune later)
 
