@@ -15,6 +15,10 @@ pub enum Error {
         expected: usize,
         actual: usize,
     },
+
+    /// A persistence error (WAL append / checkpoint) on a file-backed database.
+    #[error("storage error: {0}")]
+    Storage(#[from] crate::storage::StorageError),
 }
 
 /// Convenience alias used across the crate.

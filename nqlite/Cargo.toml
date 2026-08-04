@@ -17,6 +17,10 @@ nql-ir = { path = "../nql-ir" }
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Deterministic binary serialization for the single-file store (M1).
+postcard = { version = "1", features = ["alloc"] }
+# CRC-32 frame checksums for the write-ahead log.
+crc32fast = "1"
 # Pure-Rust HNSW, only compiled with the `hnsw` feature (see src/index.rs).
 fast-hnsw = { version = "1.0.1", optional = true }
 
