@@ -19,7 +19,7 @@ Keywords are case-insensitive. Whitespace/comments (`--` to end of line, `/* */`
 are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
-statement      = create_table | insert | relate | select | forget ;
+statement      = create_table | insert | relate | select | match | forget ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -38,11 +38,13 @@ forget         = 'FORGET' recordid ;
 match          = 'MATCH' '(' recordid ')' ( ('->' | '<-') ':' ident )+ ;
 
 select_list    = '*' | ident (',' ident)* ;
-where_clause   = field_equals | vector_knn | has_embedding ;
+where_clause   = field_equals | vector_knn | has_embedding | bm25 ;
 field_equals   = ident '=' value ;
 vector_knn     = 'vector::similarity' '(' 'embedding' ',' vector ')' 'AND' 'k' '=' int ;
 has_embedding  = 'embedding' 'IS' 'NOT' 'NULL' ;
-order_op       = 'similarity' | 'salience' | 'score' | 'recency' ;
+bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
+order_op       = 'similarity' | 'salience' | 'score' | 'votes' | 'feedback'
+               | 'recency' ;
 
 object         = ( ident ':' value ) ( ',' ident ':' value )* | '' ;
 value          = 'null' | 'true' | 'false' | int | float | string
@@ -55,7 +57,6 @@ vector         = '[' float (',' float)* ']' ;   (* all-float array *)
 ```
 closure        = 'CLOSURE' '(' ident ')' ;          (* transitive closure *)
 edge_props     = 'WHERE' field_equals ;             (* edge-property filter on MATCH *)
-fts            = 'WHERE' '::bm25' '(' ident ',' string ')' ;
 temporal       = 'AS' 'OF' datetime ;               (* time-travel reads *)
 memory         = 'MEMORY' ident ;                   (* core/archival/shared blocks *)
 create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
@@ -82,7 +83,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
 | `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Deterministic (see §2.5). |
-| `SELECT ... FROM t ...` | Scans table `t`; filters; optional kNN; orders deterministically; limits; returns records (+computed score). |
+| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; orders deterministically; limits; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 
 ### 2.3 SELECT pipeline (fixed order)
@@ -92,6 +93,8 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    - `field = value`: exact, deterministic equality against body value.
    - `embedding IS NOT NULL`: only records with vectors.
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
+   - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
+     ranked by BM25 relevance over the field; `k` caps the returned rows.
 3. **kNN** — cosine similarity vs query vector; keep top-K by similarity desc,
    tie-break by RecordId asc.
 4. **Order** — `ORDER BY ::op` (default: BTree order):
@@ -134,8 +137,8 @@ before a SELECT apply first, so a plan may create/insert/relate/query in one pas
 | `::votes(record)` | `(up, down, net)` counts over `:voted` edges | pure arithmetic |
 | `::feedback(record)` | time-decayed recent feedback | engine-clock only |
 | `::salience` | `α·similarity + β·strength + γ·importance + δ·score` | fixed order, no races |
-| `::bm25` (planned) | BM25 lexical score | pure arithmetic |
-| `k = N` | kNN limit | — |
+| `::bm25(field, "q")` | Okapi BM25 lexical score (k1=1.2, b=0.75); every row scored, ordered by relevance | pure arithmetic |
+| `k = N` | kNN / BM25 result cap | — |
 
 ## 4. Edges & the relation model
 
@@ -188,6 +191,9 @@ MATCH (turn:3) -> :mentions;
 -- graph: turns that mention Acme (1-hop incoming)
 MATCH (entity:acme) <- :mentions;
 
+-- lexical recall: BM25 over the turn text
+SELECT * FROM turn WHERE ::bm25(text, "acme") LIMIT 5;
+
 -- agent-side feedback: mark the recalled turn as useful
 RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;
 
@@ -200,7 +206,6 @@ SELECT * FROM turn ORDER BY ::score LIMIT 5;
 ```sql
 MATCH (turn:3) -> :mentions -> (e) WHERE confidence = 0.9;  -- edge-property filter
 CLOSURE (entity)                       -- transitive closure
-SELECT * FROM turn WHERE ::bm25(text, "acme") ORDER BY ::score;
 SELECT * FROM turn AS OF 2026-08-03T00:00:00Z;
 MEMORY core;                           -- agent memory blocks
 ```
