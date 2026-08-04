@@ -91,7 +91,7 @@ impl Server {
                 }
                 let mut out = String::new();
                 for res in &results {
-                    out.push_str(&format_select(res));
+                    out.push_str(&format_result(res));
                     out.push('\n');
                 }
                 out.push_str("OK");
@@ -102,19 +102,35 @@ impl Server {
     }
 }
 
-/// One response line for a SELECT result: the table, row count, and every row
-/// in the engine's deterministic order, ids + 4dp scores included.
-fn format_select(res: &nqlite::QueryResult) -> String {
+/// One response line for a read result (SELECT or MATCH): the statement's
+/// label, row count, and every row in the engine's deterministic order, ids +
+/// 4dp scores included.
+fn format_result(res: &nqlite::QueryResult) -> String {
+    let label = match &res.kind {
+        nqlite::QueryKind::Select(sel) => format!("SELECT {}", sel.table),
+        nqlite::QueryKind::Match(path) => {
+            let hops: Vec<String> = path
+                .steps
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}:{}",
+                        match s.direction {
+                            nql_ir::MatchDirection::Out => "->",
+                            nql_ir::MatchDirection::In => "<-",
+                        },
+                        s.name
+                    )
+                })
+                .collect();
+            format!("MATCH {} {}", path.start, hops.join(" "))
+        }
+    };
     let rows: Vec<String> = res.rows.iter().map(format_row).collect();
     if rows.is_empty() {
-        format!("SELECT {} (0 rows)", res.select.table)
+        format!("{label} (0 rows)")
     } else {
-        format!(
-            "SELECT {} ({} rows): {}",
-            res.select.table,
-            res.rows.len(),
-            rows.join("; ")
-        )
+        format!("{label} ({} rows): {}", res.rows.len(), rows.join("; "))
     }
 }
 

@@ -51,12 +51,27 @@ impl Session {
     }
 
     fn print_result(&mut self, r: &nqlite::QueryResult) -> std::io::Result<()> {
-        writeln!(
-            self.out,
-            "SELECT {} ({} rows)",
-            r.select.table,
-            r.rows.len()
-        )?;
+        let label = match &r.kind {
+            nqlite::QueryKind::Select(sel) => format!("SELECT {}", sel.table),
+            nqlite::QueryKind::Match(path) => {
+                let hops: Vec<String> = path
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{}:{}",
+                            match s.direction {
+                                nql_ir::MatchDirection::Out => "->",
+                                nql_ir::MatchDirection::In => "<-",
+                            },
+                            s.name
+                        )
+                    })
+                    .collect();
+                format!("MATCH {} {}", path.start, hops.join(" "))
+            }
+        };
+        writeln!(self.out, "{label} ({} rows)", r.rows.len())?;
         for s in &r.rows {
             let id = s.record.id.to_string();
             let fields = format_fields(&s.record.body);

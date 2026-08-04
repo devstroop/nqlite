@@ -103,6 +103,7 @@ enum StmtKind {
     Create,
     Insert,
     Relate,
+    Match,
     Select,
     Forget,
 }
@@ -223,12 +224,34 @@ fn forget_stmt() -> impl Strategy<Value = (StmtKind, String)> {
         .prop_map(|(tbl, suffix)| (StmtKind::Forget, format!("FORGET {tbl}:{suffix}")))
 }
 
+fn match_stmt() -> impl Strategy<Value = (StmtKind, String)> {
+    // One or more hops: `MATCH (t:s) -> :e <- :e ...`.
+    (table(), id_suffix(), vec(ident(), 1..3), prop::bool::ANY).prop_map(
+        |(tbl, suffix, edges, mix_directions)| {
+            let hops = edges
+                .into_iter()
+                .map(|e| {
+                    let arrow = if mix_directions && e.len() % 2 == 0 {
+                        "<-"
+                    } else {
+                        "->"
+                    };
+                    format!("{arrow} :{e}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (StmtKind::Match, format!("MATCH ({tbl}:{suffix}) {hops}"))
+        },
+    )
+}
+
 /// A single well-formed statement, plus its kind.
 fn stmt() -> impl Strategy<Value = (StmtKind, String)> {
     prop_oneof![
         create_stmt(),
         insert_stmt(),
         relate_stmt(),
+        match_stmt(),
         select_stmt(),
         forget_stmt(),
     ]
@@ -252,6 +275,7 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         Statement::CreateTable { .. } => StmtKind::Create,
         Statement::Insert(_) => StmtKind::Insert,
         Statement::Relate(_) => StmtKind::Relate,
+        Statement::Match(_) => StmtKind::Match,
         Statement::Select(_) => StmtKind::Select,
         Statement::Forget { .. } => StmtKind::Forget,
     }

@@ -82,3 +82,35 @@ fn same_input_same_output_determinism() {
     };
     assert_eq!(run(), run(), "identical runs produce identical results");
 }
+
+#[test]
+fn nql_match_traversal_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE turn;
+        CREATE TABLE note;
+        INSERT INTO turn:3 { "text": "the turn" };
+        INSERT INTO note:1 { "body": "first" };
+        INSERT INTO note:2 { "body": "second" };
+        RELATE (turn:3) -> :mentions -> (note:1) SET weight = 0.9;
+        RELATE (turn:3) -> :mentions -> (note:2) SET weight = 0.4;
+        MATCH (turn:3) -> :mentions;
+        MATCH (note:1) <- :mentions;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 2, "two MATCH statements");
+
+    // Outgoing: both notes, in edge-append order, first edge's weight.
+    let out = &results[0];
+    let ids: Vec<String> = out.rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids, ["note:1", "note:2"]);
+    assert!((out.rows[0].score - 0.9).abs() < 1e-6);
+
+    // Incoming: only note:1 points back at turn:3 via :mentions.
+    let inc = &results[1];
+    let ids: Vec<String> = inc.rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids, ["turn:3"]);
+}
