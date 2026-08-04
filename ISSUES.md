@@ -6,9 +6,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-- **ISSUE-12 — feat/graph-relations** · M0/M1
-  RELATE + 1-hop MATCH; edges with props/weight/time. (RELATE itself ships;
-  MATCH/CLOSURE traversal remains.)
+(none)
 
 ## In progress
 
@@ -44,6 +42,10 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Released (in main)
 
+- **ISSUE-12 — feat/graph-relations** · M0/M1 · PR #32
+  RELATE + 1-hop MATCH; edges with props/weight/time. `MATCH (a) -> :name <- :name`
+  (1+ hops, both directions) — IR, parser, analyzer, deterministic engine
+  traversal, `QueryKind::Match` result discriminant. CLOSURE remains planned.
 - **ISSUE-16 — feat/agent-examples** · M3 · PR #28
   Chat memory, RAG, tool-call ledger, knowledge-graph examples (agent-side
   learning; engine stays deterministic).
@@ -66,7 +68,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 | Milestone | Issues |
 |---|---|
-| M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) |
+| M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
 | M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13 (fuzzing, vector-index-HNSW, feedback, storage-wal) |
 | M2 — nql grammar real | ISSUE-5, 9, 10, 14 (grammar-spec, analyzer-planner, repl, bm25-fts) |
 | M3 — Agents & MCP | ISSUE-15, 16 (server-mcp, agent-examples) |
