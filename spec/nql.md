@@ -35,6 +35,8 @@ select         = 'SELECT' select_list 'FROM' ident
 
 forget         = 'FORGET' recordid ;
 
+match          = 'MATCH' '(' recordid ')' ( ('->' | '<-') ':' ident )+ ;
+
 select_list    = '*' | ident (',' ident)* ;
 where_clause   = field_equals | vector_knn | has_embedding ;
 field_equals   = ident '=' value ;
@@ -51,9 +53,8 @@ vector         = '[' float (',' float)* ']' ;   (* all-float array *)
 ### Planned extensions (NOT in M0 — for M2+)
 
 ```
-match          = 'MATCH' path ;                     (* graph traversal *)
-path           = '(' recordid ')' ( ('->' | '<-') ':' ident [edge_props] )+ ;
 closure        = 'CLOSURE' '(' ident ')' ;          (* transitive closure *)
+edge_props     = 'WHERE' field_equals ;             (* edge-property filter on MATCH *)
 fts            = 'WHERE' '::bm25' '(' ident ',' string ')' ;
 temporal       = 'AS' 'OF' datetime ;               (* time-travel reads *)
 memory         = 'MEMORY' ident ;                   (* core/archival/shared blocks *)
@@ -80,6 +81,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CREATE TABLE t [VECTOR<f32,N>]` | Declares table `t`; optional fixed embedding dim `N`. Re-declaring with a dim enforces it on future INSERTs. |
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
+| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Deterministic (see §2.5). |
 | `SELECT ... FROM t ...` | Scans table `t`; filters; optional kNN; orders deterministically; limits; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 
@@ -106,6 +108,21 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 A plan is a `Vec<Statement>` executed atomically in one transaction
 (single-writer, snapshot readers — M1 storage; M0 is in-memory). Statements
 before a SELECT apply first, so a plan may create/insert/relate/query in one pass.
+
+### 2.5 MATCH traversal (deterministic)
+
+- The frontier starts at the start record. A missing start record yields an
+  empty result — never an error.
+- Each step follows every edge with the given name in the given direction
+  (`->` = outgoing from a frontier record, `<-` = incoming toward it).
+- Edges are scanned in append order; reached endpoints are deduplicated by
+  `RecordId` keeping first appearance. The result rows carry the score of the
+  first edge that reached them (`weight`, or `0.0` when unset).
+- Dangling edges (endpoints never inserted) are skipped. Only the final
+  frontier is returned (path semantics — intermediate hops are not in the
+  output).
+- `CLOSURE` (transitive closure) and per-edge property filters are planned
+  extensions, not part of M0.
 
 ## 3. Operators
 
@@ -165,6 +182,12 @@ SELECT * FROM turn
 SELECT * FROM entity
   WHERE name = "Acme Corp";
 
+-- graph: every entity this turn mentions (1-hop outgoing)
+MATCH (turn:3) -> :mentions;
+
+-- graph: turns that mention Acme (1-hop incoming)
+MATCH (entity:acme) <- :mentions;
+
 -- agent-side feedback: mark the recalled turn as useful
 RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;
 
@@ -175,7 +198,7 @@ SELECT * FROM turn ORDER BY ::score LIMIT 5;
 ### 6.2 Planned syntax (M2+)
 
 ```sql
-MATCH (turn:3) -> :mentions -> (e);
+MATCH (turn:3) -> :mentions -> (e) WHERE confidence = 0.9;  -- edge-property filter
 CLOSURE (entity)                       -- transitive closure
 SELECT * FROM turn WHERE ::bm25(text, "acme") ORDER BY ::score;
 SELECT * FROM turn AS OF 2026-08-03T00:00:00Z;
@@ -191,4 +214,4 @@ MEMORY core;                           -- agent memory blocks
   reproducible. Property tests (proptest) cover "parse → plan → re-execute is
   stable" invariants.
 - The Plan/IR types live in `nql-ir` (the seam): `Statement`, `Select`, `Knn`,
-  `Filter`, `Order`, `Plan = Vec<Statement>`.
+  `Filter`, `Order`, `MatchPath`/`MatchStep`, `Plan = Vec<Statement>`.

@@ -27,6 +27,8 @@ pub enum Token {
     Comma,
     /// `->`
     Arrow,
+    /// `<-`
+    LeftArrow,
     Plus,
     /// `:`
     Colon,
@@ -162,7 +164,12 @@ impl<'a> Lexer<'a> {
             }
             Some(b'<') => {
                 self.bump();
-                Token::Lt
+                if self.peek() == Some(b'-') {
+                    self.bump();
+                    Token::LeftArrow
+                } else {
+                    Token::Lt
+                }
             }
             Some(b'>') => {
                 self.bump();

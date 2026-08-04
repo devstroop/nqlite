@@ -210,8 +210,40 @@ pub enum Statement {
     Relate(RelationEdge),
     /// Select records (optionally kNN + filter + order + limit).
     Select(Select),
+    /// Traverse the graph from a start record along named edges (1+ hops).
+    /// Deterministic: endpoints are collected in edge-append order, deduped by
+    /// `RecordId` keeping first appearance.
+    Match(MatchPath),
     /// Delete a record (and its incident edges).
     Forget { id: RecordId },
+}
+
+/// A graph traversal: start at `start`, walk `steps` in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchPath {
+    /// The record the traversal begins at. Must exist or the match is empty.
+    pub start: RecordId,
+    /// Ordered edge steps; every step must be taken (path semantics).
+    pub steps: Vec<MatchStep>,
+}
+
+/// One hop of a [`MatchPath`]: follow edges named `name` leaving/entering the
+/// current frontier, in the given direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchStep {
+    /// Which side of the edge the traversal moves across.
+    pub direction: MatchDirection,
+    /// Edge name to follow (`:mentions`, `:knows`, ...).
+    pub name: String,
+}
+
+/// Edge traversal direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchDirection {
+    /// `(a) -> :name` — outgoing edges from the frontier record.
+    Out,
+    /// `(a) <- :name` — incoming edges toward the frontier record.
+    In,
 }
 
 /// A SELECT with optional vector kNN, field filter, deterministic ordering, limit.

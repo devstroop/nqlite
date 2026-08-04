@@ -16,7 +16,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use nql_ir::{
-    Filter, Order, Record, RecordId, RelationEdge, Select, Statement, Store, Value, VoteCounts,
+    Filter, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge, Select, Statement,
+    Store, Value, VoteCounts,
 };
 
 use crate::bm25::{tokenize, Bm25Index};
@@ -33,12 +34,21 @@ pub struct ScoredRecord {
     pub score: f32,
 }
 
-/// The result of one `SELECT` statement inside a plan.
+/// What produced a [`QueryResult`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryKind {
+    /// A `SELECT` statement (with its enriched select).
+    Select(Select),
+    /// A `MATCH` graph traversal (with the path that was walked).
+    Match(MatchPath),
+}
+
+/// The result of one read statement (`SELECT` or `MATCH`) inside a plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
-    /// The select that produced this result.
-    pub select: Select,
-    /// Matching rows, ordered per the select's order/kNN semantics.
+    /// The statement that produced this result.
+    pub kind: QueryKind,
+    /// Matching rows, ordered per the statement's deterministic semantics.
     pub rows: Vec<ScoredRecord>,
 }
 
@@ -112,7 +122,14 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
         Statement::Select(sel) => {
             let rows = run_select(store, sel);
             Ok(Some(QueryResult {
-                select: sel.clone(),
+                kind: QueryKind::Select(sel.clone()),
+                rows,
+            }))
+        }
+        Statement::Match(path) => {
+            let rows = run_match(store, path);
+            Ok(Some(QueryResult {
+                kind: QueryKind::Match(path.clone()),
                 rows,
             }))
         }
@@ -193,6 +210,64 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         rows.truncate(limit);
     }
     rows
+}
+
+/// Execute a [`MatchPath`] against `store`.
+///
+/// Deterministic graph traversal: the frontier starts at `path.start` and each
+/// step moves to the other endpoint of every edge with a matching name and
+/// direction. Edges are scanned in append order; endpoints are deduplicated by
+/// [`RecordId`] keeping first appearance, so the result is a pure function of
+/// `(store, path)`. A missing start record yields an empty result (no panic),
+/// and dangling edges (endpoints never inserted) are skipped.
+fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
+    if !store.records.contains_key(&path.start) {
+        return Vec::new();
+    }
+
+    // Frontier of reached RecordIds, in deterministic (append/dedup-first)
+    // order. Scored by the edge that first reached them (weight or 0.0).
+    let mut frontier: Vec<RecordId> = vec![path.start.clone()];
+    let mut score_of: BTreeMap<RecordId, f32> = BTreeMap::new();
+    score_of.insert(path.start.clone(), 0.0);
+
+    for step in &path.steps {
+        let mut next: Vec<RecordId> = Vec::new();
+        for edge in &store.edges {
+            // Is this edge part of the current frontier, in the right direction?
+            let (from_side, to_side) = match step.direction {
+                MatchDirection::Out => (&edge.from, &edge.to),
+                MatchDirection::In => (&edge.to, &edge.from),
+            };
+            if edge.name != step.name || !frontier.contains(from_side) {
+                continue;
+            }
+            if !store.records.contains_key(to_side) {
+                continue; // dangling edge: skip
+            }
+            if !next.contains(to_side) {
+                next.push(to_side.clone());
+            }
+            // First edge to reach this endpoint wins its score.
+            if !score_of.contains_key(to_side) {
+                score_of.insert(to_side.clone(), edge.weight.unwrap_or(0.0));
+            }
+        }
+        frontier = next;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+
+    frontier
+        .into_iter()
+        .filter_map(|id| {
+            store.records.get(&id).map(|record| ScoredRecord {
+                record: record.clone(),
+                score: score_of.get(&id).copied().unwrap_or(0.0),
+            })
+        })
+        .collect()
 }
 
 /// Build the default vector index (exact brute-force) over the embeddings of
@@ -430,6 +505,7 @@ mod tests {
 
     use super::*;
     use crate::{Database, Knn};
+    use nql_ir::MatchStep;
 
     fn record(id: &str, body: BTreeMap<String, Value>, embedding: Option<Vec<f32>>) -> Record {
         Record {
@@ -923,6 +999,195 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].rows.len(), 2);
         assert_eq!(results[1].rows.len(), 3); // sees the insert in the same plan
+    }
+    // -- MATCH traversal ---------------------------------------------------
+
+    fn relate(from: &str, name: &str, to: &str, weight: Option<f32>) -> Statement {
+        Statement::Relate(RelationEdge {
+            from: RecordId::parse(from).unwrap(),
+            name: name.into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight,
+            props: BTreeMap::new(),
+        })
+    }
+
+    fn match_path(start: &str, steps: &[(MatchDirection, &str)]) -> Statement {
+        Statement::Match(MatchPath {
+            start: RecordId::parse(start).unwrap(),
+            steps: steps
+                .iter()
+                .map(|(direction, name)| MatchStep {
+                    direction: *direction,
+                    name: (*name).into(),
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn match_outgoing_returns_reached_records_in_edge_order() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:2", BTreeMap::new(), None)),
+            Statement::Insert(record("note:3", BTreeMap::new(), None)),
+            relate("person:1", "mentions", "note:2", Some(0.5)),
+            relate("person:1", "mentions", "note:1", Some(0.9)),
+            relate("person:1", "mentions", "note:3", None),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[match_path("person:1", &[(MatchDirection::Out, "mentions")])])
+            .unwrap();
+        assert!(matches!(res[0].kind, QueryKind::Match(_)));
+        // Edge-append order, deduped; scores are the first edge's weight.
+        let rows: Vec<(String, f32)> = res[0]
+            .rows
+            .iter()
+            .map(|r| (r.record.id.to_string(), r.score))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("note:2".to_string(), 0.5),
+                ("note:1".to_string(), 0.9),
+                ("note:3".to_string(), 0.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn match_incoming_returns_predecessors() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("person:2", BTreeMap::new(), None)),
+            Statement::Insert(record("note:9", BTreeMap::new(), None)),
+            relate("person:1", "mentions", "note:9", Some(0.3)),
+            relate("person:2", "mentions", "note:9", Some(0.7)),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[match_path("note:9", &[(MatchDirection::In, "mentions")])])
+            .unwrap();
+        let ids: Vec<String> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, vec!["person:1", "person:2"]);
+    }
+
+    #[test]
+    fn match_multi_hop_walks_path() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("team", None),
+            Statement::Insert(record("alice:1", BTreeMap::new(), None)),
+            Statement::Insert(record("bob:2", BTreeMap::new(), None)),
+            Statement::Insert(record("team:1", BTreeMap::new(), None)),
+            relate("alice:1", "knows", "bob:2", Some(1.0)),
+            relate("bob:2", "works_with", "team:1", Some(0.4)),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[match_path(
+                "alice:1",
+                &[
+                    (MatchDirection::Out, "knows"),
+                    (MatchDirection::Out, "works_with"),
+                ],
+            )])
+            .unwrap();
+        let rows: Vec<(String, f32)> = res[0]
+            .rows
+            .iter()
+            .map(|r| (r.record.id.to_string(), r.score))
+            .collect();
+        // Only the final frontier is returned (path semantics).
+        assert_eq!(rows, vec![("team:1".to_string(), 0.4)]);
+    }
+
+    #[test]
+    fn match_unknown_start_or_dangling_edge_is_empty() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            // Dangling edge: note:99 was never inserted.
+            relate("person:1", "mentions", "note:99", None),
+        ])
+        .unwrap();
+
+        // Unknown start record: empty, not an error.
+        let res = db
+            .execute(&[match_path(
+                "person:404",
+                &[(MatchDirection::Out, "mentions")],
+            )])
+            .unwrap();
+        assert!(res[0].rows.is_empty());
+
+        // Start exists but every edge is dangling: empty.
+        let res = db
+            .execute(&[match_path("person:1", &[(MatchDirection::Out, "mentions")])])
+            .unwrap();
+        assert!(res[0].rows.is_empty());
+    }
+
+    #[test]
+    fn match_wrong_edge_name_yields_empty() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:1", BTreeMap::new(), None)),
+            relate("person:1", "mentions", "note:1", None),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[match_path("person:1", &[(MatchDirection::Out, "likes")])])
+            .unwrap();
+        assert!(res[0].rows.is_empty());
+    }
+
+    #[test]
+    fn match_dedupes_repeated_targets() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:1", BTreeMap::new(), None)),
+            relate("person:1", "mentions", "note:1", Some(0.2)),
+            relate("person:1", "mentions", "note:1", Some(0.8)),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[match_path("person:1", &[(MatchDirection::Out, "mentions")])])
+            .unwrap();
+        let rows: Vec<(String, f32)> = res[0]
+            .rows
+            .iter()
+            .map(|r| (r.record.id.to_string(), r.score))
+            .collect();
+        // Deduped, first edge's weight wins.
+        assert_eq!(rows, vec![("note:1".to_string(), 0.2)]);
     }
 }
 
