@@ -113,7 +113,7 @@ pub struct Record {
 
 /// The full "database" snapshot a query runs against. In M0 this is in-memory;
 /// M1 makes it the on-disk single-file store + WAL.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Store {
     pub records: BTreeMap<RecordId, Record>,
     pub edges: Vec<RelationEdge>,
