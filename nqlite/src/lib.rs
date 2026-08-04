@@ -25,11 +25,13 @@
 //! approximate search can miss true neighbours. To swap the retrieval
 //! strategy, replace the concrete index in `engine::build_default_index`.
 
+pub mod bm25;
 pub mod engine;
 pub mod error;
 pub mod index;
 pub mod storage;
 
+pub use bm25::{tokenize, Bm25Index, B, K1};
 pub use engine::{cosine_similarity, execute_plan, execute_statement, QueryResult, ScoredRecord};
 pub use error::{Error, Result};
 #[cfg(feature = "hnsw")]

@@ -19,6 +19,7 @@ use nql_ir::{
     Filter, Order, Record, RecordId, RelationEdge, Select, Statement, Store, Value, VoteCounts,
 };
 
+use crate::bm25::{tokenize, Bm25Index};
 use crate::error::{Error, Result};
 use crate::index::{BruteForceVectorIndex, VectorIndex};
 
@@ -164,10 +165,24 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
             .collect()
     });
 
+    // A `Filter::Bm25` turns the SELECT into lexical retrieval: build one
+    // deterministic BM25 index over the filtered candidates' text field and
+    // score every row with it (records missing the field / without a `Str`
+    // value score 0.0). The index is rebuilt per call, so the result stays a
+    // pure function of `(store, select)`.
+    let bm25: Option<(Bm25Index, Vec<String>)> = match sel.filter.as_ref() {
+        Some(Filter::Bm25 { field, query, .. }) => {
+            let index = Bm25Index::new(field, candidates.iter());
+            let query_tokens = tokenize(query);
+            Some((index, query_tokens))
+        }
+        _ => None,
+    };
+
     let mut rows: Vec<ScoredRecord> = candidates
         .into_iter()
         .map(|record| {
-            let score = compute_score(store, sel, &record, knn_sims.as_ref());
+            let score = compute_score(store, sel, &record, knn_sims.as_ref(), bm25.as_ref());
             ScoredRecord { record, score }
         })
         .collect();
@@ -211,9 +226,13 @@ fn order_rows(rows: &mut [ScoredRecord], sel: &Select) {
     }
 
     // A kNN clause orders by similarity even without an explicit ORDER BY;
-    // any other explicit order sorts by its score. With no order and no kNN,
+    // a `Filter::Bm25` likewise orders by its lexical score. Any other
+    // explicit order sorts by its score. With no order, no kNN and no BM25,
     // rows stay in BTree key order (already sorted by RecordId).
-    if sel.order.is_some() || sel.knn.is_some() {
+    if sel.order.is_some()
+        || sel.knn.is_some()
+        || matches!(sel.filter.as_ref(), Some(Filter::Bm25 { .. }))
+    {
         rows.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -223,30 +242,37 @@ fn order_rows(rows: &mut [ScoredRecord], sel: &Select) {
     }
 }
 
-/// The effective row cap: the smaller of `knn.k` (when present) and
-/// `select.limit`.
+/// The effective row cap: the smaller of `knn.k`, `Filter::Bm25.k` (when
+/// present) and `select.limit`.
 fn effective_limit(sel: &Select) -> Option<usize> {
-    match (sel.knn.as_ref().map(|k| k.k), sel.limit) {
-        (Some(k), Some(l)) => Some(k.min(l)),
-        (Some(k), None) => Some(k),
-        (None, limit) => limit,
-    }
+    let knn_k = sel.knn.as_ref().map(|k| k.k);
+    let bm25_k = match sel.filter.as_ref() {
+        Some(Filter::Bm25 { k: Some(k), .. }) => Some(*k),
+        _ => None,
+    };
+    let caps: Vec<usize> = [knn_k, bm25_k, sel.limit].into_iter().flatten().collect();
+    caps.into_iter().min()
 }
 
 /// Apply the select's field filter. `FieldEquals` uses the derived `PartialEq`
 /// on [`Value`] (exact, deterministic equality); `HasEmbedding` requires a
-/// non-`None` embedding.
+/// non-`None` embedding. `Bm25` is a *scoring* filter: it never prunes rows —
+/// every row of the table is returned and ranked by its lexical score.
 fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
     match filter {
         None => true,
         Some(Filter::HasEmbedding) => rec.embedding.is_some(),
         Some(Filter::FieldEquals { field, value }) => rec.body.get(field) == Some(value),
+        Some(Filter::Bm25 { .. }) => true,
     }
 }
 
 /// Compute the per-row match score, which doubles as the sort key for
 /// score-based orders:
 ///
+/// - `Filter::Bm25` → the record's BM25 lexical score (see [`Bm25Index`]);
+///   this overrides any explicit order, matching the operator's "rank by
+///   relevance" semantics.
 /// - `Order::Score` → Laplace-smoothed mean of the `:voted` edge weights
 ///   pointing at the record: `(sum + 1) / (n + 2)` — `0.5` with zero votes.
 /// - `Order::Votes` → net up−down vote count (see [`vote_counts`]).
@@ -263,7 +289,17 @@ fn compute_score(
     sel: &Select,
     rec: &Record,
     knn_sims: Option<&BTreeMap<RecordId, f32>>,
+    bm25: Option<&(Bm25Index, Vec<String>)>,
 ) -> f32 {
+    // A BM25 filter is the dominant score source: every row is ranked by its
+    // lexical relevance regardless of ORDER BY / kNN.
+    if let (Some(Filter::Bm25 { field, .. }), Some((index, query_tokens))) =
+        (sel.filter.as_ref(), bm25)
+    {
+        debug_assert_eq!(index.field(), field, "index built for the filter's field");
+        return index.score(&rec.id, query_tokens);
+    }
+
     let similarity = match &sel.knn {
         Some(_) => match knn_sims {
             Some(sims) => sims.get(&rec.id).copied().unwrap_or(0.0),
@@ -986,5 +1022,257 @@ mod feedback_tests {
     fn id_imports_work() {
         // guard: Id import stays usable (numeric id construction)
         let _ = Id::Num(1);
+    }
+}
+
+#[cfg(test)]
+mod bm25_engine_tests {
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Filter, Plan, Record, RecordId, Select, Statement, Value};
+
+    use crate::Database;
+
+    fn record(id: &str, body: BTreeMap<String, Value>) -> Record {
+        Record {
+            id: RecordId::parse(id).unwrap(),
+            body,
+            embedding: None,
+            created_at: 0,
+        }
+    }
+
+    fn str_(s: &str) -> Value {
+        Value::Str(s.to_string())
+    }
+
+    fn create(table: &str) -> Statement {
+        Statement::CreateTable {
+            table: table.to_string(),
+            vector_dim: None,
+        }
+    }
+
+    fn bm25_select(table: &str, field: &str, query: &str, k: Option<usize>) -> Statement {
+        Statement::Select(Select {
+            table: table.to_string(),
+            filter: Some(Filter::Bm25 {
+                field: field.to_string(),
+                query: query.to_string(),
+                k,
+            }),
+            ..Select::default()
+        })
+    }
+
+    #[test]
+    fn bm25_ranks_term_dense_above_sparse_and_k_limits_rows() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            Statement::Insert(record(
+                "doc:dense",
+                BTreeMap::from([("text".into(), str_("rust rust rust rust rust"))]),
+            )),
+            Statement::Insert(record(
+                "doc:sparse",
+                BTreeMap::from([("text".into(), str_("rust is a systems language"))]),
+            )),
+            Statement::Insert(record(
+                "doc:other",
+                BTreeMap::from([("text".into(), str_("completely unrelated topic"))]),
+            )),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[bm25_select("doc", "text", "rust", None)])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:dense", "doc:sparse", "doc:other"]);
+        assert!(res[0].rows[0].score > res[0].rows[1].score);
+        assert!(res[0].rows[1].score > res[0].rows[2].score);
+        assert_eq!(res[0].rows[2].score, 0.0); // no matching term
+
+        // `k` caps the number of returned rows, densest first.
+        let res = db
+            .execute(&[bm25_select("doc", "text", "rust", Some(1))])
+            .unwrap();
+        assert_eq!(res[0].rows.len(), 1);
+        assert_eq!(res[0].rows[0].record.id.to_string(), "doc:dense");
+    }
+
+    #[test]
+    fn bm25_returns_only_rows_of_the_selected_table() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("note"),
+            create("log"),
+            Statement::Insert(record(
+                "note:1",
+                BTreeMap::from([("text".into(), str_("meeting notes about rust"))]),
+            )),
+            Statement::Insert(record(
+                "log:1",
+                BTreeMap::from([("text".into(), str_("rust build log entry"))]),
+            )),
+            Statement::Insert(record(
+                "log:2",
+                BTreeMap::from([("text".into(), str_("rust rust rust"))]),
+            )),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[bm25_select("note", "text", "rust", None)])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["note:1"], "only `note` table rows are returned");
+        assert!(res[0].rows[0].score > 0.0);
+
+        let res = db
+            .execute(&[bm25_select("log", "text", "rust", None)])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["log:2", "log:1"]);
+    }
+
+    #[test]
+    fn bm25_empty_query_returns_all_rows_with_zero_score() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            Statement::Insert(record(
+                "doc:1",
+                BTreeMap::from([("text".into(), str_("hello"))]),
+            )),
+            Statement::Insert(record(
+                "doc:2",
+                BTreeMap::from([("text".into(), str_("world"))]),
+            )),
+        ])
+        .unwrap();
+
+        let res = db.execute(&[bm25_select("doc", "text", "", None)]).unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        // Empty query: every row is returned (BTree key order), all scored 0.
+        assert_eq!(ids, ["doc:1", "doc:2"]);
+        assert!(res[0].rows.iter().all(|r| r.score == 0.0));
+    }
+
+    #[test]
+    fn bm25_missing_or_non_str_field_scores_zero_and_orders_last() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            Statement::Insert(record(
+                "doc:hit",
+                BTreeMap::from([("text".into(), str_("needle in the haystack"))]),
+            )),
+            Statement::Insert(record(
+                "doc:missing",
+                BTreeMap::from([("other".into(), str_("needle"))]),
+            )),
+            Statement::Insert(record(
+                "doc:nonstr",
+                BTreeMap::from([("text".into(), Value::Int(7))]),
+            )),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[bm25_select("doc", "text", "needle", None)])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:hit", "doc:missing", "doc:nonstr"]);
+        assert!(res[0].rows[0].score > 0.0);
+        // Missing / non-Str field records are returned (Bm25 never prunes)
+        // but score 0.0 and therefore sort below the hit.
+        assert_eq!(res[0].rows[1].score, 0.0);
+        assert_eq!(res[0].rows[2].score, 0.0);
+    }
+
+    #[test]
+    fn bm25_same_plan_on_equal_stores_yields_equal_results() {
+        let plan: Plan = vec![
+            create("doc"),
+            Statement::Insert(record(
+                "doc:1",
+                BTreeMap::from([("text".into(), str_("the quick brown fox jumps"))]),
+            )),
+            Statement::Insert(record(
+                "doc:2",
+                BTreeMap::from([("text".into(), str_("lazy dog fox"))]),
+            )),
+            Statement::Insert(record(
+                "doc:3",
+                BTreeMap::from([("text".into(), str_("nothing to see here"))]),
+            )),
+            bm25_select("doc", "text", "fox dog", None),
+        ];
+
+        let run = || {
+            let mut db = Database::default();
+            db.execute(&plan).unwrap()
+        };
+
+        let a = run();
+        let b = run();
+        assert_eq!(a, b);
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        // Sanity: ranking is non-trivial and stable across runs.
+        let scores: Vec<f32> = a[0].rows.iter().map(|r| r.score).collect();
+        assert_eq!(
+            scores,
+            b[0].rows.iter().map(|r| r.score).collect::<Vec<_>>()
+        );
+        assert!(scores.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[test]
+    fn bm25_combines_with_limit_and_order_stays_score_first() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            Statement::Insert(record(
+                "doc:1",
+                BTreeMap::from([("text".into(), str_("alpha alpha alpha"))]),
+            )),
+            Statement::Insert(record(
+                "doc:2",
+                BTreeMap::from([("text".into(), str_("alpha alpha"))]),
+            )),
+        ])
+        .unwrap();
+
+        // Explicit LIMIT 1 + Bm25: score ordering wins, then the cap applies.
+        let mut sel = match bm25_select("doc", "text", "alpha", None) {
+            Statement::Select(s) => s,
+            _ => unreachable!(),
+        };
+        sel.limit = Some(1);
+        let res = db.execute(&[Statement::Select(sel)]).unwrap();
+        assert_eq!(res[0].rows.len(), 1);
+        assert_eq!(res[0].rows[0].record.id.to_string(), "doc:1");
     }
 }
