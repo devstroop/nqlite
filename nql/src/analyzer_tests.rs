@@ -2,7 +2,9 @@
 //! contract, SELECT enrichment, record-id shape checks, and error messages.
 
 use crate::analyzer::{AnalysisError, Analyzer};
-use nql_ir::{Id, Knn, Order, Record, RecordId, Select, Statement};
+use nql_ir::{
+    Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Record, RecordId, Select, Statement,
+};
 use std::collections::BTreeMap;
 
 fn create(table: &str, dim: Option<usize>) -> Statement {
@@ -196,5 +198,33 @@ fn forget_with_empty_string_id_errors() {
         id: RecordId::new("t", Id::Str(String::new())),
     }];
     let err = Analyzer::analyze(&plan).expect_err("empty id string must fail");
+    assert!(matches!(err, AnalysisError::EmptyId { .. }));
+}
+
+#[test]
+fn match_analyzes_without_table_declaration() {
+    // MATCH is graph traversal, not a table read: it validates the start
+    // record's id shape but requires no CREATE TABLE and no built-in table.
+    let stmt = Statement::Match(MatchPath {
+        start: RecordId::new("note", Id::Num(1)),
+        steps: vec![MatchStep {
+            direction: MatchDirection::Out,
+            name: "mentions".into(),
+        }],
+    });
+    let out = Analyzer::analyze_statement(&stmt).expect("standalone MATCH analyzes");
+    assert_eq!(out, stmt, "MATCH passes through unchanged");
+}
+
+#[test]
+fn match_with_empty_id_string_errors() {
+    let stmt = Statement::Match(MatchPath {
+        start: RecordId::new("note", Id::Str(String::new())),
+        steps: vec![MatchStep {
+            direction: MatchDirection::Out,
+            name: "mentions".into(),
+        }],
+    });
+    let err = Analyzer::analyze_statement(&stmt).expect_err("empty id string must fail");
     assert!(matches!(err, AnalysisError::EmptyId { .. }));
 }

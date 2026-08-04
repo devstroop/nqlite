@@ -84,6 +84,12 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
 - D2. Graph in v1: yes — relations + traversal are core to the pitch. Traversal
   scope (1-hop MATCH vs recursive CLOSURE/transitive closure) TBD by milestone.
   **RESOLVED**: 1-hop MATCH in M0; recursive CLOSURE added in M1 (graph core).
+  **LANDED (2026-08-04)**: `MATCH (a) -> :name <- :name ...` (1+ hops, both
+  directions) in nql-ir (`MatchPath`/`MatchStep`), parser, analyzer, and engine.
+  Deterministic: edges scanned in append order, endpoints deduped keeping first
+  appearance, missing start record => empty result, dangling edges skipped.
+  `QueryResult` gained a `QueryKind` discriminant (Select | Match). CLOSURE
+  remains planned.
 - D3. Forgetting/decay: agent-driven `FORGET` + deterministic time-decay operator
   — in v1. LLM-driven compaction: NEVER in engine; document why.
   **RESOLVED**: `FORGET`/decay are engine operators (deterministic). Compaction

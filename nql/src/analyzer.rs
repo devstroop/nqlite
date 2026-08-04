@@ -132,6 +132,10 @@ impl Ctx {
                 validate_record_id(&edge.to)?;
                 Ok(stmt.clone())
             }
+            Statement::Match(path) => {
+                validate_record_id(&path.start)?;
+                Ok(stmt.clone())
+            }
             Statement::Select(sel) => {
                 if !self.declared.contains(&sel.table) {
                     return Err(AnalysisError::UnknownTableForSelect {

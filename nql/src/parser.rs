@@ -21,7 +21,8 @@
 
 use crate::lexer::{tokenize, Spanned, Token};
 use nql_ir::{
-    Filter, Id, Knn, Order, Plan, Record, RecordId, RelationEdge, Select, Statement, Value,
+    Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Plan, Record, RecordId,
+    RelationEdge, Select, Statement, Value,
 };
 use std::collections::BTreeMap;
 
@@ -209,10 +210,11 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("create") => self.parse_create(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("insert") => self.parse_insert(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("relate") => self.parse_relate(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("match") => self.parse_match(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, SELECT, FORGET), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, SELECT, FORGET), found {}",
                 describe(other)
             ))),
         }
@@ -308,6 +310,35 @@ impl Parser {
             weight,
             props,
         }))
+    }
+
+    fn parse_match(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("match", "MATCH")?;
+        self.expect_token(Token::LParen, "`(` before start record")?;
+        let start = self.parse_record_id()?;
+        self.expect_token(Token::RParen, "`)` after start record")?;
+
+        let mut steps = Vec::new();
+        loop {
+            let direction = if matches!(self.peek_tok(), Token::Arrow) {
+                self.bump();
+                MatchDirection::Out
+            } else if matches!(self.peek_tok(), Token::LeftArrow) {
+                self.bump();
+                MatchDirection::In
+            } else {
+                break;
+            };
+            if matches!(self.peek_tok(), Token::Colon) {
+                self.bump();
+            }
+            let name = self.expect_ident("edge name after `->`/`<-`")?;
+            steps.push(MatchStep { direction, name });
+        }
+        if steps.is_empty() {
+            return Err(self.err_here("MATCH requires at least one edge step (`-> :name`)"));
+        }
+        Ok(Statement::Match(MatchPath { start, steps }))
     }
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {
@@ -623,6 +654,7 @@ fn describe(t: &Token) -> String {
         Token::Semi => "`;`".into(),
         Token::Comma => "`,`".into(),
         Token::Arrow => "`->`".into(),
+        Token::LeftArrow => "`<-`".into(),
         Token::Plus => "`+`".into(),
         Token::Colon => "`:`".into(),
         Token::DoubleColon => "`::`".into(),

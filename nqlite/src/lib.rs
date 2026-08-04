@@ -32,7 +32,9 @@ pub mod index;
 pub mod storage;
 
 pub use bm25::{tokenize, Bm25Index, B, K1};
-pub use engine::{cosine_similarity, execute_plan, execute_statement, QueryResult, ScoredRecord};
+pub use engine::{
+    cosine_similarity, execute_plan, execute_statement, QueryKind, QueryResult, ScoredRecord,
+};
 pub use error::{Error, Result};
 #[cfg(feature = "hnsw")]
 pub use index::HnswVectorIndex;

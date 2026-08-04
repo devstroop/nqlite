@@ -2,7 +2,7 @@
 //! error paths. All assertions are on the parsed IR (`nql_ir::Plan`).
 
 use crate::{parse, parse_statement, NqlError};
-use nql_ir::{Filter, Id, Knn, Order, RecordId, Select, Statement, Value};
+use nql_ir::{Filter, Id, Knn, MatchDirection, Order, RecordId, Select, Statement, Value};
 use std::collections::BTreeMap;
 
 fn rid(s: &str) -> RecordId {
@@ -126,6 +126,61 @@ fn relate_without_set() {
     assert_eq!(e.name, "mentions");
     assert_eq!(e.weight, None);
     assert!(e.props.is_empty());
+}
+
+#[test]
+fn match_outgoing_one_hop() {
+    let plan = parse("MATCH (turn:3) -> :mentions").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match, got {:?}", plan[0]);
+    };
+    assert_eq!(p.start, rid("turn:3"));
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].direction, MatchDirection::Out);
+    assert_eq!(p.steps[0].name, "mentions");
+}
+
+#[test]
+fn match_incoming_one_hop() {
+    let plan = parse("MATCH (note:42) <- :mentions").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match, got {:?}", plan[0]);
+    };
+    assert_eq!(p.start, rid("note:42"));
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].direction, MatchDirection::In);
+    assert_eq!(p.steps[0].name, "mentions");
+}
+
+#[test]
+fn match_multi_hop_path() {
+    let plan = parse("MATCH (a:1) -> :knows -> :works_with <- :knows").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match, got {:?}", plan[0]);
+    };
+    assert_eq!(p.start, rid("a:1"));
+    let dirs: Vec<MatchDirection> = p.steps.iter().map(|s| s.direction).collect();
+    let names: Vec<&str> = p.steps.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        dirs,
+        vec![MatchDirection::Out, MatchDirection::Out, MatchDirection::In]
+    );
+    assert_eq!(names, vec!["knows", "works_with", "knows"]);
+}
+
+#[test]
+fn match_requires_edge_step() {
+    let err = parse("MATCH (a:1)").unwrap_err();
+    assert!(
+        err.to_string().contains("at least one edge step"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn match_is_case_insensitive_keyword() {
+    let plan = parse("match (a:1) -> :likes").unwrap();
+    assert!(matches!(&plan[0], Statement::Match(_)));
 }
 
 #[test]
