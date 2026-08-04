@@ -9,16 +9,6 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 - **ISSUE-12 — feat/graph-relations** · M0/M1
   RELATE + 1-hop MATCH; edges with props/weight/time. (RELATE itself ships;
   MATCH/CLOSURE traversal remains.)
-- **ISSUE-13 — feat/storage-wal** · M1
-  Single-file format + sidecar WAL; ACID (single-writer, snapshot readers);
-  crash-safe open. The big one — real persistence.
-- **ISSUE-14 — feat/bm25-fts** · M2
-  Deterministic BM25 lexical index (`::bm25` operator).
-- **ISSUE-15 — feat/server-mcp** · M3
-  Network server mode + MCP server so agents can talk to nqlite over MCP.
-- **ISSUE-16 — feat/agent-examples** · M3
-  Chat memory, RAG, tool-call ledger, knowledge-graph examples (agent-side
-  learning; engine stays deterministic).
 
 ## In progress
 
@@ -54,6 +44,16 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Released (in main)
 
+- **ISSUE-16 — feat/agent-examples** · M3 · PR #28
+  Chat memory, RAG, tool-call ledger, knowledge-graph examples (agent-side
+  learning; engine stays deterministic).
+- **ISSUE-15 — feat/server-mcp** · M3 · PR #27
+  Network server mode + MCP server so agents can talk to nqlite over MCP.
+- **ISSUE-14 — feat/bm25-fts** · M2 · PR #26
+  Deterministic BM25 lexical index (`::bm25` operator).
+- **ISSUE-13 — feat/storage-wal** · M1 · PR #25
+  Single-file format + sidecar WAL; ACID (single-writer, snapshot readers);
+  crash-safe open. The big one — real persistence.
 - **ISSUE-2 — feat/ir-plan** · M0 · PR #1
   Plan/Statement contract — the nql↔nqlite seam.
 - **ISSUE-1 — feat/ir-value-types** · M0 · baseline
