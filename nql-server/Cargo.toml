@@ -1,0 +1,15 @@
+[package]
+name = "nql-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic line-protocol nql server (TCP + stdio) for nqlite."
+
+[[bin]]
+name = "nql-server"
+path = "src/main.rs"
+
+[dependencies]
+nql = { path = "../nql" }
+nql-ir = { path = "../nql-ir" }
+nqlite = { path = "../nqlite" }
