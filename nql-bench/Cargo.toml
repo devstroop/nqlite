@@ -1,0 +1,16 @@
+[package]
+name = "nql-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic cross-DB benchmark runner: emits JSON timings for nqlite on a fixed synthetic corpus."
+
+[[bin]]
+name = "nql-bench"
+path = "src/main.rs"
+
+[dependencies]
+nql-ir = { path = "../nql-ir" }
+nqlite = { path = "../nqlite" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

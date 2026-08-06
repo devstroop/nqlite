@@ -3,7 +3,7 @@
 Version: 0.1 (M0 slice) · Status: living spec — implementers target this file;
 changes here are contract changes (PRs that alter grammar must update this file).
 
-nql is the query language of **nqlite**, a deterministic, zero-LLM neural
+nql is the query language of **nqlite**, a deterministic, zero-LLM
 database. nql expresses records, typed relations (graph), embeddings, temporal
 context, and hybrid retrieval in ONE grammar. The engine never calls an LLM;
 vectors are BYO (agent-supplied `f32` arrays). This file defines the grammar
@@ -41,11 +41,12 @@ path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
 edge_props     = 'WHERE' field_equals ;
 
 select_list    = '*' | ident (',' ident)* ;
-where_clause   = field_equals | vector_knn | has_embedding | bm25 ;
+where_clause   = field_equals | vector_knn | has_embedding | bm25 | hybrid ;
 field_equals   = ident '=' value ;
 vector_knn     = 'vector::similarity' '(' 'embedding' ',' vector ')' 'AND' 'k' '=' int ;
 has_embedding  = 'embedding' 'IS' 'NOT' 'NULL' ;
 bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
+hybrid         = bm25 'AND' vector_knn | vector_knn 'AND' bm25 ;
 order_op       = 'similarity' | 'salience' | 'score' | 'votes' | 'feedback'
                | 'recency' ;
 
@@ -97,16 +98,25 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
    - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
      ranked by BM25 relevance over the field; `k` caps the returned rows.
+   - `hybrid`: `::bm25(field, "query") AND vector::similarity(embedding, $q)
+     AND k = N` (or the clauses in either order) — both signals are computed
+     and fused (see §2.6).
 3. **kNN** — cosine similarity vs query vector; keep top-K by similarity desc,
    tie-break by RecordId asc.
-4. **Order** — `ORDER BY ::op` (default: BTree order):
+4. **Fusion** — when both `::bm25` and `vector::similarity` are present, each
+   row's final score is the reciprocal-rank fusion (RRF) of its rank in the
+   lexical list and its rank in the vector list: `1/(60 + rank_lex) +
+   1/(60 + rank_vec)`, ranks 1-based, ties broken by RecordId asc (see §2.6).
+5. **Order** — `ORDER BY ::op` (default: BTree order):
    - `::similarity` — cosine desc (requires kNN query).
    - `::salience` — `α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
      with deterministic engine defaults (α..δ are AGENT-side knobs, not engine
      config); without a kNN query, salience reduces to the feedback term.
    - `::score` — Laplace-smoothed mean over `:voted` edges, desc.
    - `::recency` — `created_at` desc.
-5. **Limit** — keep first N.
+   (Hybrid queries always order by the fused score; explicit `ORDER BY` is
+   ignored in that mode.)
+6. **Limit** — keep first N (or the kNN/BM25 `k` cap, whichever is smallest).
 
 ### 2.4 Transactions
 
@@ -132,6 +142,21 @@ before a SELECT apply first, so a plan may create/insert/relate/query in one pas
   any number of hops) before the next step begins; every record ever reached —
   including the start — is returned once in first-visit order, scored by BFS
   depth (0 = start). Cycles are handled by dedup.
+
+### 2.6 Hybrid retrieval (lexical + vector fusion)
+
+`WHERE ::bm25(field, "q") AND vector::similarity(embedding, $v) AND k = N`
+(and the reverse clause order) computes BOTH signals over the table's rows
+and fuses them with reciprocal-rank fusion (RRF):
+
+- Each row gets a rank in the lexical list (BM25 score desc, RecordId asc
+  tie-break) and a rank in the vector list (cosine similarity desc, RecordId
+  asc tie-break).
+- Fused score = `1/(60 + rank_lex) + 1/(60 + rank_vec)` — deterministic,
+  scale-free, and bounded; a row strong in both signals outranks a row strong
+  in only one.
+- The fused score is the sort key (explicit `ORDER BY` is ignored); the row
+  cap is the smallest of `k`, the BM25 `k`, and `LIMIT`.
 
 ## 3. Operators
 
@@ -205,6 +230,11 @@ CLOSURE (turn:3) -> :follows_from;
 
 -- lexical recall: BM25 over the turn text
 SELECT * FROM turn WHERE ::bm25(text, "acme") LIMIT 5;
+
+-- hybrid recall: lexical + semantic fused (both signals matter)
+SELECT * FROM turn
+  WHERE ::bm25(text, "acme") AND vector::similarity(embedding, [0.5, -1.0, 2.5])
+  AND k = 5;
 
 -- agent-side feedback: mark the recalled turn as useful
 RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;

@@ -5,8 +5,9 @@ this is the living roadmap. README.md is the state-independent overview;
 this file drives work. Research findings that sharpen these milestones are
 captured under `docs/`.
 
-Goal: a deterministic, serverless, context-first neural database — SQLite
-ergonomics, one embedded file, ACID, zero-LLM-dependency in the engine.
+Goal: a deterministic, serverless, context-first database for AI agents —
+"SQLite for AI memory": SQLite ergonomics, one embedded file, ACID,
+zero-LLM-dependency in the engine. (Framing: see docs/positioning.md.)
 
 ---
 

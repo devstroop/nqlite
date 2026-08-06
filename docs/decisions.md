@@ -10,6 +10,11 @@ embedded file, ACID, deterministic, offline — for storing AI agents' contexts,
 their relationships, and their neural signals (embeddings), so that agents can
 read and write their own evolving context during a live conversation.
 
+> **Terminology note (2026-08-04)**: "neural" here means *embeddings are
+> first-class data* — nothing in the engine learns (see §4 and
+> [positioning.md](positioning.md)). Public framing prefers "SQLite for AI
+> memory"; the design intent is unchanged.
+
 ## 1. Non-negotiable principles (locked)
 
 1. **The engine is 100% deterministic and NEVER depends on an LLM, now or in the

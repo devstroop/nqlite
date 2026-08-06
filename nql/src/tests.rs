@@ -342,6 +342,83 @@ fn select_unknown_double_colon_operator_errors() {
 }
 
 #[test]
+fn select_hybrid_bm25_then_knn() {
+    // Hybrid retrieval: lexical + vector in one WHERE (bm25 first).
+    let plan = parse(
+        r#"SELECT * FROM doc WHERE ::bm25(text, "acme") AND vector::similarity(embedding, [0.5, -1.0, 2.5]) AND k = 5"#,
+    )
+    .unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::Bm25 {
+            field: "text".into(),
+            query: "acme".into(),
+            k: None,
+        })
+    );
+    assert_eq!(
+        s.knn,
+        Some(Knn {
+            query: vec![0.5, -1.0, 2.5],
+            k: 5,
+        })
+    );
+}
+
+#[test]
+fn select_hybrid_knn_then_bm25() {
+    // Hybrid retrieval: vector first, then lexical.
+    let plan = parse(
+        r#"SELECT * FROM doc WHERE vector::similarity(embedding, [0.5, -1.0]) AND k = 3 AND ::bm25(text, "acme") AND k = 7"#,
+    )
+    .unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.knn,
+        Some(Knn {
+            query: vec![0.5, -1.0],
+            k: 3,
+        })
+    );
+    assert_eq!(
+        s.filter,
+        Some(Filter::Bm25 {
+            field: "text".into(),
+            query: "acme".into(),
+            k: Some(7),
+        })
+    );
+}
+
+#[test]
+fn select_bm25_alone_keeps_no_knn() {
+    // The bm25 `AND k = N` cap must NOT be misparsed as a knn clause.
+    let plan = parse(r#"SELECT * FROM doc WHERE ::bm25(text, "acme") AND k = 5"#).unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(
+        s.knn.is_none(),
+        "k cap belongs to bm25, got knn: {:?}",
+        s.knn
+    );
+}
+
+#[test]
+fn select_hybrid_requires_bm25_after_knn_and() {
+    let err = parse(
+        r#"SELECT * FROM doc WHERE vector::similarity(embedding, [0.5]) AND k = 3 AND ::bogus(text, "q")"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("::bogus"), "got: {err}");
+}
+
+#[test]
 fn forget_record() {
     let plan = parse("FORGET person:42").unwrap();
     assert_eq!(

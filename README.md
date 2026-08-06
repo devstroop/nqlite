@@ -1,6 +1,7 @@
 # nqlite
 
-**A context-first, neural, serverless database for AI agents.**
+**A context-first, deterministic, serverless database for AI agents — SQLite for
+AI memory.**
 
 nqlite is an embedded database — one file, SQLite-style ergonomics — that stores
 records, typed graph relations, embedding vectors, and temporal context under a
@@ -8,6 +9,9 @@ single deterministic, **zero-LLM**, ACID transaction. It is built to be the
 durable memory and context substrate for AI agents: the agent decides what to
 write, relate, embed, and recall during a conversation; nqlite faithfully, safely,
 and reproducibly holds the agent's chained context — offline, forever.
+
+*"Neural" here means embeddings are first-class data — nothing in the engine
+learns. For the full framing, see [docs/positioning.md](docs/positioning.md).*
 
 [![GitHub](https://img.shields.io/badge/github-devstroop%2Fnqlite-181717?logo=github)](https://github.com/devstroop/nqlite)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -26,6 +30,7 @@ and reproducibly holds the agent's chained context — offline, forever.
 - [Architecture](#architecture)
 - [Performance](#performance)
 - [Design & research](#design--research)
+- [Positioning](#positioning)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -63,10 +68,15 @@ This gives you:
   and provenance; one transaction across records + vectors + edges.
 - **Deterministic retrieval** — lexical + vector + graph in one query:
   - `vector::similarity(...)` / `ORDER BY ::similarity` — cosine kNN
+  - `::bm25(field, "query")` — BM25 lexical scoring
+  - `::bm25(...) AND vector::similarity(...)` — hybrid retrieval, both
+    signals fused with reciprocal-rank fusion (deterministic)
   - `ORDER BY ::salience` — `α·similarity + β·strength + γ·importance + δ·feedback`
   - `ORDER BY ::score` — Laplace-smoothed mean of `:voted` feedback edges
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering
+- **Graph traversal** — `MATCH` (1+ hops, both directions, per-step edge
+  property filters) and `CLOSURE` (transitive closure, BFS-depth scores).
 - **Embedded & serverless** — a single file; open a path, start recall.
   Network server mode (line protocol, TCP or stdio) and an MCP server
   (`nql-mcp`) are built in.
@@ -234,10 +244,22 @@ These are **the engine only** (no LLM in the path) — the honest numbers.
 - **[docs/decisions.md](docs/decisions.md)** — the non-negotiables, mental model,
   and every design decision D1–D9 (incl. votes-as-edges, Laplace `::score`,
   vector-strategy).
+- **[docs/positioning.md](docs/positioning.md)** — the pitch and framing:
+  what nqlite is/isn't, the "SQLite for AI memory" story, honest comparisons,
+  terminology.
 - **[docs/research.md](docs/research.md)** — external research + sources:
   agent-memory systems, embedded/vector engines, query-language design.
 - **[docs/comparison.md](docs/comparison.md)** — how nqlite sits vs sqlite-vec,
   LanceDB, Chroma, and SurrealDB.
+
+## Positioning
+
+nqlite is **SQLite for AI memory**: the deterministic, single-file context
+store that agents write into and recall from — not a vector DB with a graph
+bolted on, and not a "neural" engine that learns. Embeddings are first-class
+data (BYO), learning lives in the agent above the DB, and everything the
+engine does is byte-deterministic. The full pitch, honest comparisons, and
+terminology live in **[docs/positioning.md](docs/positioning.md)**.
 
 ## Roadmap
 

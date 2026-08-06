@@ -212,3 +212,34 @@ fn nql_closure_and_edge_props_end_to_end() {
         .collect();
     assert_eq!(ids, ["entity:acme"]);
 }
+
+#[test]
+fn nql_hybrid_bm25_and_vector_fusion_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc VECTOR<f32, 2>;
+        INSERT INTO doc:1 { "text": "rust rust rust rust" } EMBED [0.0, 0.0];
+        INSERT INTO doc:2 { "text": "completely unrelated topic" } EMBED [1.0, 0.0];
+        INSERT INTO doc:3 { "text": "rust rust rust rust rust rust" } EMBED [0.9, 0.3];
+        INSERT INTO doc:4 { "text": "alpha beta gamma" } EMBED [0.2, 0.8];
+        SELECT * FROM doc WHERE ::bm25(text, "rust") AND vector::similarity(embedding, [1.0, 0.0]) AND k = 3;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 1);
+
+    // doc:3 matches BOTH signals (lexical rust + near-vector) → fused rank 1.
+    let rows = &results[0].rows;
+    let ids: Vec<String> = rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids[0], "doc:3", "both-signal doc ranks first: {ids:?}");
+    // k = 3 caps the fused result.
+    assert_eq!(rows.len(), 3, "k cap applies to hybrid: {ids:?}");
+    // Fused scores are non-increasing (deterministic ordering).
+    let scores: Vec<f32> = rows.iter().map(|r| r.score).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "scores: {scores:?}"
+    );
+}

@@ -124,6 +124,14 @@ impl Parser {
         &self.peek().tok
     }
 
+    /// Look ahead `n` tokens without consuming (0 = next).
+    fn peek_n(&self, n: usize) -> &Token {
+        self.toks
+            .get(self.idx + n)
+            .map(|s| &s.tok)
+            .unwrap_or(&Token::Eof)
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek_tok(), Token::Eof)
     }
@@ -478,10 +486,26 @@ impl Parser {
 
     /// The filter/knn portion after `WHERE` has been consumed.
     fn parse_where(&mut self) -> Result<(Option<Knn>, Option<Filter>), NqlError> {
+        // `::bm25(field, "query") [AND k = <N>]` — lexical retrieval; may be
+        // fused with a kNN clause: `::bm25(f, "q") AND vector::similarity(embedding, v) AND k = N`.
+        if matches!(self.peek_tok(), Token::DoubleColon) {
+            let filter = self.parse_bm25_filter()?;
+            let mut knn = None;
+            if self.eat_keyword("and") {
+                knn = Some(self.parse_knn()?);
+            }
+            return Ok((knn, Some(filter)));
+        }
+        // `vector::similarity(embedding, [..]) AND k = <N>` — kNN; may be fused
+        // with a lexical clause: `vector::similarity(...) AND k = N AND ::bm25(f, "q")`.
         if let Token::Ident(kw) = self.peek_tok() {
             if kw.eq_ignore_ascii_case("vector") {
                 let knn = self.parse_knn()?;
-                return Ok((Some(knn), None));
+                let mut filter = None;
+                if self.eat_keyword("and") {
+                    filter = Some(self.parse_bm25_filter()?);
+                }
+                return Ok((Some(knn), filter));
             }
         }
         // `::bm25(<field>, "<query>") [AND k = <N>]` — lexical retrieval.
@@ -524,6 +548,44 @@ impl Parser {
         self.expect_token(Token::Eq, "`=` in WHERE clause")?;
         let value = self.parse_value()?;
         Ok((None, Some(Filter::FieldEquals { field, value })))
+    }
+
+    /// `::bm25(<field>, "<query>") [AND k = <N>]` — the lexical filter alone.
+    fn parse_bm25_filter(&mut self) -> Result<Filter, NqlError> {
+        if !matches!(self.peek_tok(), Token::DoubleColon) {
+            return Err(self.err_here("expected `::bm25` after `AND`"));
+        }
+        self.bump();
+        let op = self.expect_ident("operator after `::`")?;
+        if !op.eq_ignore_ascii_case("bm25") {
+            return Err(self.err_here(format!("unknown WHERE operator `::{op}` (expected ::bm25)")));
+        }
+        self.expect_token(Token::LParen, "`(` after ::bm25")?;
+        let field = self.expect_ident("::bm25 field name")?;
+        self.expect_token(Token::Comma, "`,` between field and query")?;
+        let query = match self.parse_value()? {
+            Value::Str(s) => s,
+            other => {
+                return Err(self.err_here(format!(
+                    "::bm25 query must be a string, found {}",
+                    value_name(&other)
+                )));
+            }
+        };
+        self.expect_token(Token::RParen, "`)` closing ::bm25")?;
+        let mut k = None;
+        // Only consume `AND k = <N>` when `k` actually follows — an `AND
+        // vector::similarity(...)` after the bm25 clause is the hybrid fusion
+        // bridge and must be left for the caller.
+        if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("and"))
+            && matches!(self.peek_n(1), Token::Ident(kw) if kw.eq_ignore_ascii_case("k"))
+        {
+            self.bump(); // AND
+            self.bump(); // k
+            self.expect_token(Token::Eq, "`=` before k")?;
+            k = Some(self.expect_usize("k")?);
+        }
+        Ok(Filter::Bm25 { field, query, k })
     }
 
     /// `vector::similarity(embedding, [<f32>, ...]) AND k = <N>`
