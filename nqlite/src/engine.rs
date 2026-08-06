@@ -104,21 +104,25 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
                     store.vector_dims.remove(table);
                 }
             }
+            store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Insert(rec) => {
             validate_embedding(store, rec)?;
             store.insert(rec.clone());
+            store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Relate(edge) => {
             store.edges.push(edge.clone());
+            store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Forget { id } => {
             store.records.remove(id);
             // Drop every edge incident to the forgotten record, either end.
             store.edges.retain(|e| &e.from != id && &e.to != id);
+            store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Select(sel) => {
@@ -172,7 +176,19 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 /// candidates on every call, so the result stays a pure, deterministic
 /// function of `(store, select)`.
 fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
-    let candidates: Vec<Record> = store
+    // Temporal read (`AS OF T`): replay the mutation history up to the
+    // cutoff into a fresh store and query THAT — the historical view is a
+    // pure function of (history, T). Everything below runs against `target`.
+    let replay_store;
+    let target = match sel.as_of {
+        Some(cutoff) => {
+            replay_store = replay_as_of(store, cutoff);
+            &replay_store
+        }
+        None => store,
+    };
+
+    let candidates: Vec<Record> = target
         .records
         .values()
         .filter(|r| r.id.table == sel.table)
@@ -257,7 +273,7 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         .into_iter()
         .map(|record| {
             let score = compute_score(
-                store,
+                target,
                 sel,
                 &record,
                 knn_sims.as_ref(),
@@ -274,6 +290,25 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         rows.truncate(limit);
     }
     rows
+}
+
+/// Replay the store's mutation history up to (and including) logical
+/// timestamp `cutoff` into a fresh [`Store`], then return it. Deterministic:
+/// history is append-only in execution order, and each replayed statement is
+/// executed the same way it originally was — so the view is a pure function
+/// of `(store.history, cutoff)`.
+fn replay_as_of(store: &Store, cutoff: i64) -> Store {
+    let mut view = Store::default();
+    for (ts, stmt) in &store.history {
+        if *ts > cutoff {
+            break;
+        }
+        // Replay is total on a valid store (mutating statements cannot fail
+        // once their preconditions were met); a failure here would mean a
+        // corrupt history, so panic loudly rather than silently truncate.
+        let _ = execute_statement(&mut view, stmt).expect("history replay is total");
+    }
+    view
 }
 
 /// Execute a [`MatchPath`] against `store`.
@@ -2035,5 +2070,173 @@ mod hybrid_tests {
             .unwrap();
         let got = ids(&res[0]);
         assert_eq!(got[0], "doc:both", "embedded+lexical first: {got:?}");
+    }
+}
+
+#[cfg(test)]
+mod temporal_tests {
+    //! `AS OF <int>` time-travel reads: the historical view is a pure
+    //! function of (mutation history, cutoff) — replay-based, deterministic.
+
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Filter, Record, RecordId, Select, Statement, Value};
+
+    use crate::{Database, QueryResult};
+
+    fn create(table: &str) -> Statement {
+        Statement::CreateTable {
+            table: table.to_string(),
+            vector_dim: None,
+        }
+    }
+
+    fn record(id: &str, body: BTreeMap<String, Value>) -> Statement {
+        Statement::Insert(Record {
+            id: RecordId::parse(id).unwrap(),
+            body,
+            embedding: None,
+            created_at: 0,
+        })
+    }
+
+    fn str_(s: &str) -> Value {
+        Value::Str(s.to_string())
+    }
+
+    fn select(table: &str, as_of: Option<i64>) -> Statement {
+        Statement::Select(Select {
+            table: table.to_string(),
+            knn: None,
+            filter: None,
+            order: None,
+            limit: None,
+            as_of,
+        })
+    }
+
+    fn ids(res: &QueryResult) -> Vec<String> {
+        res.rows.iter().map(|r| r.record.id.to_string()).collect()
+    }
+
+    #[test]
+    fn as_of_before_insert_is_empty() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("a"))])),
+        ])
+        .unwrap();
+        // doc:1 was the 2nd mutation (clock 2); AS OF 1 sees nothing.
+        let res = db.execute(&[select("doc", Some(1))]).unwrap();
+        assert!(res[0].rows.is_empty(), "ts=1 predates the insert");
+    }
+
+    #[test]
+    fn as_of_after_insert_sees_the_record() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("a"))])),
+        ])
+        .unwrap();
+        let res = db.execute(&[select("doc", Some(2))]).unwrap();
+        assert_eq!(ids(&res[0]), ["doc:1"]);
+    }
+
+    #[test]
+    fn as_of_upsert_history_reconstructs_old_version() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("v1"))])),
+            record("doc:1", BTreeMap::from([("text".into(), str_("v2"))])),
+        ])
+        .unwrap();
+        // Current store has v2; AS OF 2 (after the v1 insert, before v2).
+        let now = db.execute(&[select("doc", None)]).unwrap();
+        assert_eq!(now[0].rows[0].record.body.get("text"), Some(&str_("v2")));
+        let past = db.execute(&[select("doc", Some(2))]).unwrap();
+        assert_eq!(
+            past[0].rows[0].record.body.get("text"),
+            Some(&str_("v1")),
+            "replay reconstructs the intermediate version"
+        );
+    }
+
+    #[test]
+    fn as_of_before_forget_restores_record() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("a"))])),
+            Statement::Forget {
+                id: RecordId::parse("doc:1").unwrap(),
+            },
+        ])
+        .unwrap();
+        // Current store: forgotten.
+        let now = db.execute(&[select("doc", None)]).unwrap();
+        assert!(now[0].rows.is_empty());
+        // AS OF 2 (after insert, before forget): record exists again.
+        let past = db.execute(&[select("doc", Some(2))]).unwrap();
+        assert_eq!(ids(&past[0]), ["doc:1"]);
+    }
+
+    #[test]
+    fn as_of_cutoff_beyond_history_is_full_state() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("a"))])),
+        ])
+        .unwrap();
+        let res = db.execute(&[select("doc", Some(1_000_000))]).unwrap();
+        assert_eq!(ids(&res[0]), ["doc:1"]);
+    }
+
+    #[test]
+    fn as_of_is_deterministic_across_equal_stores() {
+        let mut a = Database::default();
+        let mut b = Database::default();
+        let plan = [
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("x"))])),
+            record("doc:2", BTreeMap::from([("text".into(), str_("y"))])),
+        ];
+        a.execute(&plan).unwrap();
+        b.execute(&plan).unwrap();
+        let q = [select("doc", Some(2)), select("doc", Some(3))];
+        let ra = a.execute(&q).unwrap();
+        let rb = b.execute(&q).unwrap();
+        assert_eq!(ids(&ra[0]), ids(&rb[0]));
+        assert_eq!(ids(&ra[1]), ids(&rb[1]));
+        assert_eq!(ra[0].rows.len(), 1);
+        assert_eq!(ra[1].rows.len(), 2);
+    }
+
+    #[test]
+    fn as_of_respects_field_filter_on_historical_view() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("alpha"))])),
+            record("doc:2", BTreeMap::from([("text".into(), str_("beta"))])),
+        ])
+        .unwrap();
+        let mut sel = match select("doc", Some(2)) {
+            Statement::Select(s) => s,
+            _ => unreachable!(),
+        };
+        sel.filter = Some(Filter::FieldEquals {
+            field: "text".into(),
+            value: str_("alpha"),
+        });
+        let res = db.execute(&[Statement::Select(sel)]).unwrap();
+        assert_eq!(
+            ids(&res[0]),
+            ["doc:1"],
+            "filter applies to the replayed view"
+        );
     }
 }

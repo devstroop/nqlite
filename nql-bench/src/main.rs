@@ -116,6 +116,7 @@ fn main() {
         filter: None,
         order: None,
         limit: None,
+        as_of: None,
     });
     let t1 = Instant::now();
     for _ in 0..knn {
@@ -134,6 +135,7 @@ fn main() {
         }),
         order: None,
         limit: None,
+        as_of: None,
     });
     let t2 = Instant::now();
     for _ in 0..knn {
@@ -155,6 +157,7 @@ fn main() {
         }),
         order: None,
         limit: None,
+        as_of: None,
     });
     let t3 = Instant::now();
     for _ in 0..knn {

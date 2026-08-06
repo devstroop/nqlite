@@ -387,6 +387,7 @@ impl Parser {
         let mut filter = None;
         let mut order = None;
         let mut limit = None;
+        let mut as_of = None;
 
         loop {
             match self.peek_tok() {
@@ -417,6 +418,12 @@ impl Parser {
                         }
                     });
                 }
+                Token::Ident(kw) if kw.eq_ignore_ascii_case("as") => {
+                    self.bump();
+                    self.expect_keyword("of", "OF after AS")?;
+                    // `AS OF <int>` — temporal read at a logical timestamp.
+                    as_of = Some(self.expect_int("AS OF timestamp")?);
+                }
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("limit") => {
                     self.bump();
                     limit = Some(self.expect_usize("LIMIT count")?);
@@ -431,6 +438,7 @@ impl Parser {
             filter,
             order,
             limit,
+            as_of,
         }))
     }
 
@@ -723,6 +731,18 @@ impl Parser {
                     "expected a non-negative integer for {what}, found {}",
                     describe(other)
                 ),
+            )),
+        }
+    }
+
+    /// Consume a signed integer token, returning its value.
+    fn expect_int(&mut self, what: &str) -> Result<i64, NqlError> {
+        let s = self.bump();
+        match &s.tok {
+            Token::Int(n) => Ok(*n),
+            other => Err(self.err_at(
+                &s,
+                format!("expected an integer for {what}, found {}", describe(other)),
             )),
         }
     }
