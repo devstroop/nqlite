@@ -140,3 +140,33 @@ fn nql_votes_flow_into_score_order() {
         "::score must reflect the vote, got {score}"
     );
 }
+
+#[test]
+fn nql_bm25_lexical_retrieval_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:1 { "text": "the quick brown fox" };
+        INSERT INTO doc:2 { "text": "lazy dog fox" };
+        INSERT INTO doc:3 { "text": "unrelated topic" };
+        SELECT * FROM doc WHERE ::bm25(text, "fox") ORDER BY ::similarity;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 1);
+
+    // BM25 scores every row (it scores rather than prunes); both fox docs
+    // outrank the unrelated one.
+    let rows = &results[0].rows;
+    assert_eq!(rows.len(), 3, "BM25 returns every row, scored");
+    let ids: Vec<String> = rows.iter().map(|r| r.record.id.to_string()).collect();
+    let scores: Vec<f32> = rows.iter().map(|r| r.score).collect();
+    assert!(
+        ids[0] == "doc:1" || ids[0] == "doc:2",
+        "a fox doc ranks first, got {ids:?} scores={scores:?}"
+    );
+    assert!(scores[0] >= scores[1] && scores[1] >= scores[2]);
+    assert!(scores[2] == 0.0, "unrelated doc scores 0, got {scores:?}");
+}
