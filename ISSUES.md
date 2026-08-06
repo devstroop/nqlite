@@ -6,7 +6,17 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-(none)
+- **ISSUE-22 — feat/feedback-harness** · M1
+  D9 ground-truth regression harness: (query, retrieved, relevance) triples
+  stored in the DB → recall@K / precision@K checks that catch retrieval
+  regressions on grammar/index/fusion changes.
+- **ISSUE-21 — feat/mcp-server** · M3
+  MCP server over nqlite so agents can talk to it over MCP (completes the
+  ISSUE-15 re-scope; the line-protocol server shipped, MCP did not).
+- **ISSUE-20 — feat/graph-core** · M1
+  CLOSURE transitive traversal + MATCH edge-property filters
+  (`WHERE <edge-prop> = <value>` per spec §1 planned extensions). Completes
+  the graph story: 1-hop MATCH shipped (ISSUE-12), closure is the M1 core.
 
 ## In progress
 
