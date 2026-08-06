@@ -105,6 +105,7 @@ enum StmtKind {
     Relate,
     Match,
     Closure,
+    Memory,
     Select,
     Forget,
 }
@@ -235,6 +236,10 @@ fn forget_stmt() -> impl Strategy<Value = (StmtKind, String)> {
         .prop_map(|(tbl, suffix)| (StmtKind::Forget, format!("FORGET {tbl}:{suffix}")))
 }
 
+fn memory_stmt() -> impl Strategy<Value = (StmtKind, String)> {
+    ident().prop_map(|name| (StmtKind::Memory, format!("MEMORY {name}")))
+}
+
 fn match_stmt() -> impl Strategy<Value = (StmtKind, String)> {
     // One or more hops: `MATCH (t:s) -> :e <- :e ...`.
     (table(), id_suffix(), vec(ident(), 1..3), prop::bool::ANY).prop_map(
@@ -290,6 +295,7 @@ fn stmt() -> impl Strategy<Value = (StmtKind, String)> {
         closure_stmt(),
         select_stmt(),
         forget_stmt(),
+        memory_stmt(),
     ]
 }
 
@@ -313,6 +319,7 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         Statement::Relate(_) => StmtKind::Relate,
         Statement::Match(_) => StmtKind::Match,
         Statement::Closure(_) => StmtKind::Closure,
+        Statement::Memory { .. } => StmtKind::Memory,
         Statement::Select(_) => StmtKind::Select,
         Statement::Forget { .. } => StmtKind::Forget,
     }

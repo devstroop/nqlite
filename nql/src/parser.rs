@@ -220,10 +220,11 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("relate") => self.parse_relate(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("match") => self.parse_match(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("closure") => self.parse_closure(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("memory") => self.parse_memory(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, SELECT, FORGET), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET), found {}",
                 describe(other)
             ))),
         }
@@ -446,6 +447,13 @@ impl Parser {
         self.expect_keyword("forget", "FORGET")?;
         let id = self.parse_record_id()?;
         Ok(Statement::Forget { id })
+    }
+
+    /// `MEMORY <name>` — switch the plan's memory context.
+    fn parse_memory(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("memory", "MEMORY")?;
+        let name = self.expect_ident("memory name after MEMORY")?;
+        Ok(Statement::Memory { name })
     }
 
     // -- shared pieces ------------------------------------------------------

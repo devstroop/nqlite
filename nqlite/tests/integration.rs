@@ -277,3 +277,41 @@ fn nql_as_of_temporal_read_end_to_end() {
     let ids: Vec<String> = now.rows.iter().map(|r| r.record.id.to_string()).collect();
     assert_eq!(ids, ["turn:2"], "current view: {ids:?}");
 }
+
+#[test]
+fn nql_memory_blocks_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE note;
+        INSERT INTO note:1 { "text": "root note" };
+        MEMORY core;
+        CREATE TABLE note;
+        INSERT INTO note:1 { "text": "core note" };
+        SELECT * FROM note;
+        MEMORY archival;
+        CREATE TABLE note;
+        INSERT INTO note:1 { "text": "archival note" };
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 1);
+
+    // The SELECT ran inside `core`: it sees only the core note.
+    let rows = &results[0].rows;
+    assert_eq!(rows.len(), 1, "core memory has its own note: {rows:?}");
+    assert_eq!(
+        rows[0].record.body.get("text"),
+        Some(&nql_ir::Value::Str("core note".into()))
+    );
+
+    // Root store is untouched by memory writes; archival got its own note.
+    assert_eq!(db.store().records.len(), 1, "root still has only its note");
+    assert_eq!(db.store().memories.len(), 2, "core + archival created");
+    assert_eq!(
+        db.store().memories["archival"].records.len(),
+        1,
+        "archival note exists in its own store"
+    );
+}

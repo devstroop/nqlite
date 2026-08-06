@@ -81,18 +81,47 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// nothing to the output).
 pub fn execute_plan(store: &mut Store, plan: &[Statement]) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
+    let mut current_memory: Option<String> = None;
     for stmt in plan {
-        if let Some(res) = execute_statement(store, stmt)? {
+        if let Some(res) = execute_in_context(store, stmt, &mut current_memory)? {
             results.push(res);
         }
     }
     Ok(results)
 }
 
+/// Execute a single [`Statement`] within a plan's memory context.
+///
+/// `MEMORY <name>` switches the context (creating the named memory lazily);
+/// every other statement is executed against the current memory's store (the
+/// root store when no `MEMORY` statement has run yet). This is the seam used
+/// by both [`execute_plan`] and WAL replay, so memory scoping survives
+/// reopen. A read-only plan run entirely inside a memory sees that memory's
+/// records, edges, and history only.
+pub fn execute_in_context(
+    store: &mut Store,
+    stmt: &Statement,
+    current_memory: &mut Option<String>,
+) -> Result<Option<QueryResult>> {
+    if let Statement::Memory { name } = stmt {
+        store.memories.entry(name.clone()).or_default();
+        *current_memory = Some(name.clone());
+        return Ok(None);
+    }
+    match current_memory {
+        Some(name) => {
+            let memory = store.memories.get_mut(name).expect("memory created above");
+            execute_statement(memory, stmt)
+        }
+        None => execute_statement(store, stmt),
+    }
+}
+
 /// Execute a single [`Statement`] against `store`, mutating it for DDL/DML and
 /// returning a [`QueryResult`] for `SELECT`s (`None` otherwise).
 pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<QueryResult>> {
     match stmt {
+        Statement::Memory { name } => Err(Error::MemoryWithoutContext { name: name.clone() }),
         Statement::CreateTable { table, vector_dim } => {
             // Declaring a table with a dim sets `vector_dims[table]`;
             // declaring without one clears any previous declaration.
@@ -2238,5 +2267,214 @@ mod temporal_tests {
             ["doc:1"],
             "filter applies to the replayed view"
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    //! `MEMORY <name>` context blocks: named sub-stores for core/archival/
+    //! shared partitions. Each memory has its own records, edges, and
+    //! history — so AS OF composes with memory scoping.
+
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Record, RecordId, Select, Statement, Value};
+
+    use crate::{Database, QueryResult};
+
+    fn create(table: &str) -> Statement {
+        Statement::CreateTable {
+            table: table.to_string(),
+            vector_dim: None,
+        }
+    }
+
+    fn record(id: &str, body: BTreeMap<String, Value>) -> Statement {
+        Statement::Insert(Record {
+            id: RecordId::parse(id).unwrap(),
+            body,
+            embedding: None,
+            created_at: 0,
+        })
+    }
+
+    fn str_(s: &str) -> Value {
+        Value::Str(s.to_string())
+    }
+
+    fn select(table: &str) -> Statement {
+        Statement::Select(Select {
+            table: table.to_string(),
+            knn: None,
+            filter: None,
+            order: None,
+            limit: None,
+            as_of: None,
+        })
+    }
+
+    fn ids(res: &QueryResult) -> Vec<String> {
+        res.rows.iter().map(|r| r.record.id.to_string()).collect()
+    }
+
+    #[test]
+    fn memory_isolates_records_from_root() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("root"))])),
+            Statement::Memory {
+                name: "core".into(),
+            },
+            create("doc"),
+            record("doc:1", BTreeMap::from([("text".into(), str_("core"))])),
+        ])
+        .unwrap();
+
+        // Root view: only the root doc:1.
+        let root = db.execute(&[select("doc")]).unwrap();
+        assert_eq!(ids(&root[0]), ["doc:1"]);
+        assert_eq!(root[0].rows[0].record.body.get("text"), Some(&str_("root")));
+
+        // Memory view: the core doc:1 (separate store, same id).
+        let core = db
+            .execute(&[
+                Statement::Memory {
+                    name: "core".into(),
+                },
+                select("doc"),
+            ])
+            .unwrap();
+        assert_eq!(ids(&core[0]), ["doc:1"]);
+        assert_eq!(
+            core[0].rows[0].record.body.get("text"),
+            Some(&str_("core")),
+            "same id, different memory = different record"
+        );
+    }
+
+    #[test]
+    fn memory_is_lazily_created() {
+        let mut db = Database::default();
+        db.execute(&[
+            Statement::Memory {
+                name: "fresh".into(),
+            },
+            create("t"),
+            record("t:1", BTreeMap::from([("x".into(), Value::Int(1))])),
+        ])
+        .unwrap();
+        // The memory exists with its record; root has nothing.
+        assert_eq!(db.store().memories.len(), 1);
+        assert!(db.store().records.is_empty());
+        let res = db
+            .execute(&[
+                Statement::Memory {
+                    name: "fresh".into(),
+                },
+                select("t"),
+            ])
+            .unwrap();
+        assert_eq!(ids(&res[0]), ["t:1"]);
+    }
+
+    #[test]
+    fn memory_history_is_isolated_for_as_of() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t"),
+            record("t:1", BTreeMap::from([("v".into(), str_("root1"))])),
+            Statement::Memory {
+                name: "core".into(),
+            },
+            create("t"),
+            record("t:1", BTreeMap::from([("v".into(), str_("core1"))])),
+            record("t:1", BTreeMap::from([("v".into(), str_("core2"))])),
+        ])
+        .unwrap();
+
+        // Core memory: AS OF 2 (its own clock: create=1, insert=2) sees core1.
+        let past = db
+            .execute(&[
+                Statement::Memory {
+                    name: "core".into(),
+                },
+                Statement::Select(Select {
+                    table: "t".into(),
+                    knn: None,
+                    filter: None,
+                    order: None,
+                    limit: None,
+                    as_of: Some(2),
+                }),
+            ])
+            .unwrap();
+        assert_eq!(
+            past[0].rows[0].record.body.get("v"),
+            Some(&str_("core1")),
+            "each memory keeps its own history clock"
+        );
+
+        // Root: AS OF 2 (root create=1, root insert=2) sees root1 — the root
+        // clock is unaffected by memory writes.
+        let root_past = db
+            .execute(&[Statement::Select(Select {
+                table: "t".into(),
+                knn: None,
+                filter: None,
+                order: None,
+                limit: None,
+                as_of: Some(2),
+            })])
+            .unwrap();
+        assert_eq!(
+            root_past[0].rows[0].record.body.get("v"),
+            Some(&str_("root1"))
+        );
+    }
+
+    #[test]
+    fn memory_outside_plan_errors() {
+        // The public `execute` always goes through execute_plan (which handles
+        // MEMORY context), so the error is only reachable when a caller uses
+        // execute_statement directly with a MEMORY statement.
+        let mut store = nql_ir::Store::default();
+        let err =
+            crate::engine::execute_statement(&mut store, &Statement::Memory { name: "x".into() })
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("MEMORY"),
+            "direct Memory statement must error: {err}"
+        );
+    }
+
+    #[test]
+    fn memory_scoping_is_deterministic_across_equal_stores() {
+        let mut a = Database::default();
+        let mut b = Database::default();
+        let plan = [
+            create("t"),
+            record("t:1", BTreeMap::from([("v".into(), str_("root"))])),
+            Statement::Memory {
+                name: "core".into(),
+            },
+            create("t"),
+            record("t:1", BTreeMap::from([("v".into(), str_("core"))])),
+        ];
+        a.execute(&plan).unwrap();
+        b.execute(&plan).unwrap();
+        let q = [
+            select("t"),
+            Statement::Memory {
+                name: "core".into(),
+            },
+            select("t"),
+        ];
+        let ra = a.execute(&q).unwrap();
+        let rb = b.execute(&q).unwrap();
+        assert_eq!(ids(&ra[0]), ids(&rb[0]));
+        assert_eq!(ids(&ra[1]), ids(&rb[1]));
+        assert_eq!(ra[0].rows.len(), 1);
+        assert_eq!(ra[1].rows.len(), 1);
     }
 }

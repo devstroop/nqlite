@@ -376,6 +376,39 @@ fn select_as_of_requires_integer() {
 }
 
 #[test]
+fn memory_parses_name() {
+    let plan = parse("MEMORY core").unwrap();
+    let Statement::Memory { name } = &plan[0] else {
+        panic!("expected Memory, got {:?}", plan[0]);
+    };
+    assert_eq!(name, "core");
+}
+
+#[test]
+fn memory_is_case_insensitive_keyword() {
+    let plan = parse("memory archival").unwrap();
+    assert!(matches!(&plan[0], Statement::Memory { .. }));
+}
+
+#[test]
+fn memory_requires_name() {
+    let err = parse("MEMORY").unwrap_err();
+    assert!(err.to_string().contains("memory name"), "got: {err}");
+}
+
+#[test]
+fn memory_switches_context_within_a_plan() {
+    // MEMORY scoping is plan-level: statements after it target the named
+    // memory, statements before it target the root store.
+    let plan = parse(
+        "CREATE TABLE t; INSERT INTO t:1 { \"x\": 1 }; MEMORY core; INSERT INTO t:1 { \"x\": 2 };",
+    )
+    .unwrap();
+    assert_eq!(plan.len(), 4);
+    assert!(matches!(&plan[2], Statement::Memory { name } if name == "core"));
+}
+
+#[test]
 fn select_hybrid_bm25_then_knn() {
     // Hybrid retrieval: lexical + vector in one WHERE (bm25 first).
     let plan = parse(
