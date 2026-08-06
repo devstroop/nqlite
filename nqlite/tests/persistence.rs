@@ -96,3 +96,62 @@ fn deterministic_reopen_bytes() {
     assert_eq!(a, b, "same session writes byte-identical files");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn read_only_match_is_not_written_to_wal() {
+    // Regression: MATCH is a read (like SELECT) — it must never be appended
+    // to the WAL or replayed, only mutating statements (CREATE/INSERT/RELATE/
+    // FORGET) belong there (see spec/file-format.md §2).
+    let dir = std::env::temp_dir().join(format!("nqlite-persist-match-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    let wal_len = |path: &std::path::Path| -> u64 {
+        std::fs::metadata(format!("{}.wal", path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"x\": 1 };
+                 INSERT INTO t:2 { \"x\": 2 };
+                 RELATE (t:1) -> :refs -> (t:2);",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let after_dml = wal_len(&path);
+        assert!(after_dml > 0, "mutations are logged");
+
+        // A read-only MATCH must not grow the WAL.
+        db.execute(&parse("MATCH (t:1) -> :refs;").unwrap())
+            .unwrap();
+        assert_eq!(
+            wal_len(&path),
+            after_dml,
+            "MATCH must not be appended to the WAL"
+        );
+
+        // Nor a SELECT.
+        db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        assert_eq!(
+            wal_len(&path),
+            after_dml,
+            "SELECT must not be appended to the WAL"
+        );
+    }
+
+    // Reopen: replay works and the store is intact.
+    {
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.store().records.len(), 2);
+        assert_eq!(db.store().edges.len(), 1);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
