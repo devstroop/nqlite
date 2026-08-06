@@ -6,7 +6,22 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-(none)
+- **ISSUE-25 — chore/positioning** · M2/M3
+  Positioning + messaging pass: reconcile README framing with the
+  "SQLite for AI memory" pitch (vs "neural database" branding), add a
+  positioning/FAQ doc covering deterministic engine, zero-LLM, BYO vectors,
+  and the honest comparison story vs sqlite-vec/LanceDB/Chroma.
+- **ISSUE-24 — chore/bench-compare** · M2
+  Cross-DB benchmark harness: run the deterministic benchmark suite against
+  nqlite AND comparable embedded stores (sqlite-vec, LanceDB, Chroma) on the
+  same synthetic corpus; report recall/latency side by side. Harness lives in
+  the repo; external-DB runs are optional (skip when the dep is absent).
+- **ISSUE-23 — feat/hybrid-retrieval** · M2
+  Combined optimizer (M2 roadmap item): one WHERE can combine lexical and
+  vector recall — `::bm25(field, "q") AND vector::similarity(embedding, $v)
+  AND k = N` — fused deterministically (reciprocal-rank fusion, tie-break by
+  RecordId). Engine pipeline handles both candidate sets; spec where_clause
+  gains the combined form.
 
 ## In progress
 
