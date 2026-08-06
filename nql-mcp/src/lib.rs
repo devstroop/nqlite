@@ -63,6 +63,7 @@ impl NqlMcp {
                 let kind = match &res.kind {
                     nqlite::QueryKind::Select(sel) => format!("SELECT {}", sel.table),
                     nqlite::QueryKind::Match(p) => format!("MATCH {}", p.start),
+                    nqlite::QueryKind::Closure(p) => format!("CLOSURE {}", p.start),
                 };
                 serde_json::json!({
                     "kind": kind,
@@ -488,10 +489,48 @@ impl NqlMcp {
             Err(e) => format!("ERR {e}"),
         }
     }
+
+    /// CLOSURE: transitive traversal from a start record.
+    #[tool(
+        description = "Transitive closure: every record reachable from a start record via the named edges (any number of hops, BFS to fixpoint). Scored by BFS depth (0 = start)."
+    )]
+    async fn closure(
+        &self,
+        Parameters(MatchParams { start, steps }): Parameters<MatchParams>,
+    ) -> String {
+        let rid = match parse_rid(&start) {
+            Ok(r) => r,
+            Err(e) => return format!("ERR {e}"),
+        };
+        let steps = match parse_steps(&steps) {
+            Ok(s) => s,
+            Err(e) => return format!("ERR {e}"),
+        };
+        let stmt = nql_ir::Statement::Closure(nql_ir::MatchPath { start: rid, steps });
+        let mut db = self.db.lock().unwrap();
+        match db.execute(&[stmt]) {
+            Ok(results) => {
+                let rows: Vec<serde_json::Value> = results[0]
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.record.id.to_string(),
+                            "score": r.score,
+                            "body": value_to_json(&r.record.body),
+                        })
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&serde_json::json!({ "rows": rows }))
+                    .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => format!("ERR {e}"),
+        }
+    }
 }
 
-/// Parse the `steps` JSON for MATCH:
-/// `[{ "direction": "out"|"in", "name": "mentions" }, ...]`.
+/// Parse the `steps` JSON for MATCH/CLOSURE:
+/// `[{ "direction": "out"|"in", "name": "mentions", "where": {"field", "value"} }, ...]`.
 fn parse_steps(v: &serde_json::Value) -> anyhow::Result<Vec<nql_ir::MatchStep>> {
     let arr = v
         .as_array()
@@ -513,7 +552,28 @@ fn parse_steps(v: &serde_json::Value) -> anyhow::Result<Vec<nql_ir::MatchStep>> 
                 .ok_or_else(|| anyhow::anyhow!("step missing `name`"))?
                 .trim_start_matches(':')
                 .to_string();
-            Ok(nql_ir::MatchStep { direction, name })
+            let edge_props = match s.get("where") {
+                Some(w) => {
+                    let field = w
+                        .get("field")
+                        .and_then(|f| f.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("where missing `field`"))?
+                        .to_string();
+                    let value = w
+                        .get("value")
+                        .ok_or_else(|| anyhow::anyhow!("where missing `value`"))?;
+                    Some(nql_ir::Filter::FieldEquals {
+                        field,
+                        value: json_to_value(value)?,
+                    })
+                }
+                None => None,
+            };
+            Ok(nql_ir::MatchStep {
+                direction,
+                name,
+                edge_props,
+            })
         })
         .collect()
 }
@@ -651,5 +711,57 @@ mod tests {
             .await
         });
         assert!(out.starts_with("ERR"), "parse errors surface: {out}");
+    }
+
+    #[test]
+    fn closure_tool_reaches_transitive_neighborhood() {
+        let s = NqlMcp::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            s.create_table(Parameters(CreateTableParams {
+                table: "person".into(),
+                vector_dim: None,
+            }))
+            .await;
+            for id in ["1", "2", "3"] {
+                s.insert_record(Parameters(InsertParams {
+                    id: format!("person:{id}"),
+                    body: serde_json::json!({ "n": id }),
+                    embedding: None,
+                }))
+                .await;
+            }
+            s.relate(Parameters(RelateParams {
+                from: "person:1".into(),
+                name: "knows".into(),
+                to: "person:2".into(),
+                weight: None,
+                props: None,
+            }))
+            .await;
+            s.relate(Parameters(RelateParams {
+                from: "person:2".into(),
+                name: "knows".into(),
+                to: "person:3".into(),
+                weight: None,
+                props: None,
+            }))
+            .await;
+        });
+        let out = rt.block_on(async {
+            s.closure(Parameters(MatchParams {
+                start: "person:1".into(),
+                steps: serde_json::json!([{ "direction": "out", "name": "knows" }]),
+            }))
+            .await
+        });
+        // Closure: person:1 (depth 0), person:2 (1), person:3 (2).
+        assert!(out.contains("\"person:1\""), "{out}");
+        assert!(out.contains("\"person:2\""), "{out}");
+        assert!(out.contains("\"person:3\""), "{out}");
+        assert!(!out.contains("ERR"), "no error: {out}");
     }
 }
