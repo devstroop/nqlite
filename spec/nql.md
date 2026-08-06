@@ -19,7 +19,7 @@ Keywords are case-insensitive. Whitespace/comments (`--` to end of line, `/* */`
 are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
-statement      = create_table | insert | relate | select | match | forget ;
+statement      = create_table | insert | relate | select | match | closure | forget ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -35,7 +35,10 @@ select         = 'SELECT' select_list 'FROM' ident
 
 forget         = 'FORGET' recordid ;
 
-match          = 'MATCH' '(' recordid ')' ( ('->' | '<-') ':' ident )+ ;
+match          = 'MATCH' '(' recordid ')' path_step+ ;
+closure        = 'CLOSURE' '(' recordid ')' path_step+ ;
+path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
+edge_props     = 'WHERE' field_equals ;
 
 select_list    = '*' | ident (',' ident)* ;
 where_clause   = field_equals | vector_knn | has_embedding | bm25 ;
@@ -55,8 +58,6 @@ vector         = '[' float (',' float)* ']' ;   (* all-float array *)
 ### Planned extensions (NOT in M0 — for M2+)
 
 ```
-closure        = 'CLOSURE' '(' ident ')' ;          (* transitive closure *)
-edge_props     = 'WHERE' field_equals ;             (* edge-property filter on MATCH *)
 temporal       = 'AS' 'OF' datetime ;               (* time-travel reads *)
 memory         = 'MEMORY' ident ;                   (* core/archival/shared blocks *)
 create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
@@ -82,7 +83,8 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CREATE TABLE t [VECTOR<f32,N>]` | Declares table `t`; optional fixed embedding dim `N`. Re-declaring with a dim enforces it on future INSERTs. |
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
-| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Deterministic (see §2.5). |
+| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <edge-prop> = <value>` to only traverse edges whose props match. Deterministic (see §2.5). |
+| `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
 | `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; orders deterministically; limits; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 
@@ -112,20 +114,24 @@ A plan is a `Vec<Statement>` executed atomically in one transaction
 (single-writer, snapshot readers — M1 storage; M0 is in-memory). Statements
 before a SELECT apply first, so a plan may create/insert/relate/query in one pass.
 
-### 2.5 MATCH traversal (deterministic)
+### 2.5 MATCH / CLOSURE traversal (deterministic)
 
 - The frontier starts at the start record. A missing start record yields an
   empty result — never an error.
 - Each step follows every edge with the given name in the given direction
-  (`->` = outgoing from a frontier record, `<-` = incoming toward it).
+  (`->` = outgoing from a frontier record, `<-` = incoming toward it). A step
+  may carry `WHERE <edge-prop> = <value>`: only edges whose `props` field
+  equals the value are traversed (exact equality against the edge's props).
 - Edges are scanned in append order; reached endpoints are deduplicated by
   `RecordId` keeping first appearance. The result rows carry the score of the
   first edge that reached them (`weight`, or `0.0` when unset).
-- Dangling edges (endpoints never inserted) are skipped. Only the final
-  frontier is returned (path semantics — intermediate hops are not in the
-  output).
-- `CLOSURE` (transitive closure) and per-edge property filters are planned
-  extensions, not part of M0.
+- Dangling edges (endpoints never inserted) are skipped.
+- `MATCH` (path semantics): only the final frontier is returned — intermediate
+  hops are not in the output.
+- `CLOSURE` (transitive closure): each step is expanded to a fixpoint (BFS,
+  any number of hops) before the next step begins; every record ever reached —
+  including the start — is returned once in first-visit order, scored by BFS
+  depth (0 = start). Cycles are handled by dedup.
 
 ## 3. Operators
 
@@ -191,6 +197,12 @@ MATCH (turn:3) -> :mentions;
 -- graph: turns that mention Acme (1-hop incoming)
 MATCH (entity:acme) <- :mentions;
 
+-- graph: only high-confidence mentions (edge-property filter)
+MATCH (turn:3) -> :mentions WHERE confidence = 0.9;
+
+-- graph: the whole conversation chain reachable from turn:3
+CLOSURE (turn:3) -> :follows_from;
+
 -- lexical recall: BM25 over the turn text
 SELECT * FROM turn WHERE ::bm25(text, "acme") LIMIT 5;
 
@@ -204,8 +216,6 @@ SELECT * FROM turn ORDER BY ::score LIMIT 5;
 ### 6.2 Planned syntax (M2+)
 
 ```sql
-MATCH (turn:3) -> :mentions -> (e) WHERE confidence = 0.9;  -- edge-property filter
-CLOSURE (entity)                       -- transitive closure
 SELECT * FROM turn AS OF 2026-08-03T00:00:00Z;
 MEMORY core;                           -- agent memory blocks
 ```

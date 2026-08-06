@@ -170,3 +170,45 @@ fn nql_bm25_lexical_retrieval_end_to_end() {
     assert!(scores[0] >= scores[1] && scores[1] >= scores[2]);
     assert!(scores[2] == 0.0, "unrelated doc scores 0, got {scores:?}");
 }
+
+#[test]
+fn nql_closure_and_edge_props_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE turn;
+        CREATE TABLE entity;
+        INSERT INTO turn:1 { "text": "first" };
+        INSERT INTO turn:2 { "text": "second" };
+        INSERT INTO turn:3 { "text": "third" };
+        INSERT INTO entity:acme { "kind": "org" };
+        RELATE (turn:1) -> :mentions -> (entity:acme) SET confidence = 0.9;
+        RELATE (turn:1) -> :follows_from -> (turn:2);
+        RELATE (turn:2) -> :follows_from -> (turn:3);
+        CLOSURE (turn:1) -> :follows_from;
+        MATCH (turn:1) -> :mentions WHERE confidence = 0.9;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 2, "one CLOSURE + one MATCH");
+
+    // CLOSURE: transitive over :follows_from — turn:1 (depth 0), turn:2 (1),
+    // turn:3 (2). The :mentions edge is a different name, so excluded.
+    let closure = &results[0];
+    let ids: Vec<String> = closure
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ids, ["turn:1", "turn:2", "turn:3"]);
+
+    // MATCH with edge-property filter: only the high-confidence :mentions edge.
+    let matched = &results[1];
+    let ids: Vec<String> = matched
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ids, ["entity:acme"]);
+}

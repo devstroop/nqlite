@@ -214,6 +214,10 @@ pub enum Statement {
     /// Deterministic: endpoints are collected in edge-append order, deduped by
     /// `RecordId` keeping first appearance.
     Match(MatchPath),
+    /// Transitive closure over the same path grammar as [`Statement::Match`]:
+    /// every record reachable via the named edges (any number of hops) is
+    /// returned, deduped by first-visit order, scored by BFS depth (0 = start).
+    Closure(MatchPath),
     /// Delete a record (and its incident edges).
     Forget { id: RecordId },
 }
@@ -235,6 +239,10 @@ pub struct MatchStep {
     pub direction: MatchDirection,
     /// Edge name to follow (`:mentions`, `:knows`, ...).
     pub name: String,
+    /// Optional per-step edge filter: only traverse edges whose `props` field
+    /// equals the given value (spec §1 `edge_props`). Only
+    /// [`Filter::FieldEquals`] is valid here.
+    pub edge_props: Option<Filter>,
 }
 
 /// Edge traversal direction.

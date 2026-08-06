@@ -184,6 +184,67 @@ fn match_is_case_insensitive_keyword() {
 }
 
 #[test]
+fn closure_parses_same_path_grammar() {
+    let plan = parse("CLOSURE (turn:3) -> :mentions").unwrap();
+    let Statement::Closure(p) = &plan[0] else {
+        panic!("expected Closure, got {:?}", plan[0]);
+    };
+    assert_eq!(p.start, rid("turn:3"));
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].direction, MatchDirection::Out);
+    assert_eq!(p.steps[0].name, "mentions");
+    assert!(p.steps[0].edge_props.is_none());
+}
+
+#[test]
+fn closure_requires_edge_step() {
+    let err = parse("CLOSURE (a:1)").unwrap_err();
+    assert!(
+        err.to_string().contains("at least one edge step"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn match_step_edge_props_filter() {
+    let plan = parse("MATCH (turn:3) -> :mentions WHERE confidence = 0.9").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match, got {:?}", plan[0]);
+    };
+    assert_eq!(
+        p.steps[0].edge_props,
+        Some(Filter::FieldEquals {
+            field: "confidence".into(),
+            value: Value::Float(0.9),
+        })
+    );
+}
+
+#[test]
+fn match_multi_step_with_per_step_edge_props() {
+    let plan = parse("MATCH (a:1) -> :knows WHERE weight = 1.0 -> :works_with WHERE weight = 0.5")
+        .unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match, got {:?}", plan[0]);
+    };
+    assert_eq!(p.steps.len(), 2);
+    assert!(matches!(
+        &p.steps[0].edge_props,
+        Some(Filter::FieldEquals { field, .. }) if field == "weight"
+    ));
+    assert!(matches!(
+        &p.steps[1].edge_props,
+        Some(Filter::FieldEquals { field, .. }) if field == "weight"
+    ));
+}
+
+#[test]
+fn closure_is_case_insensitive_keyword() {
+    let plan = parse("closure (a:1) -> :likes").unwrap();
+    assert!(matches!(&plan[0], Statement::Closure(_)));
+}
+
+#[test]
 fn select_knn_order_limit() {
     let plan = parse(
         "SELECT * FROM note WHERE vector::similarity(embedding, [0.5, -1.0, 2.5]) AND k = 5 ORDER BY ::similarity LIMIT 10",

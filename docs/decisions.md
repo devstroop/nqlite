@@ -90,6 +90,10 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   appearance, missing start record => empty result, dangling edges skipped.
   `QueryResult` gained a `QueryKind` discriminant (Select | Match). CLOSURE
   remains planned.
+  **LANDED (2026-08-04, part 2)**: `CLOSURE` transitive closure (BFS fixpoint,
+  first-visit order, depth scores) + per-step edge-property filters
+  (`MATCH ... WHERE <edge-prop> = <value>`) in the same IR/parser/engine.
+  `QueryKind::Closure` added. Graph story complete for M0/M1.
 - D3. Forgetting/decay: agent-driven `FORGET` + deterministic time-decay operator
   — in v1. LLM-driven compaction: NEVER in engine; document why.
   **RESOLVED**: `FORGET`/decay are engine operators (deterministic). Compaction
