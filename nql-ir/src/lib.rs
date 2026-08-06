@@ -201,6 +201,11 @@ pub enum Statement {
     Closure(MatchPath),
     /// Delete a record (and its incident edges).
     Forget { id: RecordId },
+    /// Switch the current memory context for subsequent statements in the
+    /// plan (`MEMORY <name>`): DDL/DML/reads after this statement operate on
+    /// the named memory's own store. Named memories are core/archival/shared
+    /// partitions for agents (spec §2.8).
+    Memory { name: String },
 }
 
 /// A graph traversal: start at `start`, walk `steps` in order.
@@ -265,6 +270,10 @@ pub struct Store {
     /// the entries with `ts <= T` into a fresh store. Persisted with the
     /// store, so time-travel survives checkpoints and WAL replay.
     pub history: Vec<(i64, Statement)>,
+    /// Named memory partitions (`MEMORY <name>`): each is a full sub-store
+    /// (records, edges, dims, its own clock + history), so temporal reads
+    /// compose with memory scoping. The default context is the store itself.
+    pub memories: BTreeMap<String, Store>,
 }
 
 impl Store {
