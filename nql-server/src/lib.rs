@@ -125,6 +125,23 @@ fn format_result(res: &nqlite::QueryResult) -> String {
                 .collect();
             format!("MATCH {} {}", path.start, hops.join(" "))
         }
+        nqlite::QueryKind::Closure(path) => {
+            let hops: Vec<String> = path
+                .steps
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}:{}",
+                        match s.direction {
+                            nql_ir::MatchDirection::Out => "->",
+                            nql_ir::MatchDirection::In => "<-",
+                        },
+                        s.name
+                    )
+                })
+                .collect();
+            format!("CLOSURE {} {}", path.start, hops.join(" "))
+        }
     };
     let rows: Vec<String> = res.rows.iter().map(format_row).collect();
     if rows.is_empty() {

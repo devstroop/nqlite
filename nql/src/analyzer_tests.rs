@@ -210,6 +210,7 @@ fn match_analyzes_without_table_declaration() {
         steps: vec![MatchStep {
             direction: MatchDirection::Out,
             name: "mentions".into(),
+            edge_props: None,
         }],
     });
     let out = Analyzer::analyze_statement(&stmt).expect("standalone MATCH analyzes");
@@ -223,8 +224,25 @@ fn match_with_empty_id_string_errors() {
         steps: vec![MatchStep {
             direction: MatchDirection::Out,
             name: "mentions".into(),
+            edge_props: None,
         }],
     });
     let err = Analyzer::analyze_statement(&stmt).expect_err("empty id string must fail");
     assert!(matches!(err, AnalysisError::EmptyId { .. }));
+}
+
+#[test]
+fn closure_analyzes_without_table_declaration() {
+    // Like MATCH, CLOSURE is graph traversal: start-record id shape is
+    // validated, no CREATE TABLE / built-in table required.
+    let stmt = Statement::Closure(MatchPath {
+        start: RecordId::new("note", Id::Num(1)),
+        steps: vec![MatchStep {
+            direction: MatchDirection::Out,
+            name: "mentions".into(),
+            edge_props: None,
+        }],
+    });
+    let out = Analyzer::analyze_statement(&stmt).expect("standalone CLOSURE analyzes");
+    assert_eq!(out, stmt, "CLOSURE passes through unchanged");
 }

@@ -1,0 +1,20 @@
+[package]
+name = "nql-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server exposing nqlite as tools for AI agents (stdio transport)."
+
+[[bin]]
+name = "nql-mcp"
+path = "src/main.rs"
+
+[dependencies]
+nql = { path = "../nql" }
+nql-ir = { path = "../nql-ir" }
+nqlite = { path = "../nqlite" }
+anyhow = "1"
+rmcp = { version = "3.1", features = ["server", "macros", "schemars", "transport-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }

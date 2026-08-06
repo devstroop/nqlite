@@ -28,6 +28,7 @@
 pub mod bm25;
 pub mod engine;
 pub mod error;
+pub mod harness;
 pub mod index;
 pub mod storage;
 

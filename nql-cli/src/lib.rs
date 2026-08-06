@@ -85,6 +85,23 @@ impl Session {
                     .collect();
                 format!("MATCH {} {}", path.start, hops.join(" "))
             }
+            nqlite::QueryKind::Closure(path) => {
+                let hops: Vec<String> = path
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{}:{}",
+                            match s.direction {
+                                nql_ir::MatchDirection::Out => "->",
+                                nql_ir::MatchDirection::In => "<-",
+                            },
+                            s.name
+                        )
+                    })
+                    .collect();
+                format!("CLOSURE {} {}", path.start, hops.join(" "))
+            }
         };
         writeln!(self.out, "{label} ({} rows)", r.rows.len())?;
         for s in &r.rows {

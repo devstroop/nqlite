@@ -211,10 +211,11 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("insert") => self.parse_insert(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("relate") => self.parse_relate(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("match") => self.parse_match(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("closure") => self.parse_closure(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, SELECT, FORGET), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, SELECT, FORGET), found {}",
                 describe(other)
             ))),
         }
@@ -314,6 +315,20 @@ impl Parser {
 
     fn parse_match(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("match", "MATCH")?;
+        let path = self.parse_path("MATCH")?;
+        Ok(Statement::Match(path))
+    }
+
+    fn parse_closure(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("closure", "CLOSURE")?;
+        let path = self.parse_path("CLOSURE")?;
+        Ok(Statement::Closure(path))
+    }
+
+    /// `( recordid ) ( ('->' | '<-') ':' ident [WHERE ident = value] )+` —
+    /// the shared path grammar of MATCH and CLOSURE. Each step may carry an
+    /// optional edge-property equality filter (`edge_props` in the spec).
+    fn parse_path(&mut self, kw: &str) -> Result<MatchPath, NqlError> {
         self.expect_token(Token::LParen, "`(` before start record")?;
         let start = self.parse_record_id()?;
         self.expect_token(Token::RParen, "`)` after start record")?;
@@ -333,12 +348,24 @@ impl Parser {
                 self.bump();
             }
             let name = self.expect_ident("edge name after `->`/`<-`")?;
-            steps.push(MatchStep { direction, name });
+            let mut edge_props = None;
+            if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("where")) {
+                self.bump();
+                let field = self.expect_ident("edge-property field after WHERE")?;
+                self.expect_token(Token::Eq, "`=` in edge-property filter")?;
+                let value = self.parse_value()?;
+                edge_props = Some(Filter::FieldEquals { field, value });
+            }
+            steps.push(MatchStep {
+                direction,
+                name,
+                edge_props,
+            });
         }
         if steps.is_empty() {
-            return Err(self.err_here("MATCH requires at least one edge step (`-> :name`)"));
+            return Err(self.err_here(format!("{kw} requires at least one edge step (`-> :name`)")));
         }
-        Ok(Statement::Match(MatchPath { start, steps }))
+        Ok(MatchPath { start, steps })
     }
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {

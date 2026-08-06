@@ -104,6 +104,7 @@ enum StmtKind {
     Insert,
     Relate,
     Match,
+    Closure,
     Select,
     Forget,
 }
@@ -255,6 +256,30 @@ fn match_stmt() -> impl Strategy<Value = (StmtKind, String)> {
     )
 }
 
+fn closure_stmt() -> impl Strategy<Value = (StmtKind, String)> {
+    // Same path grammar as MATCH but the CLOSURE keyword: transitive closure.
+    (table(), id_suffix(), vec(ident(), 1..3), prop::bool::ANY).prop_map(
+        |(tbl, suffix, edges, mix_directions)| {
+            let hops = edges
+                .into_iter()
+                .map(|e| {
+                    let arrow = if mix_directions && e.len() % 2 == 0 {
+                        "<-"
+                    } else {
+                        "->"
+                    };
+                    format!("{arrow} :{e}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (
+                StmtKind::Closure,
+                format!("CLOSURE ({tbl}:{suffix}) {hops}"),
+            )
+        },
+    )
+}
+
 /// A single well-formed statement, plus its kind.
 fn stmt() -> impl Strategy<Value = (StmtKind, String)> {
     prop_oneof![
@@ -262,6 +287,7 @@ fn stmt() -> impl Strategy<Value = (StmtKind, String)> {
         insert_stmt(),
         relate_stmt(),
         match_stmt(),
+        closure_stmt(),
         select_stmt(),
         forget_stmt(),
     ]
@@ -286,6 +312,7 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         Statement::Insert(_) => StmtKind::Insert,
         Statement::Relate(_) => StmtKind::Relate,
         Statement::Match(_) => StmtKind::Match,
+        Statement::Closure(_) => StmtKind::Closure,
         Statement::Select(_) => StmtKind::Select,
         Statement::Forget { .. } => StmtKind::Forget,
     }
