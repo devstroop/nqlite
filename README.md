@@ -53,7 +53,7 @@ This gives you:
   `::score`, and `::feedback` in a single query language — the operations an
   agent needs to chain context over a conversation.
 - **Serverless**: `open a file` and start. Optional network server (line
-  protocol, TCP or stdio) is built in; an MCP server is planned.
+  protocol, TCP or stdio) and an MCP server (`nql-mcp`) are built in.
 
 ## Features
 
@@ -68,7 +68,8 @@ This gives you:
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering
 - **Embedded & serverless** — a single file; open a path, start recall.
-  Network server mode (line protocol, TCP or stdio) is built in; MCP planned.
+  Network server mode (line protocol, TCP or stdio) and an MCP server
+  (`nql-mcp`) are built in.
 - **Hardened** — fuzzed parser (cargo-fuzz) + property tests, single-writer
   transaction snapshot semantics, deterministic benchmarks.
 
@@ -125,6 +126,16 @@ cargo run -q -p nql-cli -- --db memory.nql        # REPL backed by memory.nql
 cargo run -q -p nql-cli -- --db memory.nql --script session.nql   # script mode
 # :flush inside the REPL checkpoints the WAL into the main file
 ```
+
+Expose the database to AI agents over the Model Context Protocol (stdio):
+
+```bash
+cargo run -q -p nql-mcp                 # in-memory
+cargo run -q -p nql-mcp -- --db memory.nql   # persistent
+```
+
+`nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
+`relate`, `select`, `match_path`, `forget`) with deterministic JSON results.
 
 Or in Rust, programmatically:
 
@@ -196,6 +207,9 @@ nql-ir/   shared contract: value types + Statement/Select/Order/Plan
 nqlite/   engine: deterministic execution over Store
    ├─ records (BTreeMap)  ──  relations (edges)  ──  vectors (VectorIndex)
    └─ ACID transaction (single-writer, snapshot readers)  [M1: file + WAL]
+
+nql-server/  line-protocol server (TCP + stdio)
+nql-mcp/     MCP server (stdio) — exposes nqlite as tools for AI agents
 ```
 
 **Why three crates?** `nql` (front-end) and `nqlite` (engine) are separated by a
