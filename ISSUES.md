@@ -6,8 +6,19 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-(none)
-
+- **ISSUE-28 — chore/bench-run** · M2
+  Run the cross-DB benchmark harness (ISSUE-24) with real competitors:
+  install sqlite-vec / LanceDB / Chroma drivers and produce the first
+  side-by-side numbers on the deterministic corpus; commit the report +
+  methodology notes.
+- **ISSUE-27 — feat/memory-blocks** · M2/M3
+  `MEMORY <name>` blocks (core / archival / shared): named, addressable
+  context partitions so agents can scope recall (core facts vs working notes
+  vs shared state) — grammar, IR, engine storage, spec.
+- **ISSUE-26 — feat/temporal-reads** · M2
+  `AS OF <datetime>` time-travel reads (spec planned extension): queries
+  execute against the store as of a historical timestamp — deterministic
+  replay/versioned view semantics, `created_at`-based, spec update.
 
 ## In progress
 
