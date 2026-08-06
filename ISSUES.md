@@ -6,19 +6,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-- **ISSUE-19 — chore/audit-hygiene** · M0/M1
-  Audit follow-up: CLI `--db <path>` persistence flag; drop dead `tracing`
-  dep; docs honesty (ISSUE-15 MCP re-scope, PLAN status log, KANBAN
-  superseded note, spec order_op/statement sync).
-- **ISSUE-18 — feat/bm25-grammar** · M2
-  Wire `WHERE ::bm25(field, "query") [AND k = N]` into the nql parser +
-  analyzer (engine `Filter::Bm25` already exists); spec sync (move fts from
-  planned to M0 grammar, add `::votes`/`::feedback` to order_op, add `match`
-  to statement list).
-- **ISSUE-17 — feat/fix-votes-wal** · M1
-  Bug fixes: `::score` matches `":voted"` but parser stores `"voted"` (votes
-  created via nql never counted); read-only `MATCH` is written to the WAL
-  (`is_mutating` only excludes SELECT).
+(none)
 
 ## In progress
 
@@ -54,6 +42,19 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Released (in main)
 
+- **ISSUE-19 — chore/audit-hygiene** · M0/M1 · PR #38
+  CLI `--db <path>` persistent sessions + `:flush`; dropped dead `tracing`
+  dep; docs honesty (ISSUE-15 MCP re-scope, PLAN status log, KANBAN archived,
+  spec order_op/statement sync).
+- **ISSUE-18 — feat/bm25-grammar** · M2 · PR #37
+  `WHERE ::bm25(field, "query") [AND k = N]` wired into the nql parser +
+  analyzer (engine `Filter::Bm25` already existed); spec sync (fts moved from
+  planned to M0 grammar, `order_op` gains `::votes`/`::feedback`, statement
+  list gains `match`).
+- **ISSUE-17 — feat/fix-votes-wal** · M1 · PR #36
+  `::score` now matches the parser's no-colon `"voted"` convention (votes
+  created via nql count again); read-only `MATCH` no longer written to the
+  WAL (`is_mutating` excludes SELECT and MATCH).
 - **ISSUE-12 — feat/graph-relations** · M0/M1 · PR #32
   RELATE + 1-hop MATCH; edges with props/weight/time. `MATCH (a) -> :name <- :name`
   (1+ hops, both directions) — IR, parser, analyzer, deterministic engine
@@ -83,8 +84,8 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 | Milestone | Issues |
 |---|---|
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
-| M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13 (fuzzing, vector-index-HNSW, feedback, storage-wal) |
-| M2 — nql grammar real | ISSUE-5, 9, 10, 14 (grammar-spec, analyzer-planner, repl, bm25-fts) |
+| M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal) |
+| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar) |
 | M3 — Agents & MCP | ISSUE-15, 16 (server-mode, agent-examples) |
 
 _This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
