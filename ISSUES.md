@@ -62,7 +62,9 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
   Chat memory, RAG, tool-call ledger, knowledge-graph examples (agent-side
   learning; engine stays deterministic).
 - **ISSUE-15 — feat/server-mcp** · M3 · PR #27
-  Network server mode + MCP server so agents can talk to nqlite over MCP.
+  Deterministic line-protocol server (TCP + stdio). NOTE: the MCP server is
+  NOT shipped — ISSUE-15 was renamed from feat/server-mcp to reflect what
+  actually landed; MCP remains planned (see PLAN.md M3).
 - **ISSUE-14 — feat/bm25-fts** · M2 · PR #26
   Deterministic BM25 lexical index (`::bm25` operator).
 - **ISSUE-13 — feat/storage-wal** · M1 · PR #25
@@ -83,7 +85,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
 | M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13 (fuzzing, vector-index-HNSW, feedback, storage-wal) |
 | M2 — nql grammar real | ISSUE-5, 9, 10, 14 (grammar-spec, analyzer-planner, repl, bm25-fts) |
-| M3 — Agents & MCP | ISSUE-15, 16 (server-mcp, agent-examples) |
+| M3 — Agents & MCP | ISSUE-15, 16 (server-mode, agent-examples) |
 
 _This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
 close an issue move it from Open → Merged → Released._

@@ -7,12 +7,12 @@ main  (releases)  ←  PR: release-sync
   ↑
 develop (integration)  ←  PR: feature
   ↑
-feat/<module>  (one branch per kanban card, docs/KANBAN.md)
+feat/<module>  (one branch per issue, ISSUES.md)
 ```
 
 - `main` — released/stable state only. Protected: PR + CI required.
 - `develop` — integration branch. Protected: PR + CI required.
-- `feat/*` — one branch per feature card on the kanban. Branch from `develop`,
+- `feat/*` — one branch per issue (see ISSUES.md). Branch from `develop`,
   open a PR **into `develop`** when the feature is complete.
 - Release: open a PR `develop → main` (release-sync), squash-merge, tag.
 
