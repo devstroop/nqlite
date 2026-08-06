@@ -134,23 +134,18 @@ def bench_lance(docs, knn):
     except ImportError:
         return {"db": "lancedb", "skipped": "driver not installed (pip install lancedb)"}
 
+    db = lancedb.connect("/tmp/nql-bench-lance")
+    if "docs" in db.list_tables():
+        db.drop_table("docs")
     import pyarrow as pa
 
-    db = lancedb.connect("/tmp/nql-bench-lance")
-    tbl = db.create_table(
-        "docs",
-        data=[
-            pa.array([d["embedding"] for d in docs], type=pa.list_(pa.float32(), 8)),
-            pa.array([d["text"] for d in docs], type=pa.string()),
-        ],
-        schema=pa.schema([
-            pa.field("embedding", pa.list_(pa.float32(), 8)),
-            pa.field("text", pa.string()),
-        ]),
-    )
+    schema = pa.schema([
+        pa.field("embedding", pa.list_(pa.float32(), 8)),
+        pa.field("text", pa.string()),
+    ])
+    tbl = db.create_table("docs", data=[], schema=schema)
     t0 = time.perf_counter()
-    for d in docs:
-        tbl.add([{"embedding": d["embedding"], "text": d["text"]}])
+    tbl.add([{"embedding": d["embedding"], "text": d["text"]} for d in docs])
     ingest_ms = (time.perf_counter() - t0) * 1000.0
 
     q = docs[0]["embedding"]
@@ -158,6 +153,7 @@ def bench_lance(docs, knn):
     for _ in range(knn):
         tbl.search(q).limit(10).to_list()
     knn_ms = (time.perf_counter() - t0) * 1000.0
+    db.drop_table("docs")
     return {"db": "lancedb", "rows": len(docs), "ingest_ms": r2(ingest_ms), "knn_ms": r2(knn_ms),
             "bm25_ms": "n/a (no lexical index)", "hybrid_ms": "n/a"}
 
@@ -196,6 +192,14 @@ def bench_chroma(docs, knn):
 
 def r2(x):
     return round(x, 2)
+
+
+def fmt_cell(x):
+    """Right-align a cell, truncating long strings so the table stays aligned."""
+    s = str(x)
+    if len(s) > 12:
+        s = s[:9] + "..."
+    return f"{s:>12}"
 
 
 def main():
@@ -238,7 +242,7 @@ def main():
             continue
         print(
             f"{r['db']:<12}{r['ingest_ms']:>12}{r['knn_ms']:>12}"
-            f"{str(r['bm25_ms']):>12}{str(r['hybrid_ms']):>12}"
+            f"{fmt_cell(r['bm25_ms'])}{fmt_cell(r['hybrid_ms'])}"
         )
     print("-" * 78)
     print("note: 'n/a' = competitor lacks that operator; compare only same-shape cells.")
