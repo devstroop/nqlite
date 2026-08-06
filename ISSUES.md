@@ -6,7 +6,19 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-(none)
+- **ISSUE-19 — chore/audit-hygiene** · M0/M1
+  Audit follow-up: CLI `--db <path>` persistence flag; drop dead `tracing`
+  dep; docs honesty (ISSUE-15 MCP re-scope, PLAN status log, KANBAN
+  superseded note, spec order_op/statement sync).
+- **ISSUE-18 — feat/bm25-grammar** · M2
+  Wire `WHERE ::bm25(field, "query") [AND k = N]` into the nql parser +
+  analyzer (engine `Filter::Bm25` already exists); spec sync (move fts from
+  planned to M0 grammar, add `::votes`/`::feedback` to order_op, add `match`
+  to statement list).
+- **ISSUE-17 — feat/fix-votes-wal** · M1
+  Bug fixes: `::score` matches `":voted"` but parser stores `"voted"` (votes
+  created via nql never counted); read-only `MATCH` is written to the WAL
+  (`is_mutating` only excludes SELECT).
 
 ## In progress
 
