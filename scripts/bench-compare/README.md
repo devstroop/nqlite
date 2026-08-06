@@ -16,6 +16,14 @@ the **same deterministic synthetic corpus**.
    - **LanceDB** — `pip install lancedb`
    - **Chroma** — `pip install chromadb`
 
+No system pip? Use a venv (any Python 3.9+):
+
+```sh
+python3 -m venv /tmp/bench-venv
+/tmp/bench-venv/bin/pip install sqlite-vec lancedb chromadb
+/tmp/bench-venv/bin/python3 scripts/bench-compare/bench.py
+```
+
 ## Running
 
 ```sh
