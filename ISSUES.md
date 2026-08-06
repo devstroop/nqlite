@@ -6,17 +6,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-- **ISSUE-22 — feat/feedback-harness** · M1
-  D9 ground-truth regression harness: (query, retrieved, relevance) triples
-  stored in the DB → recall@K / precision@K checks that catch retrieval
-  regressions on grammar/index/fusion changes.
-- **ISSUE-21 — feat/mcp-server** · M3
-  MCP server over nqlite so agents can talk to it over MCP (completes the
-  ISSUE-15 re-scope; the line-protocol server shipped, MCP did not).
-- **ISSUE-20 — feat/graph-core** · M1
-  CLOSURE transitive traversal + MATCH edge-property filters
-  (`WHERE <edge-prop> = <value>` per spec §1 planned extensions). Completes
-  the graph story: 1-hop MATCH shipped (ISSUE-12), closure is the M1 core.
+(none)
 
 ## In progress
 
@@ -52,6 +42,23 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Released (in main)
 
+- **ISSUE-22 — feat/feedback-harness** · M1 · PR #44
+  D9 ground-truth regression harness: relevance triples stored in the DB as
+  `(query) -> :relevant -> (doc)` edges; `nqlite::harness` recall@K /
+  precision@K; `tests/regression.rs` asserts kNN recall@4 ≥ 1.0 and BM25
+  recall/precision@4 ≥ 0.75 over a deterministic synthetic corpus. Catches
+  retrieval regressions on grammar/index/fusion changes.
+- **ISSUE-21 — feat/mcp-server** · M3 · PR #43 (+#45)
+  `nql-mcp`: MCP server (stdio, official rmcp SDK) exposing nqlite as tools
+  (execute_nql, create_table, insert_record, relate, select, match_path,
+  closure, forget) with deterministic JSON results — closes the ISSUE-15 MCP
+  gap. PR #45 synced it with the ISSUE-20 IR (closure tool + edge-property
+  steps).
+- **ISSUE-20 — feat/graph-core** · M1 · PR #42
+  CLOSURE transitive traversal (BFS fixpoint, first-visit order, depth
+  scores, cycle-safe) + MATCH edge-property filters (`WHERE <prop> = <value>`
+  per step) — IR, parser, analyzer, engine, server/cli; `QueryKind::Closure`.
+  Graph story complete (1-hop MATCH from ISSUE-12 + closure).
 - **ISSUE-19 — chore/audit-hygiene** · M0/M1 · PR #38
   CLI `--db <path>` persistent sessions + `:flush`; dropped dead `tracing`
   dep; docs honesty (ISSUE-15 MCP re-scope, PLAN status log, KANBAN archived,
@@ -73,9 +80,9 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
   Chat memory, RAG, tool-call ledger, knowledge-graph examples (agent-side
   learning; engine stays deterministic).
 - **ISSUE-15 — feat/server-mcp** · M3 · PR #27
-  Deterministic line-protocol server (TCP + stdio). NOTE: the MCP server is
-  NOT shipped — ISSUE-15 was renamed from feat/server-mcp to reflect what
-  actually landed; MCP remains planned (see PLAN.md M3).
+  Deterministic line-protocol server (TCP + stdio). NOTE: the MCP server was
+  NOT part of this issue (renamed from feat/server-mcp to reflect what
+  actually landed); the MCP server shipped later via ISSUE-21 (PR #43/#45).
 - **ISSUE-14 — feat/bm25-fts** · M2 · PR #26
   Deterministic BM25 lexical index (`::bm25` operator).
 - **ISSUE-13 — feat/storage-wal** · M1 · PR #25
@@ -94,9 +101,9 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 | Milestone | Issues |
 |---|---|
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
-| M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal) |
+| M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17, 20, 22 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal, graph-core, feedback-harness) |
 | M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar) |
-| M3 — Agents & MCP | ISSUE-15, 16 (server-mode, agent-examples) |
+| M3 — Agents & MCP | ISSUE-15, 16, 21 (server-mode, agent-examples, mcp-server) |
 
 _This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
 close an issue move it from Open → Merged → Released._
