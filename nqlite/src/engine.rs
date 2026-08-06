@@ -205,10 +205,65 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         _ => None,
     };
 
+    // Hybrid retrieval (combined optimizer, M2): when the select carries BOTH
+    // a kNN clause and a `::bm25` filter, fuse the two rankings with
+    // reciprocal-rank fusion (RRF): every candidate gets `1/(K + rank)` per
+    // list (K = 60, rank 1-based, tie-break by RecordId asc), summed across
+    // the lexical and vector lists. Deterministic and scale-free — the fused
+    // score is a pure function of `(store, select)`.
+    let hybrid: Option<BTreeMap<RecordId, f32>> = match (sel.knn.as_ref(), &bm25) {
+        (Some(_), Some((index, query_tokens))) => {
+            let mut fused: BTreeMap<RecordId, f32> = BTreeMap::new();
+            let mut lexical_ranked: Vec<(RecordId, f32)> = candidates
+                .iter()
+                .map(|r| {
+                    let s = index.score(&r.id, query_tokens);
+                    (r.id.clone(), s)
+                })
+                .collect();
+            lexical_ranked.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            for (rank, (id, _)) in lexical_ranked.iter().enumerate() {
+                *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (60.0 + (rank + 1) as f32);
+            }
+            let mut vector_ranked: Vec<(RecordId, f32)> = candidates
+                .iter()
+                .map(|r| {
+                    let s = knn_sims
+                        .as_ref()
+                        .and_then(|m| m.get(&r.id))
+                        .copied()
+                        .unwrap_or(0.0);
+                    (r.id.clone(), s)
+                })
+                .collect();
+            vector_ranked.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            for (rank, (id, _)) in vector_ranked.iter().enumerate() {
+                *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (60.0 + (rank + 1) as f32);
+            }
+            Some(fused)
+        }
+        _ => None,
+    };
+
     let mut rows: Vec<ScoredRecord> = candidates
         .into_iter()
         .map(|record| {
-            let score = compute_score(store, sel, &record, knn_sims.as_ref(), bm25.as_ref());
+            let score = compute_score(
+                store,
+                sel,
+                &record,
+                knn_sims.as_ref(),
+                bm25.as_ref(),
+                hybrid.as_ref(),
+            );
             ScoredRecord { record, score }
         })
         .collect();
@@ -459,7 +514,15 @@ fn compute_score(
     rec: &Record,
     knn_sims: Option<&BTreeMap<RecordId, f32>>,
     bm25: Option<&(Bm25Index, Vec<String>)>,
+    hybrid: Option<&BTreeMap<RecordId, f32>>,
 ) -> f32 {
+    // Hybrid fusion is the dominant score source: with both a kNN clause and a
+    // `::bm25` filter, every row is ranked by its RRF fused score regardless
+    // of ORDER BY.
+    if let Some(fused) = hybrid {
+        return fused.get(&rec.id).copied().unwrap_or(0.0);
+    }
+
     // A BM25 filter is the dominant score source: every row is ranked by its
     // lexical relevance regardless of ORDER BY / kNN.
     if let (Some(Filter::Bm25 { field, .. }), Some((index, query_tokens))) =
@@ -1831,5 +1894,146 @@ mod bm25_engine_tests {
         let res = db.execute(&[Statement::Select(sel)]).unwrap();
         assert_eq!(res[0].rows.len(), 1);
         assert_eq!(res[0].rows[0].record.id.to_string(), "doc:1");
+    }
+}
+
+#[cfg(test)]
+mod hybrid_tests {
+    //! Hybrid retrieval (combined optimizer): `::bm25(...) AND
+    //! vector::similarity(...) AND k = N` fuses the lexical and vector
+    //! rankings with reciprocal-rank fusion (RRF), deterministic tie-breaks.
+
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Filter, Knn, Record, RecordId, Select, Statement, Value};
+
+    use crate::{Database, QueryResult};
+
+    fn create(table: &str) -> Statement {
+        Statement::CreateTable {
+            table: table.to_string(),
+            vector_dim: None,
+        }
+    }
+
+    fn str_(s: &str) -> Value {
+        Value::Str(s.to_string())
+    }
+
+    fn record(id: &str, body: BTreeMap<String, Value>, embedding: Option<Vec<f32>>) -> Statement {
+        Statement::Insert(Record {
+            id: RecordId::parse(id).unwrap(),
+            body,
+            embedding,
+            created_at: 0,
+        })
+    }
+
+    fn hybrid_select(table: &str, query: &str, knn: Vec<f32>, k: usize) -> Statement {
+        Statement::Select(Select {
+            table: table.to_string(),
+            knn: Some(Knn { query: knn, k }),
+            filter: Some(Filter::Bm25 {
+                field: "text".into(),
+                query: query.into(),
+                k: None,
+            }),
+            ..Select::default()
+        })
+    }
+
+    /// Build a store where lexical and vector signals DISAGREE:
+    /// - `doc:a` matches the text query but is far from the vector query
+    /// - `doc:b` is near the vector query but does not match the text
+    /// - `doc:c` matches both (the winner)
+    /// - `doc:d` matches neither (the loser)
+    fn db() -> Database {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record(
+                "doc:a",
+                BTreeMap::from([("text".into(), str_("rust rust rust rust"))]),
+                Some(vec![0.0, 0.0, 1.0]), // far from q=[1,0,0]
+            ),
+            record(
+                "doc:b",
+                BTreeMap::from([("text".into(), str_("completely unrelated topic"))]),
+                Some(vec![0.98, 0.0, 0.0]), // near q
+            ),
+            record(
+                "doc:c",
+                BTreeMap::from([("text".into(), str_("rust rust rust rust rust rust"))]),
+                Some(vec![0.96, 0.1, 0.0]), // near q AND strongly matches
+            ),
+            record(
+                "doc:d",
+                BTreeMap::from([("text".into(), str_("alpha beta gamma"))]),
+                Some(vec![0.1, 0.2, 0.0]), // weak, non-collinear vector; no lexical match
+            ),
+        ])
+        .unwrap();
+        db
+    }
+
+    fn ids(res: &QueryResult) -> Vec<String> {
+        res.rows.iter().map(|r| r.record.id.to_string()).collect()
+    }
+
+    #[test]
+    fn hybrid_fusion_ranks_both_signal_winners_above_either_alone() {
+        let mut db = db();
+        // q = [1,0,0]; lexical "rust"; k = 3
+        let res = db
+            .execute(&[hybrid_select("doc", "rust", vec![1.0, 0.0, 0.0], 3)])
+            .unwrap();
+        let got = ids(&res[0]);
+        // doc:c matches both signals → fused rank 1. doc:a (lexical) and
+        // doc:b (vector) both beat doc:d (neither).
+        assert_eq!(got[0], "doc:c", "both-signal doc ranks first: {got:?}");
+        assert!(
+            got[1] == "doc:a" || got[1] == "doc:b",
+            "single-signal docs next: {got:?}"
+        );
+        assert_eq!(got.len(), 3, "k=3 caps the hybrid result: {got:?}");
+    }
+
+    #[test]
+    fn hybrid_is_deterministic_across_equal_stores() {
+        let mut a = db();
+        let mut b = db();
+        let plan = [hybrid_select("doc", "rust", vec![1.0, 0.0, 0.0], 4)];
+        let ra = a.execute(&plan).unwrap();
+        let rb = b.execute(&plan).unwrap();
+        assert_eq!(ids(&ra[0]), ids(&rb[0]));
+        let scores_a: Vec<f32> = ra[0].rows.iter().map(|r| r.score).collect();
+        let scores_b: Vec<f32> = rb[0].rows.iter().map(|r| r.score).collect();
+        assert_eq!(scores_a, scores_b);
+        // Non-increasing fused scores.
+        assert!(scores_a.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[test]
+    fn hybrid_without_embedding_scores_zero_and_ranks_last() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc"),
+            record(
+                "doc:lex",
+                BTreeMap::from([("text".into(), str_("rust rust rust"))]),
+                None, // no embedding
+            ),
+            record(
+                "doc:both",
+                BTreeMap::from([("text".into(), str_("rust rust"))]),
+                Some(vec![1.0, 0.0]),
+            ),
+        ])
+        .unwrap();
+        let res = db
+            .execute(&[hybrid_select("doc", "rust", vec![1.0, 0.0], 2)])
+            .unwrap();
+        let got = ids(&res[0]);
+        assert_eq!(got[0], "doc:both", "embedded+lexical first: {got:?}");
     }
 }
