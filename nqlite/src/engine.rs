@@ -41,6 +41,8 @@ pub enum QueryKind {
     Select(Select),
     /// A `MATCH` graph traversal (with the path that was walked).
     Match(MatchPath),
+    /// A `CLOSURE` transitive traversal (with the path that was walked).
+    Closure(MatchPath),
 }
 
 /// The result of one read statement (`SELECT` or `MATCH`) inside a plan.
@@ -133,6 +135,13 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
                 rows,
             }))
         }
+        Statement::Closure(path) => {
+            let rows = run_closure(store, path);
+            Ok(Some(QueryResult {
+                kind: QueryKind::Closure(path.clone()),
+                rows,
+            }))
+        }
     }
 }
 
@@ -215,11 +224,12 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
 /// Execute a [`MatchPath`] against `store`.
 ///
 /// Deterministic graph traversal: the frontier starts at `path.start` and each
-/// step moves to the other endpoint of every edge with a matching name and
-/// direction. Edges are scanned in append order; endpoints are deduplicated by
-/// [`RecordId`] keeping first appearance, so the result is a pure function of
-/// `(store, path)`. A missing start record yields an empty result (no panic),
-/// and dangling edges (endpoints never inserted) are skipped.
+/// step moves to the other endpoint of every edge with a matching name,
+/// direction, and (when the step carries one) edge-property filter. Edges are
+/// scanned in append order; endpoints are deduplicated by [`RecordId`] keeping
+/// first appearance, so the result is a pure function of `(store, path)`. A
+/// missing start record yields an empty result (no panic), and dangling edges
+/// (endpoints never inserted) are skipped.
 fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
     if !store.records.contains_key(&path.start) {
         return Vec::new();
@@ -240,6 +250,9 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
                 MatchDirection::In => (&edge.to, &edge.from),
             };
             if edge.name != step.name || !frontier.contains(from_side) {
+                continue;
+            }
+            if !matches_edge_props(edge, step.edge_props.as_ref()) {
                 continue;
             }
             if !store.records.contains_key(to_side) {
@@ -268,6 +281,87 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
             })
         })
         .collect()
+}
+
+/// Execute a [`MatchPath`] as a transitive closure against `store`.
+///
+/// Deterministic breadth-first traversal: the frontier starts at `path.start`
+/// and each step expands it to every record reachable via edges with the
+/// matching name/direction/filter — including multi-hop paths — until no new
+/// records are found (fixpoint). Every record ever reached (including the
+/// start) is returned once, in first-visit (BFS) order, scored by the depth
+/// at which it was first reached (`0.0` for the start record). A missing
+/// start record yields an empty result; dangling edges are skipped.
+fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
+    if !store.records.contains_key(&path.start) {
+        return Vec::new();
+    }
+
+    let mut visited: Vec<RecordId> = vec![path.start.clone()];
+    let mut depth_of: BTreeMap<RecordId, u32> = BTreeMap::new();
+    depth_of.insert(path.start.clone(), 0);
+
+    // BFS frontier: everything reached at the previous depth (start at depth 0).
+    let mut frontier: Vec<RecordId> = vec![path.start.clone()];
+    let mut next_depth = 1u32;
+
+    for step in &path.steps {
+        // Expand the current frontier to fixpoint along this step's edge.
+        loop {
+            let mut newly_reached: Vec<RecordId> = Vec::new();
+            for edge in &store.edges {
+                let (from_side, to_side) = match step.direction {
+                    MatchDirection::Out => (&edge.from, &edge.to),
+                    MatchDirection::In => (&edge.to, &edge.from),
+                };
+                if edge.name != step.name || !frontier.contains(from_side) {
+                    continue;
+                }
+                if !matches_edge_props(edge, step.edge_props.as_ref()) {
+                    continue;
+                }
+                if !store.records.contains_key(to_side) {
+                    continue; // dangling edge: skip
+                }
+                if !visited.contains(to_side) {
+                    visited.push(to_side.clone());
+                    newly_reached.push(to_side.clone());
+                    depth_of.insert(to_side.clone(), next_depth);
+                }
+            }
+            if newly_reached.is_empty() {
+                break; // fixpoint reached
+            }
+            frontier = newly_reached;
+            next_depth += 1;
+        }
+        // After this step's closure, the next step continues from everything
+        // this step reached (already in `visited`), which is the new frontier.
+        frontier = visited[1..].to_vec();
+    }
+
+    visited
+        .into_iter()
+        .filter_map(|id| {
+            store.records.get(&id).map(|record| ScoredRecord {
+                record: record.clone(),
+                score: depth_of.get(&id).copied().unwrap_or(0) as f32,
+            })
+        })
+        .collect()
+}
+
+/// Apply a step's optional edge-property filter: `edge.props[field] == value`.
+/// `None` accepts every edge; only `Filter::FieldEquals` is a valid filter
+/// here (the parser only produces that shape).
+fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
+    match filter {
+        None => true,
+        Some(Filter::FieldEquals { field, value }) => edge.props.get(field) == Some(value),
+        // The IR contract says only FieldEquals is valid; anything else is
+        // treated as a non-match rather than a panic (defensive).
+        Some(_) => false,
+    }
 }
 
 /// Build the default vector index (exact brute-force) over the embeddings of
@@ -1023,6 +1117,7 @@ mod tests {
                 .map(|(direction, name)| MatchStep {
                     direction: *direction,
                     name: (*name).into(),
+                    edge_props: None,
                 })
                 .collect(),
         })
@@ -1190,6 +1285,201 @@ mod tests {
             .collect();
         // Deduped, first edge's weight wins.
         assert_eq!(rows, vec![("note:1".to_string(), 0.2)]);
+    }
+
+    // -- CLOSURE + edge-property filters ------------------------------------
+
+    fn closure_path(start: &str, steps: &[(MatchDirection, &str)]) -> Statement {
+        Statement::Closure(MatchPath {
+            start: RecordId::parse(start).unwrap(),
+            steps: steps
+                .iter()
+                .map(|(direction, name)| MatchStep {
+                    direction: *direction,
+                    name: (*name).into(),
+                    edge_props: None,
+                })
+                .collect(),
+        })
+    }
+
+    fn relate_with_props(
+        from: &str,
+        name: &str,
+        to: &str,
+        props: BTreeMap<String, Value>,
+    ) -> Statement {
+        Statement::Relate(RelationEdge {
+            from: RecordId::parse(from).unwrap(),
+            name: name.into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props,
+        })
+    }
+
+    fn match_path_with_props(
+        start: &str,
+        steps: &[(MatchDirection, &str, Option<Filter>)],
+    ) -> Statement {
+        Statement::Match(MatchPath {
+            start: RecordId::parse(start).unwrap(),
+            steps: steps
+                .iter()
+                .map(|(direction, name, edge_props)| MatchStep {
+                    direction: *direction,
+                    name: (*name).into(),
+                    edge_props: edge_props.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn closure_reaches_transitive_neighborhood() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("person:2", BTreeMap::new(), None)),
+            Statement::Insert(record("person:3", BTreeMap::new(), None)),
+            Statement::Insert(record("note:9", BTreeMap::new(), None)),
+            relate("person:1", "knows", "person:2", None),
+            relate("person:2", "knows", "person:3", None),
+            relate("person:3", "knows", "person:1", None), // cycle
+            relate("person:1", "mentions", "note:9", None),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[closure_path("person:1", &[(MatchDirection::Out, "knows")])])
+            .unwrap();
+        assert!(matches!(res[0].kind, QueryKind::Closure(_)));
+        // BFS first-visit: start (depth 0), person:2 (1), person:3 (2). The
+        // cycle back to person:1 is deduped; the :mentions edge is excluded.
+        let rows: Vec<(String, f32)> = res[0]
+            .rows
+            .iter()
+            .map(|r| (r.record.id.to_string(), r.score))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("person:1".to_string(), 0.0),
+                ("person:2".to_string(), 1.0),
+                ("person:3".to_string(), 2.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn closure_unknown_start_is_empty() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let res = db
+            .execute(&[closure_path(
+                "person:404",
+                &[(MatchDirection::Out, "knows")],
+            )])
+            .unwrap();
+        assert!(res[0].rows.is_empty());
+    }
+
+    #[test]
+    fn match_edge_props_filter_restricts_traversal() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            create("note", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:1", BTreeMap::new(), None)),
+            Statement::Insert(record("note:2", BTreeMap::new(), None)),
+            relate_with_props(
+                "person:1",
+                "mentions",
+                "note:1",
+                BTreeMap::from([("confidence".into(), Value::Float(0.9))]),
+            ),
+            relate_with_props(
+                "person:1",
+                "mentions",
+                "note:2",
+                BTreeMap::from([("confidence".into(), Value::Float(0.4))]),
+            ),
+        ])
+        .unwrap();
+
+        let filter = Filter::FieldEquals {
+            field: "confidence".into(),
+            value: Value::Float(0.9),
+        };
+        let res = db
+            .execute(&[match_path_with_props(
+                "person:1",
+                &[(MatchDirection::Out, "mentions", Some(filter))],
+            )])
+            .unwrap();
+        let ids: Vec<String> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["note:1"],
+            "only the high-confidence edge is traversed"
+        );
+    }
+
+    #[test]
+    fn closure_edge_props_filter_limits_fixpoint() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("person", None),
+            Statement::Insert(record("person:1", BTreeMap::new(), None)),
+            Statement::Insert(record("person:2", BTreeMap::new(), None)),
+            Statement::Insert(record("person:3", BTreeMap::new(), None)),
+            relate_with_props(
+                "person:1",
+                "knows",
+                "person:2",
+                BTreeMap::from([("trust".into(), Value::Bool(true))]),
+            ),
+            relate_with_props(
+                "person:2",
+                "knows",
+                "person:3",
+                BTreeMap::from([("trust".into(), Value::Bool(false))]),
+            ),
+        ])
+        .unwrap();
+
+        let filter = Filter::FieldEquals {
+            field: "trust".into(),
+            value: Value::Bool(true),
+        };
+        let path = Statement::Closure(MatchPath {
+            start: RecordId::parse("person:1").unwrap(),
+            steps: vec![MatchStep {
+                direction: MatchDirection::Out,
+                name: "knows".into(),
+                edge_props: Some(filter),
+            }],
+        });
+        let res = db.execute(&[path]).unwrap();
+        let ids: Vec<String> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        // Fixpoint stops at the untrusted edge: person:2 reached, person:3 not.
+        assert_eq!(ids, vec!["person:1", "person:2"]);
     }
 }
 
