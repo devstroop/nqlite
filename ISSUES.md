@@ -6,19 +6,8 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-- **ISSUE-28 — chore/bench-run** · M2
-  Run the cross-DB benchmark harness (ISSUE-24) with real competitors:
-  install sqlite-vec / LanceDB / Chroma drivers and produce the first
-  side-by-side numbers on the deterministic corpus; commit the report +
-  methodology notes.
-- **ISSUE-27 — feat/memory-blocks** · M2/M3
-  `MEMORY <name>` blocks (core / archival / shared): named, addressable
-  context partitions so agents can scope recall (core facts vs working notes
-  vs shared state) — grammar, IR, engine storage, spec.
-- **ISSUE-26 — feat/temporal-reads** · M2
-  `AS OF <datetime>` time-travel reads (spec planned extension): queries
-  execute against the store as of a historical timestamp — deterministic
-  replay/versioned view semantics, `created_at`-based, spec update.
+(none)
+
 
 ## In progress
 
@@ -53,6 +42,23 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
   ordering, Laplace `::score`.
 
 ## Released (in main)
+
+- **ISSUE-28 — chore/bench-run** · M2 · PR #58
+  First cross-DB run with real competitors on the deterministic corpus
+  (1000 rows, dim-8, seed 42, 50 kNN queries): nqlite 3.74ms ingest /
+  443.83ms brute-force kNN / 608.23ms bm25 / 1260.78ms hybrid vs
+  sqlite-vec 22.21/3.43, lancedb 4.17/158.67, chroma 200.21/38.85.
+  Harness fixes (lancedb pyarrow schema, cell alignment, venv recipe),
+  report-2026-08-04.md with methodology + honest reading.
+- **ISSUE-27 — feat/memory-blocks** · M2/M3 · PR #57
+  `MEMORY <name>` context blocks: each memory is a full sub-store (own
+  records, edges, clock + history — AS OF composes); plan-level context via
+  execute_in_context; WAL replay preserves scoping across reopen.
+- **ISSUE-26 — feat/temporal-reads** · M2 · PR #56
+  `SELECT ... AS OF <ts>` time-travel via deterministic history replay
+  (logical clock, never wall-clock): Store gains clock + persisted mutation
+  history; upserts and FORGETs reconstruct correctly; is_mutating fixed to
+  exclude CLOSURE; storage FORMAT_VERSION 1→2.
 
 - **ISSUE-25 — chore/positioning** · M2/M3 · PR #51
   Positioning + messaging: docs/positioning.md (pitch, what it is/isn't,
@@ -131,7 +137,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 |---|---|
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
 | M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17, 20, 22 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal, graph-core, feedback-harness) |
-| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18, 23, 24, 25 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning) |
+| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18, 23..28 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning, temporal-reads, memory-blocks, bench-run) |
 | M3 — Agents & MCP | ISSUE-15, 16, 21 (server-mode, agent-examples, mcp-server) |
 
 _This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
