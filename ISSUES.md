@@ -6,22 +6,8 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 
 ## Open
 
-- **ISSUE-25 — chore/positioning** · M2/M3
-  Positioning + messaging pass: reconcile README framing with the
-  "SQLite for AI memory" pitch (vs "neural database" branding), add a
-  positioning/FAQ doc covering deterministic engine, zero-LLM, BYO vectors,
-  and the honest comparison story vs sqlite-vec/LanceDB/Chroma.
-- **ISSUE-24 — chore/bench-compare** · M2
-  Cross-DB benchmark harness: run the deterministic benchmark suite against
-  nqlite AND comparable embedded stores (sqlite-vec, LanceDB, Chroma) on the
-  same synthetic corpus; report recall/latency side by side. Harness lives in
-  the repo; external-DB runs are optional (skip when the dep is absent).
-- **ISSUE-23 — feat/hybrid-retrieval** · M2
-  Combined optimizer (M2 roadmap item): one WHERE can combine lexical and
-  vector recall — `::bm25(field, "q") AND vector::similarity(embedding, $v)
-  AND k = N` — fused deterministically (reciprocal-rank fusion, tie-break by
-  RecordId). Engine pipeline handles both candidate sets; spec where_clause
-  gains the combined form.
+(none)
+
 
 ## In progress
 
@@ -56,6 +42,23 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
   ordering, Laplace `::score`.
 
 ## Released (in main)
+
+- **ISSUE-25 — chore/positioning** · M2/M3 · PR #51
+  Positioning + messaging: docs/positioning.md (pitch, what it is/isn't,
+  honest comparisons, terminology); README headline → "SQLite for AI memory"
+  ("neural" = embeddings-as-first-class-data); features list gains ::bm25,
+  hybrid retrieval, MATCH + CLOSURE; PLAN/spec/decisions framing note;
+  CHANGELOG brought current.
+- **ISSUE-24 — chore/bench-compare** · M2 · PR #50
+  Cross-DB benchmark harness: nql-bench (workspace member) + 
+  scripts/bench-compare/bench.py — same deterministic corpus (xorshift64*
+  seed 42) across nqlite and (when installed) sqlite-vec / LanceDB / Chroma;
+  JSON or table report; skips cleanly on missing drivers.
+- **ISSUE-23 — feat/hybrid-retrieval** · M2 · PR #49
+  Combined optimizer: `::bm25(field, "q") AND vector::similarity(embedding,
+  $v) AND k = N` (clauses in either order) — both signals computed and fused
+  with deterministic reciprocal-rank fusion (1/(60+rank)); fused score is the
+  sort key; cap = min(knn k, bm25 k, LIMIT). Parser + engine + spec §2.6.
 
 - **ISSUE-22 — feat/feedback-harness** · M1 · PR #44
   D9 ground-truth regression harness: relevance triples stored in the DB as
@@ -117,7 +120,7 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 |---|---|
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
 | M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17, 20, 22 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal, graph-core, feedback-harness) |
-| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar) |
+| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18, 23, 24, 25 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning) |
 | M3 — Agents & MCP | ISSUE-15, 16, 21 (server-mode, agent-examples, mcp-server) |
 
 _This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
