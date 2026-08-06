@@ -508,6 +508,36 @@ impl Parser {
                 return Ok((Some(knn), filter));
             }
         }
+        // `::bm25(<field>, "<query>") [AND k = <N>]` — lexical retrieval.
+        if matches!(self.peek_tok(), Token::DoubleColon) {
+            self.bump();
+            let op = self.expect_ident("operator after `::`")?;
+            if !op.eq_ignore_ascii_case("bm25") {
+                return Err(self.err_here(format!(
+                    "unknown WHERE operator `::{op}` (expected ::bm25, vector::similarity, or a field comparison)"
+                )));
+            }
+            self.expect_token(Token::LParen, "`(` after ::bm25")?;
+            let field = self.expect_ident("::bm25 field name")?;
+            self.expect_token(Token::Comma, "`,` between field and query")?;
+            let query = match self.parse_value()? {
+                Value::Str(s) => s,
+                other => {
+                    return Err(self.err_here(format!(
+                        "::bm25 query must be a string, found {}",
+                        value_name(&other)
+                    )));
+                }
+            };
+            self.expect_token(Token::RParen, "`)` closing ::bm25")?;
+            let mut k = None;
+            if self.eat_keyword("and") {
+                self.expect_ident("`k`")?;
+                self.expect_token(Token::Eq, "`=` before k")?;
+                k = Some(self.expect_usize("k")?);
+            }
+            return Ok((None, Some(Filter::Bm25 { field, query, k })));
+        }
         let field = self.expect_ident("WHERE field name")?;
         if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("is")) {
             self.bump();
