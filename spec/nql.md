@@ -3,7 +3,7 @@
 Version: 0.1 (M0 slice) · Status: living spec — implementers target this file;
 changes here are contract changes (PRs that alter grammar must update this file).
 
-nql is the query language of **nqlite**, a deterministic, zero-LLM neural
+nql is the query language of **nqlite**, a deterministic, zero-LLM
 database. nql expresses records, typed relations (graph), embeddings, temporal
 context, and hybrid retrieval in ONE grammar. The engine never calls an LLM;
 vectors are BYO (agent-supplied `f32` arrays). This file defines the grammar
