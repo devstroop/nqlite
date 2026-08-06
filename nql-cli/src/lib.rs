@@ -26,6 +26,21 @@ impl Session {
         }
     }
 
+    /// Open (or create) a persistent session backed by the single-file store
+    /// at `path` (see `spec/file-format.md`). Every mutating statement is
+    /// logged to the sidecar WAL; `flush` checkpoints it into the main file.
+    pub fn open(path: impl AsRef<std::path::Path>, out: Box<dyn Write>) -> std::io::Result<Self> {
+        let db = Database::open(path).map_err(|e| std::io::Error::other(format!("open: {e}")))?;
+        Ok(Session { db, out })
+    }
+
+    /// Checkpoint the WAL into the main file (no-op for in-memory sessions).
+    pub fn checkpoint(&mut self) -> std::io::Result<()> {
+        self.db
+            .flush()
+            .map_err(|e| std::io::Error::other(format!("flush: {e}")))
+    }
+
     /// Run a full input (possibly multi-statement, `;`-separated or with
     /// newlines). Returns the number of statements executed. Deterministic.
     pub fn run(&mut self, input: &str) -> std::io::Result<usize> {
