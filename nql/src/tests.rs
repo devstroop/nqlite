@@ -262,6 +262,7 @@ fn select_knn_order_limit() {
                 k: 5,
             }),
             filter: None,
+            as_of: None,
             order: Some(Order::Similarity),
             limit: Some(10),
         }
@@ -339,6 +340,39 @@ fn select_bm25_requires_string_query() {
 fn select_unknown_double_colon_operator_errors() {
     let err = parse("SELECT * FROM doc WHERE ::bogus(text, \"q\")").unwrap_err();
     assert!(err.to_string().contains("::bogus"), "got: {err}");
+}
+
+#[test]
+fn select_as_of_parses_timestamp() {
+    let plan = parse("SELECT * FROM doc AS OF 42").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, Some(42));
+}
+
+#[test]
+fn select_as_of_is_case_insensitive() {
+    let plan = parse("SELECT * FROM doc as of 7").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, Some(7));
+}
+
+#[test]
+fn select_without_as_of_has_none() {
+    let plan = parse("SELECT * FROM doc LIMIT 3").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, None);
+}
+
+#[test]
+fn select_as_of_requires_integer() {
+    let err = parse("SELECT * FROM doc AS OF foo").unwrap_err();
+    assert!(err.to_string().contains("AS OF timestamp"), "got: {err}");
 }
 
 #[test]

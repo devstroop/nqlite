@@ -129,7 +129,10 @@ impl Database {
 }
 
 /// True for statements that change the store and therefore belong in the WAL.
-/// Read-only statements (`SELECT`, `MATCH`) are never logged.
+/// Read-only statements (`SELECT`, `MATCH`, `CLOSURE`) are never logged.
 fn is_mutating(stmt: &Statement) -> bool {
-    !matches!(stmt, Statement::Select(_) | Statement::Match(_))
+    !matches!(
+        stmt,
+        Statement::Select(_) | Statement::Match(_) | Statement::Closure(_)
+    )
 }

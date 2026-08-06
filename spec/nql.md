@@ -31,6 +31,7 @@ relate         = 'RELATE' '(' recordid ')' '->' ':' ident '->' '(' recordid ')'
 select         = 'SELECT' select_list 'FROM' ident
                  [ 'WHERE' where_clause ]
                  [ 'ORDER' 'BY' '::' order_op ]
+                 [ 'AS' 'OF' int ]
                  [ 'LIMIT' int ] ;
 
 forget         = 'FORGET' recordid ;
@@ -59,7 +60,6 @@ vector         = '[' float (',' float)* ']' ;   (* all-float array *)
 ### Planned extensions (NOT in M0 — for M2+)
 
 ```
-temporal       = 'AS' 'OF' datetime ;               (* time-travel reads *)
 memory         = 'MEMORY' ident ;                   (* core/archival/shared blocks *)
 create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 ```
@@ -86,7 +86,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
 | `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <edge-prop> = <value>` to only traverse edges whose props match. Deterministic (see §2.5). |
 | `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
-| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; orders deterministically; limits; returns records (+computed score). |
+| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; limits; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 
 ### 2.3 SELECT pipeline (fixed order)
@@ -157,6 +157,24 @@ and fuses them with reciprocal-rank fusion (RRF):
   in only one.
 - The fused score is the sort key (explicit `ORDER BY` is ignored); the row
   cap is the smallest of `k`, the BM25 `k`, and `LIMIT`.
+
+### 2.7 Temporal reads (`AS OF`)
+
+`SELECT ... AS OF <int>` executes against the store **as of logical timestamp
+`<int>`**, not the current state. Semantics:
+
+- Every mutating statement executed through the engine is appended to the
+  store's mutation history under the next logical timestamp (a deterministic
+  counter — never wall-clock, so replay is a pure function of statement
+  order). The history is persisted with the store, so time-travel survives
+  checkpoints and WAL replay.
+- An `AS OF T` read replays the history entries with `ts <= T` into a fresh
+  store and queries that. Upserts and `FORGET`s reconstruct correctly: an
+  `AS OF` between two upserts of the same id sees the first version; `AS OF`
+  before a `FORGET` sees the record again.
+- `AS OF` with a cutoff beyond the last mutation is the full current state.
+- The timestamp is the **logical** mutation counter, not a wall-clock
+  datetime; a datetime-literal form is future work.
 
 ## 3. Operators
 
@@ -241,12 +259,14 @@ RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;
 
 -- rank by community feedback
 SELECT * FROM turn ORDER BY ::score LIMIT 5;
+
+-- time travel: the conversation as it stood at logical ts 42
+SELECT * FROM turn AS OF 42;
 ```
 
 ### 6.2 Planned syntax (M2+)
 
 ```sql
-SELECT * FROM turn AS OF 2026-08-03T00:00:00Z;
 MEMORY core;                           -- agent memory blocks
 ```
 

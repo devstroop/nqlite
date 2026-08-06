@@ -20,7 +20,7 @@ use thiserror::Error;
 pub const CHECKPOINT_THRESHOLD: u64 = 1 << 20; // 1 MiB
 
 const MAGIC: &[u8; 8] = b"NQLITE01";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const WAL_SUFFIX: &str = ".wal";
 
 /// Storage errors (all recoverable by re-opening / re-checkpointing).

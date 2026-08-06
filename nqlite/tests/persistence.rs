@@ -155,3 +155,42 @@ fn read_only_match_is_not_written_to_wal() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn as_of_history_survives_checkpoint_and_reopen() {
+    let dir = std::env::temp_dir().join(format!("nqlite-temporal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1: create + insert + forget, then checkpoint + drop.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"name\": \"alpha\" };
+                 FORGET t:1;",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.flush().unwrap();
+    }
+
+    // Session 2: reopen — the mutation history (and thus AS OF) survives the
+    // checkpoint: the forgotten record is visible as of before the FORGET.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let now = db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        assert_eq!(now[0].rows.len(), 0, "t:1 was forgotten");
+
+        let past = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(past[0].rows.len(), 1, "AS OF sees the pre-forget state");
+        assert_eq!(past[0].rows[0].record.id.to_string(), "t:1");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

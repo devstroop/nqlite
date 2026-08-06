@@ -243,3 +243,37 @@ fn nql_hybrid_bm25_and_vector_fusion_end_to_end() {
         "scores: {scores:?}"
     );
 }
+
+#[test]
+fn nql_as_of_temporal_read_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE turn;
+        INSERT INTO turn:1 { "text": "hello" };
+        INSERT INTO turn:2 { "text": "world" };
+        FORGET turn:1;
+        SELECT * FROM turn AS OF 3;
+        SELECT * FROM turn AS OF 2;
+        SELECT * FROM turn;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 3);
+
+    // AS OF 3 = after both inserts (CREATE=1, t1=2, t2=3), before the FORGET.
+    let past = &results[0];
+    let ids: Vec<String> = past.rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids, ["turn:1", "turn:2"], "historical view: {ids:?}");
+
+    // AS OF 2 = after turn:1 only; turn:2 (ts 3) not yet visible.
+    let mid = &results[1];
+    let ids: Vec<String> = mid.rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids, ["turn:1"], "mid view: {ids:?}");
+
+    // Current view: turn:1 was forgotten.
+    let now = &results[2];
+    let ids: Vec<String> = now.rows.iter().map(|r| r.record.id.to_string()).collect();
+    assert_eq!(ids, ["turn:2"], "current view: {ids:?}");
+}
