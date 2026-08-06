@@ -140,6 +140,12 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
     (time-decayed: Σ sign·1/(1+λ·age), `now` = max created_at in store — pure,
     deterministic, no wall-clock) in the engine; parser accepts
     `ORDER BY ::votes | ::feedback`.
+  - **LANDED (2026-08-04)**: retrieval regression harness (`nqlite::harness`):
+    ground-truth relevance stored as `:relevant` edges in the store (same
+    votes-as-edges model), `recall_at_k` / `precision_at_k` metrics, and
+    `tests/regression.rs` asserting recall/precision floors over a
+    deterministic synthetic corpus (kNN + BM25 paths). Catches retrieval
+    regressions on grammar/index/fusion changes.
   - Poisoning/drift: votes carry voter + trust weight; engine stores, agent
     decides trust policy; deterministic decay for old votes.
 
