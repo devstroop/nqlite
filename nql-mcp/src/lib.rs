@@ -430,6 +430,7 @@ impl NqlMcp {
             filter,
             order,
             limit,
+            as_of: None,
         });
         let mut db = self.db.lock().unwrap();
         match db.execute(&[stmt]) {

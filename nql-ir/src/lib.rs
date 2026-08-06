@@ -111,25 +111,6 @@ pub struct Record {
     pub created_at: i64,
 }
 
-/// The full "database" snapshot a query runs against. In M0 this is in-memory;
-/// M1 makes it the on-disk single-file store + WAL.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Store {
-    pub records: BTreeMap<RecordId, Record>,
-    pub edges: Vec<RelationEdge>,
-    /// Per-table vector dimensions once declared.
-    pub vector_dims: BTreeMap<String, usize>,
-}
-
-impl Store {
-    pub fn insert(&mut self, rec: Record) {
-        // Keep insertion deterministic: preserve first-seen order via BTree key
-        // ordering (BTreeMap is already deterministic). Edge list is append-only
-        // in insertion order, which is deterministic per transaction.
-        self.records.insert(rec.id.clone(), rec);
-    }
-}
-
 /// Minimal value-type smoke test so `cargo test` has a canonical harness target
 /// before the real engine tests land in Milestone 0.
 #[cfg(test)]
@@ -220,6 +201,11 @@ pub enum Statement {
     Closure(MatchPath),
     /// Delete a record (and its incident edges).
     Forget { id: RecordId },
+    /// Switch the current memory context for subsequent statements in the
+    /// plan (`MEMORY <name>`): DDL/DML/reads after this statement operate on
+    /// the named memory's own store. Named memories are core/archival/shared
+    /// partitions for agents (spec §2.8).
+    Memory { name: String },
 }
 
 /// A graph traversal: start at `start`, walk `steps` in order.
@@ -262,6 +248,47 @@ pub struct Select {
     pub filter: Option<Filter>,
     pub order: Option<Order>,
     pub limit: Option<usize>,
+    /// Temporal read: execute against the store as of this logical
+    /// timestamp (`AS OF <int>`), replaying the mutation history up to it.
+    pub as_of: Option<i64>,
+}
+
+/// The full "database" snapshot a query runs against. In M0 this is in-memory;
+/// M1 makes it the on-disk single-file store + WAL.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Store {
+    pub records: BTreeMap<RecordId, Record>,
+    pub edges: Vec<RelationEdge>,
+    /// Per-table vector dimensions once declared.
+    pub vector_dims: BTreeMap<String, usize>,
+    /// Deterministic logical clock: incremented once per mutating statement
+    /// executed through the engine. The time source for `AS OF` reads — never
+    /// wall-clock, so replay is a pure function of the statement order.
+    pub clock: i64,
+    /// Append-only mutation history: `(logical_timestamp, statement)` for
+    /// every mutating statement this store has executed. `AS OF T` replays
+    /// the entries with `ts <= T` into a fresh store. Persisted with the
+    /// store, so time-travel survives checkpoints and WAL replay.
+    pub history: Vec<(i64, Statement)>,
+    /// Named memory partitions (`MEMORY <name>`): each is a full sub-store
+    /// (records, edges, dims, its own clock + history), so temporal reads
+    /// compose with memory scoping. The default context is the store itself.
+    pub memories: BTreeMap<String, Store>,
+}
+
+impl Store {
+    pub fn insert(&mut self, rec: Record) {
+        // Keep insertion deterministic: preserve first-seen order via BTree key
+        // ordering (BTreeMap is already deterministic). Edge list is append-only
+        // in insertion order, which is deterministic per transaction.
+        self.records.insert(rec.id.clone(), rec);
+    }
+
+    /// Record a mutating statement under the next logical timestamp.
+    pub fn log_mutation(&mut self, stmt: &Statement) {
+        self.clock += 1;
+        self.history.push((self.clock, stmt.clone()));
+    }
 }
 
 /// Vector kNN clause: `WHERE vector::similarity(embedding, $q) AND k = N`.

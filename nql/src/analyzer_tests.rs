@@ -30,6 +30,7 @@ fn select(table: &str, knn: Option<Knn>, order: Option<Order>) -> Statement {
         filter: None,
         order,
         limit: None,
+        as_of: None,
     })
 }
 

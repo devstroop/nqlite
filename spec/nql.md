@@ -19,7 +19,7 @@ Keywords are case-insensitive. Whitespace/comments (`--` to end of line, `/* */`
 are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
-statement      = create_table | insert | relate | select | match | closure | forget ;
+statement      = create_table | insert | relate | select | match | closure | memory | forget ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -31,9 +31,12 @@ relate         = 'RELATE' '(' recordid ')' '->' ':' ident '->' '(' recordid ')'
 select         = 'SELECT' select_list 'FROM' ident
                  [ 'WHERE' where_clause ]
                  [ 'ORDER' 'BY' '::' order_op ]
+                 [ 'AS' 'OF' int ]
                  [ 'LIMIT' int ] ;
 
 forget         = 'FORGET' recordid ;
+
+memory         = 'MEMORY' ident ;
 
 match          = 'MATCH' '(' recordid ')' path_step+ ;
 closure        = 'CLOSURE' '(' recordid ')' path_step+ ;
@@ -59,8 +62,6 @@ vector         = '[' float (',' float)* ']' ;   (* all-float array *)
 ### Planned extensions (NOT in M0 — for M2+)
 
 ```
-temporal       = 'AS' 'OF' datetime ;               (* time-travel reads *)
-memory         = 'MEMORY' ident ;                   (* core/archival/shared blocks *)
 create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 ```
 
@@ -86,8 +87,9 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
 | `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <edge-prop> = <value>` to only traverse edges whose props match. Deterministic (see §2.5). |
 | `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
-| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; orders deterministically; limits; returns records (+computed score). |
+| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; limits; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
+| `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
 
 ### 2.3 SELECT pipeline (fixed order)
 
@@ -157,6 +159,41 @@ and fuses them with reciprocal-rank fusion (RRF):
   in only one.
 - The fused score is the sort key (explicit `ORDER BY` is ignored); the row
   cap is the smallest of `k`, the BM25 `k`, and `LIMIT`.
+
+### 2.7 Temporal reads (`AS OF`)
+
+`SELECT ... AS OF <int>` executes against the store **as of logical timestamp
+`<int>`**, not the current state. Semantics:
+
+- Every mutating statement executed through the engine is appended to the
+  store's mutation history under the next logical timestamp (a deterministic
+  counter — never wall-clock, so replay is a pure function of statement
+  order). The history is persisted with the store, so time-travel survives
+  checkpoints and WAL replay.
+- An `AS OF T` read replays the history entries with `ts <= T` into a fresh
+  store and queries that. Upserts and `FORGET`s reconstruct correctly: an
+  `AS OF` between two upserts of the same id sees the first version; `AS OF`
+  before a `FORGET` sees the record again.
+- `AS OF` with a cutoff beyond the last mutation is the full current state.
+- The timestamp is the **logical** mutation counter, not a wall-clock
+  datetime; a datetime-literal form is future work.
+
+### 2.8 Memory blocks (`MEMORY <name>`)
+
+`MEMORY <name>` partitions context: every statement after it in the same plan
+runs against the named memory's own store (created lazily on first mention).
+Semantics:
+
+- Each memory is a full sub-store: its own records, edges, vector dims, and
+  its own logical clock + mutation history. `AS OF` reads inside a memory
+  replay that memory's history only.
+- The default context is the root store; a plan always starts at the root, so
+  an agent re-asserts `MEMORY <name>` at the top of any plan that should run
+  inside a memory. Same `table:id` in different memories are different
+  records.
+- `MEMORY` statements are logged to the WAL (they carry the context switch),
+  so memory scoping survives reopen via replay. Executing `MEMORY` outside a
+  plan (directly via the engine's statement API) is an error.
 
 ## 3. Operators
 
@@ -241,12 +278,20 @@ RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;
 
 -- rank by community feedback
 SELECT * FROM turn ORDER BY ::score LIMIT 5;
+
+-- time travel: the conversation as it stood at logical ts 42
+SELECT * FROM turn AS OF 42;
+
+-- memory blocks: partition core facts vs working notes
+MEMORY core;
+SELECT * FROM entity WHERE name = "Acme Corp";
+MEMORY working;
+INSERT INTO note:1 { "text": "todo: verify the recall curve" };
 ```
 
 ### 6.2 Planned syntax (M2+)
 
 ```sql
-SELECT * FROM turn AS OF 2026-08-03T00:00:00Z;
 MEMORY core;                           -- agent memory blocks
 ```
 

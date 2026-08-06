@@ -20,7 +20,7 @@ use thiserror::Error;
 pub const CHECKPOINT_THRESHOLD: u64 = 1 << 20; // 1 MiB
 
 const MAGIC: &[u8; 8] = b"NQLITE01";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const WAL_SUFFIX: &str = ".wal";
 
 /// Storage errors (all recoverable by re-opening / re-checkpointing).
@@ -143,6 +143,7 @@ impl StoreFile {
         };
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
+        let mut current_memory: Option<String> = None;
 
         let mut replayed = Vec::new();
         let mut pos = 0usize;
@@ -166,8 +167,10 @@ impl StoreFile {
                     // Replay is best-effort over logged statements: SELECT is
                     // never logged, and mutating statements are total (they
                     // cannot fail on a valid store), so any engine error here
-                    // means a corrupt frame — treat it as torn.
-                    let _ = crate::engine::execute_statement(store, &stmt);
+                    // means a corrupt frame — treat it as torn. Memory
+                    // statements carry the context switch so MEMORY scoping
+                    // survives reopen.
+                    let _ = crate::engine::execute_in_context(store, &stmt, &mut current_memory);
                     replayed.push(stmt);
                     pos = start + len;
                     good_until = pos;

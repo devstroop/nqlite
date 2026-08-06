@@ -155,3 +155,95 @@ fn read_only_match_is_not_written_to_wal() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn as_of_history_survives_checkpoint_and_reopen() {
+    let dir = std::env::temp_dir().join(format!("nqlite-temporal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1: create + insert + forget, then checkpoint + drop.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"name\": \"alpha\" };
+                 FORGET t:1;",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.flush().unwrap();
+    }
+
+    // Session 2: reopen — the mutation history (and thus AS OF) survives the
+    // checkpoint: the forgotten record is visible as of before the FORGET.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let now = db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        assert_eq!(now[0].rows.len(), 0, "t:1 was forgotten");
+
+        let past = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(past[0].rows.len(), 1, "AS OF sees the pre-forget state");
+        assert_eq!(past[0].rows[0].record.id.to_string(), "t:1");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn memory_blocks_survive_wal_replay_across_reopen() {
+    let dir = std::env::temp_dir().join(format!("nqlite-memory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1: write into the root and into a named memory, drop without
+    // flushing (durability comes from the WAL, which logs MEMORY frames so
+    // the context switch replays).
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"name\": \"root\" };
+                 MEMORY core;
+                 CREATE TABLE t;
+                 INSERT INTO t:1 { \"name\": \"core\" };",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Session 2: reopen — WAL replay must reconstruct memory scoping: the
+    // core memory exists with its own record, the root is unaffected.
+    {
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.store().records.len(), 1, "root record survives");
+        assert_eq!(db.store().memories.len(), 1, "core memory survives");
+
+        let mut db = db;
+        let core = db
+            .execute(
+                &parse(
+                    "MEMORY core;
+                     SELECT * FROM t;",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(core[0].rows.len(), 1, "core memory record survives");
+        assert_eq!(core[0].rows[0].record.id.to_string(), "t:1");
+        assert_eq!(
+            core[0].rows[0].record.body.get("name"),
+            Some(&nql_ir::Value::Str("core".into()))
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

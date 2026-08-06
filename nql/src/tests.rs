@@ -262,6 +262,7 @@ fn select_knn_order_limit() {
                 k: 5,
             }),
             filter: None,
+            as_of: None,
             order: Some(Order::Similarity),
             limit: Some(10),
         }
@@ -339,6 +340,72 @@ fn select_bm25_requires_string_query() {
 fn select_unknown_double_colon_operator_errors() {
     let err = parse("SELECT * FROM doc WHERE ::bogus(text, \"q\")").unwrap_err();
     assert!(err.to_string().contains("::bogus"), "got: {err}");
+}
+
+#[test]
+fn select_as_of_parses_timestamp() {
+    let plan = parse("SELECT * FROM doc AS OF 42").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, Some(42));
+}
+
+#[test]
+fn select_as_of_is_case_insensitive() {
+    let plan = parse("SELECT * FROM doc as of 7").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, Some(7));
+}
+
+#[test]
+fn select_without_as_of_has_none() {
+    let plan = parse("SELECT * FROM doc LIMIT 3").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.as_of, None);
+}
+
+#[test]
+fn select_as_of_requires_integer() {
+    let err = parse("SELECT * FROM doc AS OF foo").unwrap_err();
+    assert!(err.to_string().contains("AS OF timestamp"), "got: {err}");
+}
+
+#[test]
+fn memory_parses_name() {
+    let plan = parse("MEMORY core").unwrap();
+    let Statement::Memory { name } = &plan[0] else {
+        panic!("expected Memory, got {:?}", plan[0]);
+    };
+    assert_eq!(name, "core");
+}
+
+#[test]
+fn memory_is_case_insensitive_keyword() {
+    let plan = parse("memory archival").unwrap();
+    assert!(matches!(&plan[0], Statement::Memory { .. }));
+}
+
+#[test]
+fn memory_requires_name() {
+    let err = parse("MEMORY").unwrap_err();
+    assert!(err.to_string().contains("memory name"), "got: {err}");
+}
+
+#[test]
+fn memory_switches_context_within_a_plan() {
+    // MEMORY scoping is plan-level: statements after it target the named
+    // memory, statements before it target the root store.
+    let plan = parse(
+        "CREATE TABLE t; INSERT INTO t:1 { \"x\": 1 }; MEMORY core; INSERT INTO t:1 { \"x\": 2 };",
+    )
+    .unwrap();
+    assert_eq!(plan.len(), 4);
+    assert!(matches!(&plan[2], Statement::Memory { name } if name == "core"));
 }
 
 #[test]

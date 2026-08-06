@@ -152,6 +152,7 @@ impl Ctx {
                 validate_record_id(id)?;
                 Ok(stmt.clone())
             }
+            Statement::Memory { .. } => Ok(stmt.clone()),
         }
     }
 }
