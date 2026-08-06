@@ -114,3 +114,59 @@ fn nql_match_traversal_end_to_end() {
     let ids: Vec<String> = inc.rows.iter().map(|r| r.record.id.to_string()).collect();
     assert_eq!(ids, ["turn:3"]);
 }
+
+#[test]
+fn nql_votes_flow_into_score_order() {
+    // Regression: `::score` must count `:voted` edges created through the nql
+    // grammar. The parser strips the edge-name colon (`:voted` -> "voted"),
+    // so score_of must match the same convention as ::votes/::feedback.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE turn;
+        INSERT INTO turn:3 { "text": "hello" };
+        RELATE (agent:main) -> :voted -> (turn:3) SET value = 1, weight = 0.9;
+        SELECT * FROM turn ORDER BY ::score;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+
+    // Laplace-smoothed mean: (0.9 + 1) / (1 + 2) = 0.6333..., NOT the 0.5
+    // no-vote baseline that a missed edge name would produce.
+    let score = results[0].rows[0].score;
+    assert!(
+        (score - 19.0 / 30.0).abs() < 1e-6,
+        "::score must reflect the vote, got {score}"
+    );
+}
+
+#[test]
+fn nql_bm25_lexical_retrieval_end_to_end() {
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:1 { "text": "the quick brown fox" };
+        INSERT INTO doc:2 { "text": "lazy dog fox" };
+        INSERT INTO doc:3 { "text": "unrelated topic" };
+        SELECT * FROM doc WHERE ::bm25(text, "fox") ORDER BY ::similarity;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 1);
+
+    // BM25 scores every row (it scores rather than prunes); both fox docs
+    // outrank the unrelated one.
+    let rows = &results[0].rows;
+    assert_eq!(rows.len(), 3, "BM25 returns every row, scored");
+    let ids: Vec<String> = rows.iter().map(|r| r.record.id.to_string()).collect();
+    let scores: Vec<f32> = rows.iter().map(|r| r.score).collect();
+    assert!(
+        ids[0] == "doc:1" || ids[0] == "doc:2",
+        "a fox doc ranks first, got {ids:?} scores={scores:?}"
+    );
+    assert!(scores[0] >= scores[1] && scores[1] >= scores[2]);
+    assert!(scores[2] == 0.0, "unrelated doc scores 0, got {scores:?}");
+}

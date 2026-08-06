@@ -236,6 +236,51 @@ fn select_embedding_is_not_null() {
 }
 
 #[test]
+fn select_bm25_filter() {
+    let plan = parse(r#"SELECT * FROM doc WHERE ::bm25(text, "acme corp")"#).unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::Bm25 {
+            field: "text".into(),
+            query: "acme corp".into(),
+            k: None,
+        })
+    );
+    assert!(s.knn.is_none());
+}
+
+#[test]
+fn select_bm25_with_k_cap() {
+    let plan = parse(r#"SELECT * FROM doc WHERE ::bm25(text, "acme") AND k = 5"#).unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::Bm25 {
+            field: "text".into(),
+            query: "acme".into(),
+            k: Some(5),
+        })
+    );
+}
+
+#[test]
+fn select_bm25_requires_string_query() {
+    let err = parse("SELECT * FROM doc WHERE ::bm25(text, 42)").unwrap_err();
+    assert!(err.to_string().contains("must be a string"), "got: {err}");
+}
+
+#[test]
+fn select_unknown_double_colon_operator_errors() {
+    let err = parse("SELECT * FROM doc WHERE ::bogus(text, \"q\")").unwrap_err();
+    assert!(err.to_string().contains("::bogus"), "got: {err}");
+}
+
+#[test]
 fn forget_record() {
     let plan = parse("FORGET person:42").unwrap();
     assert_eq!(

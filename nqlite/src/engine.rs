@@ -397,15 +397,17 @@ fn compute_score(
 
 /// Laplace-smoothed mean of `:voted` edge weights on the record.
 ///
-/// A vote edge is any edge with `name == ":voted"` pointing **to** the record;
+/// A vote edge is any edge with `name == "voted"` pointing **to** the record;
 /// `weight` defaults to `1.0` when absent (an upvote). The estimate
 /// `(sum + 1) / (n + 2)` starts at `0.5` with zero votes and moves toward the
-/// observed mean as votes accumulate.
+/// observed mean as votes accumulate. The edge name is stored **without** the
+/// `:` prefix — the parser strips it (`RELATE (a) -> :voted -> (b)` stores
+/// `"voted"`), and `::votes`/`::feedback` use the same convention.
 fn score_of(store: &Store, rec: &Record) -> f32 {
     let mut sum = 0.0f32;
     let mut n = 0usize;
     for edge in &store.edges {
-        if edge.name == ":voted" && edge.to == rec.id {
+        if edge.name == "voted" && edge.to == rec.id {
             sum += edge.weight.unwrap_or(1.0);
             n += 1;
         }
@@ -416,7 +418,7 @@ fn score_of(store: &Store, rec: &Record) -> f32 {
 /// The `:voted` edges pointing **at** `id`, in store (append) order.
 ///
 /// A vote is a directed edge `(voter)->:voted {value:+1|-1, weight:0..1}->(record)`
-/// (see docs/decisions.md D9); only edges whose `name == ":voted"` and whose
+/// (see docs/decisions.md D9); only edges whose `name == "voted"` and whose
 /// `to` is the record count. Iteration order is the store's append order,
 /// which is deterministic for a given store.
 fn votes_toward<'a>(store: &'a Store, id: &RecordId) -> Vec<&'a RelationEdge> {
@@ -779,7 +781,7 @@ mod tests {
             Statement::Insert(record("post:2", BTreeMap::new(), None)),
             Statement::Relate(RelationEdge {
                 from: RecordId::parse("user:voter").unwrap(),
-                name: ":voted".into(),
+                name: "voted".into(),
                 to: RecordId::parse("post:1").unwrap(),
                 created_at: 1,
                 weight: Some(1.0),
@@ -787,7 +789,7 @@ mod tests {
             }),
             Statement::Relate(RelationEdge {
                 from: RecordId::parse("user:voter").unwrap(),
-                name: ":voted".into(),
+                name: "voted".into(),
                 to: RecordId::parse("post:2").unwrap(),
                 created_at: 2,
                 weight: Some(0.0),
@@ -805,7 +807,7 @@ mod tests {
             // A vote on a *different* record must not count either.
             Statement::Relate(RelationEdge {
                 from: RecordId::parse("user:voter").unwrap(),
-                name: ":voted".into(),
+                name: "voted".into(),
                 to: RecordId::parse("post:1").unwrap(),
                 created_at: 4,
                 weight: Some(1.0),
@@ -857,7 +859,7 @@ mod tests {
             Statement::Insert(record("doc:1", BTreeMap::new(), Some(vec![1.0, 0.0]))),
             Statement::Relate(RelationEdge {
                 from: RecordId::parse("user:v").unwrap(),
-                name: ":voted".into(),
+                name: "voted".into(),
                 to: RecordId::parse("doc:1").unwrap(),
                 created_at: 1,
                 weight: Some(1.0),
@@ -949,7 +951,7 @@ mod tests {
             )),
             Statement::Relate(RelationEdge {
                 from: RecordId::parse("u:v").unwrap(),
-                name: ":voted".into(),
+                name: "voted".into(),
                 to: RecordId::parse("doc:1").unwrap(),
                 created_at: 1,
                 weight: Some(1.0),

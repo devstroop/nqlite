@@ -1,8 +1,9 @@
 # nqlite — Development Plan (maintainer roadmap)
 
-State: research + design phase (Milestone 0 not started). This is the living
-roadmap. README.md is the state-independent overview; this file drives work.
-Research findings that sharpen these milestones are captured under `docs/`.
+State: M0–M3 features shipped (see ISSUES.md for the tracked issue log);
+this is the living roadmap. README.md is the state-independent overview;
+this file drives work. Research findings that sharpen these milestones are
+captured under `docs/`.
 
 Goal: a deterministic, serverless, context-first neural database — SQLite
 ergonomics, one embedded file, ACID, zero-LLM-dependency in the engine.
@@ -112,9 +113,31 @@ Every milestone ships with:
   decisions D1–D9 locked; nql-ir value types shipped (main baseline).
 - 2026-08-03: repo created github.com/devstroop/nqlite (public, default main);
   branch model live (main → develop → feat/*, PRs + CI protection);
-  16 worktrees under /mnt/ext1/nqlite-worktrees/; kanban at docs/KANBAN.md.
+  per-branch worktrees under /mnt/ext1/nqlite-worktrees/.
 - 2026-08-03: **wave-1** merged — ir-plan, engine-core, nql-parser, grammar-spec,
   + end-to-end integration tests + `;` separators. nql→engine pipeline proven.
 - 2026-08-03: **wave-2** merged — vector-index (VectorIndex trait, brute-force
   default, feature-gated HNSW), fuzzing (proptest + cargo-fuzz), repl (nql-cli).
   Released to main via PR #13. 45+ tests across 4 crates + nql-cli.
+- 2026-08-03: **wave-3** merged — analyzer (table-decl order, dim checks,
+  SELECT enrichment), benchmarks (criterion, deterministic fixed-seed data),
+  feedback (::votes/::feedback, D9). Released via PR #19.
+- 2026-08-03: **wave-4** merged — storage-wal (single-file + sidecar WAL, ACID,
+  crash-safe), bm25-fts (engine Filter::Bm25), server-mode (line protocol,
+  TCP + stdio), agent-examples (chat memory, RAG loop, tool ledger).
+  Released via PR #29.
+- 2026-08-04: **wave-5** merged — graph-relations 1-hop MATCH (IR, parser,
+  analyzer, deterministic traversal, QueryKind::Match). Released via PR #33.
+  ISSUE-12 closed; tracker backlog empty.
+- 2026-08-04: **audit** — full-project audit (code, spec, docs, tests). Found
+  + fixed: ::score ignored nql-created votes (colon mismatch); MATCH written to
+  WAL; ::bm25 unreachable from grammar; CLI had no persistence (`--db`);
+  dead `tracing` dep; docs honesty (MCP re-scope, spec order_op/statement,
+  PLAN state). ISSUE-17..19 tracked the follow-up.
+
+## Tracker
+
+- **ISSUES.md** is the issue tracker (replaces docs/KANBAN.md — see its footer).
+  Each issue = one feature branch; statuses open → in progress → merged (in
+  develop) → released (in main). docs/KANBAN.md is retained as an archive and
+  is no longer maintained.

@@ -52,7 +52,8 @@ This gives you:
 - **Agent native**: `MATCH` graph traversal, `::similarity` kNN, `::salience`,
   `::score`, and `::feedback` in a single query language — the operations an
   agent needs to chain context over a conversation.
-- **Serverless**: `open a file` and start. Optional network/MCP server later.
+- **Serverless**: `open a file` and start. Optional network server (line
+  protocol, TCP or stdio) is built in; an MCP server is planned.
 
 ## Features
 
@@ -67,7 +68,7 @@ This gives you:
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering
 - **Embedded & serverless** — a single file; open a path, start recall.
-  Optional network server mode + MCP server planned.
+  Network server mode (line protocol, TCP or stdio) is built in; MCP planned.
 - **Hardened** — fuzzed parser (cargo-fuzz) + property tests, single-writer
   transaction snapshot semantics, deterministic benchmarks.
 
@@ -115,6 +116,14 @@ nql 0.1.0 — type :help for help, :quit to exit
 >> SELECT * FROM turn;
 SELECT turn (1)
   turn:1  score=0.0000  {role="user", text="I work on the ML team"}
+```
+
+Persist the session to a single file (sidecar WAL, ACID crash-safety):
+
+```bash
+cargo run -q -p nql-cli -- --db memory.nql        # REPL backed by memory.nql
+cargo run -q -p nql-cli -- --db memory.nql --script session.nql   # script mode
+# :flush inside the REPL checkpoints the WAL into the main file
 ```
 
 Or in Rust, programmatically:

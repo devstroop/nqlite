@@ -173,7 +173,7 @@ fn relate_stmt() -> impl Strategy<Value = (StmtKind, String)> {
 }
 
 fn select_stmt() -> impl Strategy<Value = (StmtKind, String)> {
-    // WHERE shape: none | field-eq | IS NOT NULL | kNN.
+    // WHERE shape: none | field-eq | IS NOT NULL | kNN | ::bm25.
     let where_clause = prop_oneof![
         Just(None),
         (ident(), scalar()).prop_map(|(f, v)| Some(format!("WHERE {f} = {v}"))),
@@ -184,6 +184,16 @@ fn select_stmt() -> impl Strategy<Value = (StmtKind, String)> {
                 floats.join(", "),
             ))
         }),
+        (ident(), string_lit(), prop::bool::ANY, 1i64..1000).prop_map(
+            |(field, query, with_k, k)| {
+                let k_suffix = if with_k {
+                    format!(" AND k = {k}")
+                } else {
+                    String::new()
+                };
+                Some(format!("WHERE ::bm25({field}, {query}){k_suffix}"))
+            },
+        ),
     ];
     let order_key = prop_oneof![
         Just("similarity"),
