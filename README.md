@@ -15,7 +15,7 @@ learns. For the full framing, see [docs/positioning.md](docs/positioning.md).*
 
 [![GitHub](https://img.shields.io/badge/github-devstroop%2Fnqlite-181717?logo=github)](https://github.com/devstroop/nqlite)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
 
 ---
 
@@ -109,7 +109,7 @@ cargo build --release --package nql-cli
 # binary: target/release/nql
 ```
 
-**Requirements**: Rust 1.80+ (see `rust-version` in Cargo.toml). No system
+**Requirements**: Rust 1.82+ (see `rust-version` in Cargo.toml). No system
 dependencies; pure Rust.
 
 ## Quick start
