@@ -1,4 +1,4 @@
-//! Agent pattern #4 — context chain.
+//! Agent pattern #5 — context chain.
 //!
 //! The agent splits its state into two named memory partitions: `MEMORY core`
 //! holds the live working context, `MEMORY archival` holds the previous
