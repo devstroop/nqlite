@@ -109,7 +109,7 @@ cargo build --release --package nql-cli
 # binary: target/release/nql
 ```
 
-**Requirements**: Rust 1.80+ (see `rust-version` in Cargo.toml). No system
+**Requirements**: Rust 1.82+ (see `rust-version` in Cargo.toml). No system
 dependencies; pure Rust.
 
 ## Quick start
