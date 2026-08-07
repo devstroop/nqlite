@@ -32,10 +32,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pinned MSRV = rust-version 1.82. The stable leg runs the full
-        # suite; the MSRV leg proves the shipped artifacts compile on the
-        # declared minimum (cargo check --lib --bins — no dev-deps).
-        toolchain: [stable, 1.82.0]
+        # The stable leg runs the full suite. The pinned leg proves the
+        # shipped artifacts compile on the minimum toolchain the DEV tree
+        # allows: dev-deps (criterion -> clap 4.5) ship edition-2024
+        # manifests, which need cargo >= 1.85 to even resolve. The
+        # consumer-facing MSRV (rust-version = 1.82) stays lower because
+        # library users never resolve our dev-deps.
+        toolchain: [stable, 1.85.0]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
