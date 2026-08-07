@@ -27,7 +27,7 @@ jobs:
         run: cargo test --workspace
 
   determinism:
-    name: determinism — stable + MSRV (${{ matrix.toolchain }})
+    name: determinism (stable + MSRV)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
