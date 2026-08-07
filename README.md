@@ -80,6 +80,9 @@ This gives you:
 - **Embedded & serverless** — a single file; open a path, start recall.
   Network server mode (line protocol, TCP or stdio) and an MCP server
   (`nql-mcp`) are built in.
+- **Concurrency model** — Single-writer, snapshot readers — SQLite-style; one
+  process owns writes, readers see a consistent snapshot per `execute`
+  ([spec/file-format.md](spec/file-format.md) §4).
 - **Hardened** — fuzzed parser (cargo-fuzz) + property tests, single-writer
   transaction snapshot semantics, deterministic benchmarks.
 
