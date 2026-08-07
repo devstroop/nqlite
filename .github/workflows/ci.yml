@@ -26,27 +26,22 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-  determinism:
-    name: determinism (stable + MSRV)
+  determinism-stable:
+    name: determinism (stable)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # The stable leg runs the full suite. The pinned leg proves the
-        # shipped artifacts compile on the minimum toolchain the DEV tree
-        # allows: dev-deps (criterion -> clap 4.5) ship edition-2024
-        # manifests, which need cargo >= 1.85 to even resolve. The
-        # consumer-facing MSRV (rust-version = 1.82) stays lower because
-        # library users never resolve our dev-deps.
-        toolchain: [stable, 1.85.0]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.toolchain }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: test
         run: cargo test --workspace
-      - name: msrv-check
-        if: matrix.toolchain != 'stable'
+
+  determinism-msrv:
+    name: determinism (pinned dev-tree MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: check-shipped-artifacts
         run: cargo check --workspace --lib --bins
