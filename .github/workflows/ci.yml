@@ -32,8 +32,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pinned MSRV = rust-version 1.82. Identical test results on both
-        # toolchains prove byte-determinism across compiler versions (issue #71).
+        # Pinned MSRV = rust-version 1.82. The stable leg runs the full
+        # suite; the MSRV leg proves the shipped artifacts compile on the
+        # declared minimum (cargo check --lib --bins — no dev-deps).
         toolchain: [stable, 1.82.0]
     steps:
       - uses: actions/checkout@v4
@@ -43,3 +44,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: test
         run: cargo test --workspace
+      - name: msrv-check
+        if: matrix.toolchain != 'stable'
+        run: cargo check --workspace --lib --bins
