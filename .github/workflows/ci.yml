@@ -25,3 +25,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  determinism:
+    name: determinism — stable + MSRV (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned MSRV = rust-version 1.82. Identical test results on both
+        # toolchains prove byte-determinism across compiler versions (issue #71).
+        toolchain: [stable, 1.82.0]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --workspace
