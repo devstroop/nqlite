@@ -3,7 +3,11 @@ name = "nql-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Deterministic line-protocol nql server (TCP + stdio) for nqlite."
+repository.workspace = true
+rust-version.workspace = true
+description = "Deterministic, zero-LLM line-protocol nql server (TCP + stdio) for nqlite."
+keywords = ["server", "tcp", "sql", "nqlite", "line-protocol"]
+categories = ["network-programming", "database"]
 
 [[bin]]
 name = "nql-server"

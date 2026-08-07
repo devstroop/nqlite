@@ -3,7 +3,11 @@ name = "nql"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nql neural query language — parser + AST front-end (storage-agnostic)."
+repository.workspace = true
+rust-version.workspace = true
+description = "nql neural query language — deterministic, zero-LLM parser + AST front-end (storage-agnostic)."
+keywords = ["nql", "sql", "parser", "ast", "query-language"]
+categories = ["parser-implementations", "database"]
 
 [dependencies]
 nql-ir = { path = "../nql-ir" }

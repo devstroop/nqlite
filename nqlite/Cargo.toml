@@ -3,7 +3,11 @@ name = "nqlite"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nqlite engine — deterministic storage + indexes + execution of nql Plans. Zero LLM dependency."
+repository.workspace = true
+rust-version.workspace = true
+description = "nqlite engine — deterministic, zero-LLM storage + indexes + execution of nql Plans."
+keywords = ["nql", "database", "sql", "storage", "engine"]
+categories = ["database", "database-implementations"]
 
 [features]
 default = []

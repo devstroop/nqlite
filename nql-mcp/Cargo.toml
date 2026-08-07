@@ -3,7 +3,11 @@ name = "nql-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MCP server exposing nqlite as tools for AI agents (stdio transport)."
+repository.workspace = true
+rust-version.workspace = true
+description = "Deterministic, zero-LLM MCP server exposing nqlite as tools for AI coding agents (stdio transport)."
+keywords = ["mcp", "server", "database", "nqlite", "ai-tools"]
+categories = ["development-tools", "artificial-intelligence"]
 
 [[bin]]
 name = "nql-mcp"
