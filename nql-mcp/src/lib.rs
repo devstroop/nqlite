@@ -181,14 +181,27 @@ pub struct CreateTableParams {
     pub vector_dim: Option<usize>,
 }
 
+/// JSON-Schema for arbitrary JSON values.
+///
+/// `schemars`'s handling of `serde_json::Value` can emit a bare boolean
+/// (`true`, meaning "any value") as the property type. That is valid JSON
+/// Schema, but strict MCP clients (pydantic/mcp-types) require `inputSchema`
+/// properties to be dicts, so the server's `tools/list` response fails
+/// validation. An open schema object is accepted everywhere.
+fn arbitrary_json(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({})
+}
+
 /// Tool parameters: insert/upsert a record.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct InsertParams {
     /// Record id in `table:id` form.
     pub id: String,
     /// Record body as a JSON object.
+    #[schemars(schema_with = "arbitrary_json")]
     pub body: serde_json::Value,
     /// Optional embedding as a JSON array of numbers.
+    #[schemars(schema_with = "arbitrary_json")]
     pub embedding: Option<serde_json::Value>,
 }
 
@@ -204,6 +217,7 @@ pub struct RelateParams {
     /// Optional edge weight (0..=1).
     pub weight: Option<f32>,
     /// Optional edge properties as a JSON object.
+    #[schemars(schema_with = "arbitrary_json")]
     pub props: Option<serde_json::Value>,
 }
 
@@ -221,8 +235,10 @@ pub struct SelectParams {
     pub table: String,
     /// Optional `WHERE <field> = <value>` (JSON scalar).
     pub field: Option<String>,
+    #[schemars(schema_with = "arbitrary_json")]
     pub value: Option<serde_json::Value>,
     /// Optional kNN query vector (JSON array) — enables similarity ranking.
+    #[schemars(schema_with = "arbitrary_json")]
     pub query: Option<serde_json::Value>,
     /// k for kNN when `query` is given.
     pub k: Option<usize>,
@@ -238,6 +254,7 @@ pub struct MatchParams {
     /// Start record id (`table:id`).
     pub start: String,
     /// Path steps as JSON: `[{ "direction": "out"|"in", "name": "mentions" }, ...]`.
+    #[schemars(schema_with = "arbitrary_json")]
     pub steps: serde_json::Value,
 }
 
