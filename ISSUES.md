@@ -1,5 +1,7 @@
 # nqlite — Issue Tracker (local, versioned)
 
+> Live tracker: GitHub issues — https://github.com/devstroop/nqlite/issues (this file kept as archive).
+
 Each issue = one feature branch. Feature branches merge into `develop` via PR;
 `develop` releases into `main` via PR (see PLAN.md). Statuses:
 **open** (backlog) / **in progress** / **merged** (in develop) / **released** (in main).
