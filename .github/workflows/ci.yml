@@ -42,9 +42,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rustup is preinstalled on runners; the dtolnay composite action's
-      # step env fails to apply for pinned versions on the current runner,
-      # so install directly and invoke via `cargo +<toolchain>`.
+      # step env fails for pinned versions on the current runner, so
+      # install directly and invoke via `cargo +<toolchain>`. The pinned
+      # version is the dev-tree MSRV: rmcp 3.1.1 (nql-mcp) requires rustc
+      # 1.88. Consumer-facing MSRV (rust-version 1.82) stays lower: library
+      # users never build rmcp.
       - name: install pinned toolchain
-        run: rustup toolchain install 1.85.0 --profile minimal
+        run: rustup toolchain install 1.88.0 --profile minimal
       - name: check-shipped-artifacts
-        run: cargo +1.85.0 check --workspace --lib --bins
+        run: cargo +1.88.0 check --workspace --lib --bins
