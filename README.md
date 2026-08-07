@@ -228,16 +228,21 @@ each half is hardened independently. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Performance
 
-Benchmarks run under criterion (`cargo bench -p nqlite`) against deterministic,
-fixed-seed synthetic data. Sample readings (dev build):
+Reproducible numbers live in **[docs/benchmarks.md](docs/benchmarks.md)**:
+deterministic corpus (xorshift64* seed 42, dim-8 vectors), measured on the
+reference box, and regenerable with `./scripts/bench.sh` — methodology,
+results, and an honest "where nqlite is weak" section included.
 
-| Bench | Data | Throughput / latency |
-|---|---|---|
-| `ingest/10000` | 10k records, dim-8 vectors | ~4.4M inserts/second |
-| `knn_bf/10000` | k=10, exact scan | millisecond-scale |
-| `relate/10000` | 10k edges | ~2.6–3.9M edges/second |
+In short (dev build, this box):
+
+- ~10–14 µs per dim-8 record ingested in bulk (12.3 ms / 1000 rows,
+  136.6 ms / 10000 rows).
+- kNN is an exact brute-force scan by default (no ANN): ~730 ms / 50 queries
+  @ 1000 rows, ~1430 ms / 10 queries @ 10000 rows.
+- hybrid ≈ kNN + BM25 in the same pass.
 
 These are **the engine only** (no LLM in the path) — the honest numbers.
+Micro-benchmarks also live under `cargo bench -p nqlite` (criterion).
 
 ## Design & research
 
