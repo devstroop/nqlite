@@ -41,7 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - uses: Swatinem/rust-cache@v2
+      # rustup is preinstalled on runners; the dtolnay composite action's
+      # step env fails to apply for pinned versions on the current runner,
+      # so install directly and invoke via `cargo +<toolchain>`.
+      - name: install pinned toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
       - name: check-shipped-artifacts
-        run: cargo check --workspace --lib --bins
+        run: cargo +1.85.0 check --workspace --lib --bins
