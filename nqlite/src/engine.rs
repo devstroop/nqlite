@@ -77,8 +77,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Execute a whole `Plan` against `store`, applying statements in order and
-/// collecting one [`QueryResult`] per `SELECT` (DML/DDL statements contribute
-/// nothing to the output).
+/// collecting one [`QueryResult`] per query statement (`SELECT`, `MATCH`,
+/// `CLOSURE`; DML/DDL statements contribute nothing to the output).
 pub fn execute_plan(store: &mut Store, plan: &[Statement]) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
     let mut current_memory: Option<String> = None;
