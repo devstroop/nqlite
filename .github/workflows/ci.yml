@@ -25,3 +25,29 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  determinism-stable:
+    name: determinism (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --workspace
+
+  determinism-msrv:
+    name: determinism (pinned dev-tree MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup is preinstalled on runners; the dtolnay composite action's
+      # step env fails for pinned versions on the current runner, so
+      # install directly and invoke via `cargo +<toolchain>`. The pinned
+      # version is the dev-tree MSRV: rmcp 3.1.1 (nql-mcp) requires rustc
+      # 1.88. Consumer-facing MSRV (rust-version 1.82) stays lower: library
+      # users never build rmcp.
+      - name: install pinned toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: check-shipped-artifacts
+        run: cargo +1.88.0 check --workspace --lib --bins

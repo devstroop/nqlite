@@ -3,7 +3,11 @@ name = "nql-ir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "nqlite shared Plan/IR and value types — produced by nql (front-end), executed by nqlite (engine)."
+repository.workspace = true
+rust-version.workspace = true
+description = "nqlite shared Plan/IR and value types — deterministic, zero-LLM, produced by nql (front-end), executed by nqlite (engine)."
+keywords = ["nql", "sql", "ir", "query-plan", "database"]
+categories = ["database"]
 
 [dependencies]
 serde.workspace = true

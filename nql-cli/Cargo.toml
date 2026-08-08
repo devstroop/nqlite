@@ -3,7 +3,11 @@ name = "nql-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "nql REPL + script runner for nqlite (deterministic, zero-LLM)."
+keywords = ["cli", "repl", "sql", "nqlite", "terminal"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "nql"

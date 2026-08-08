@@ -1,6 +1,9 @@
 # nqlite — Issue Tracker (local, versioned)
 
-> Live tracker: GitHub issues — https://github.com/devstroop/nqlite/issues (this file kept as archive).
+> Live tracker: GitHub issues — https://github.com/devstroop/nqlite/issues
+> (this file is an **archive**: statuses below are historical and frozen as of
+> the GitHub migration, issue #62. New issues are tracked on GitHub only; each
+> issue = one work order = one branch, merging into `develop` via PR).
 
 Each issue = one feature branch. Feature branches merge into `develop` via PR;
 `develop` releases into `main` via PR (see PLAN.md). Statuses:
@@ -142,5 +145,5 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 | M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18, 23..28 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning, temporal-reads, memory-blocks, bench-run) |
 | M3 — Agents & MCP | ISSUE-15, 16, 21 (server-mode, agent-examples, mcp-server) |
 
-_This file replaces docs/KANBAN.md. It is maintained by hand per merge; PRs that
-close an issue move it from Open → Merged → Released._
+_This file replaces docs/KANBAN.md. It is an archive: kept for history, no
+longer maintained by hand — the live tracker is GitHub issues (see header)._

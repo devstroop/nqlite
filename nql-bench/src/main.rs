@@ -11,12 +11,20 @@
 //! cargo run -q -p nql-bench -- --rows 1000 --knn 100 --seed 42
 //! ```
 //!
-//! Output: `{"db":"nqlite","rows":N,"ingest_ms":...,"knn_ms":...,"bm25_ms":...,"hybrid_ms":...}`
+//! Output: `{"db":"nqlite","rows":N,"ingest_ms":...,"knn_ms":...,"bm25_ms":...,"hybrid_ms":...,"context_ms":...,"recall_ms":...}`
+//!
+//! The `context_ms`/`recall_ms` fields are the M3 session-recall scenarios:
+//! a deterministic `:follows_from` chain of `rows` context records, timed
+//! for a single CLOSURE walk (`context_of(record)`) and a full-session
+//! recall loop (SELECT all + CLOSURE, `--knn` iterations).
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use nql_ir::{Filter, Id, Knn, Record, RecordId, Select, Statement, Store, Value};
+use nql_ir::{
+    Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Record, RecordId, RelationEdge, Select,
+    Statement, Store, Value,
+};
 use nqlite::Database;
 
 const DIM: usize = 8;
@@ -56,6 +64,49 @@ fn corpus(rows: usize) -> Vec<Record> {
             }
         })
         .collect()
+}
+
+/// Deterministic session corpus: `rows` context records chained by
+/// `:follows_from` edges (`context:1 -> context:2 -> ...`), mirroring the
+/// agent context-chain pattern (M3: context_of(record) / session recall).
+fn chain_statements(rows: usize) -> Vec<Statement> {
+    let mut plan: Vec<Statement> = (1..=rows)
+        .map(|i| {
+            Statement::Insert(Record {
+                id: RecordId::new("context", Id::Num(i as u64)),
+                body: BTreeMap::from([
+                    ("role".into(), Value::Str("assistant".into())),
+                    ("text".into(), Value::Str(format!("step {i}"))),
+                ]),
+                embedding: None,
+                created_at: i as i64,
+            })
+        })
+        .collect();
+    for i in 1..rows {
+        plan.push(Statement::Relate(RelationEdge {
+            from: RecordId::new("context", Id::Num(i as u64)),
+            name: "follows_from".into(),
+            to: RecordId::new("context", Id::Num((i + 1) as u64)),
+            created_at: i as i64,
+            weight: None,
+            props: BTreeMap::new(),
+        }));
+    }
+    plan
+}
+
+/// `CLOSURE (context:1) -> :follows_from` — the context_of(record) walk over
+/// the whole chain (first-visit order, BFS depth scores).
+fn closure_stmt() -> Statement {
+    Statement::Closure(MatchPath {
+        start: RecordId::new("context", Id::Num(1)),
+        steps: vec![MatchStep {
+            direction: MatchDirection::Out,
+            name: "follows_from".into(),
+            edge_props: None,
+        }],
+    })
 }
 
 fn parse_args() -> (usize, usize, u64) {
@@ -166,6 +217,37 @@ fn main() {
     }
     let hybrid_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
+    // M3 session patterns: a deterministic context chain. Ingest the chain
+    // OUTSIDE the timed sections; time the CLOSURE walk (context_of) and a
+    // full-session recall loop (SELECT all + CLOSURE) against it.
+    let mut sdb = Database::new(Store::default());
+    let chain = chain_statements(rows);
+    sdb.execute(&chain).expect("chain ingest");
+    let context_select = Statement::Select(Select {
+        table: "context".into(),
+        knn: None,
+        filter: None,
+        order: None,
+        limit: None,
+        as_of: None,
+    });
+    let closure = closure_stmt();
+
+    let t4 = Instant::now();
+    let ctx_res = sdb
+        .execute(std::slice::from_ref(&closure))
+        .expect("closure");
+    let context_ms = t4.elapsed().as_secs_f64() * 1000.0;
+
+    let t5 = Instant::now();
+    for _ in 0..knn {
+        sdb.execute(std::slice::from_ref(&context_select))
+            .expect("recall select");
+        sdb.execute(std::slice::from_ref(&closure))
+            .expect("recall closure");
+    }
+    let recall_ms = t5.elapsed().as_secs_f64() * 1000.0;
+
     let report = serde_json::json!({
         "db": "nqlite",
         "rows": rows,
@@ -174,6 +256,9 @@ fn main() {
         "knn_ms": round2(knn_ms),
         "bm25_ms": round2(bm25_ms),
         "hybrid_ms": round2(hybrid_ms),
+        "context_ms": round2(context_ms),
+        "context_records": ctx_res[0].rows.len(),
+        "recall_ms": round2(recall_ms),
     });
     println!("{report}");
 }
@@ -213,5 +298,35 @@ mod tests {
                 panic!("missing text body");
             }
         }
+    }
+
+    #[test]
+    fn chain_corpus_closure_walks_every_record_once() {
+        // The M3 session corpus: a deterministic chain where CLOSURE from the
+        // head must visit every record exactly once, in chain order.
+        let rows = 64;
+        let mut db = Database::new(Store::default());
+        db.execute(&chain_statements(rows)).expect("ingest");
+        let res = db
+            .execute(std::slice::from_ref(&closure_stmt()))
+            .expect("closure");
+        // One QueryResult for the CLOSURE statement, carrying every chain
+        // record in first-visit order.
+        assert_eq!(res.len(), 1);
+        let visited = &res[0].rows;
+        assert_eq!(visited.len(), rows, "closure visits every chain record");
+        for (i, r) in visited.iter().enumerate() {
+            assert_eq!(
+                r.record.id,
+                RecordId::new("context", Id::Num((i + 1) as u64))
+            );
+        }
+        // Determinism: a fresh database yields the identical result.
+        let mut db2 = Database::new(Store::default());
+        db2.execute(&chain_statements(rows)).expect("ingest");
+        let res2 = db2
+            .execute(std::slice::from_ref(&closure_stmt()))
+            .expect("closure");
+        assert_eq!(res, res2);
     }
 }
