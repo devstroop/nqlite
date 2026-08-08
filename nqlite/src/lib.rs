@@ -103,7 +103,8 @@ impl Database {
     }
 
     /// Execute a [`Plan`] against the store, mutating it for DDL/DML
-    /// statements and returning one [`QueryResult`] per `SELECT` statement.
+    /// statements and returning one [`QueryResult`] per query statement
+    /// (`SELECT`, `MATCH`, `CLOSURE`; DDL/DML contribute nothing).
     ///
     /// Statements before a `SELECT` are applied first, so a single plan may
     /// create tables, insert records, relate edges, and query them in one
