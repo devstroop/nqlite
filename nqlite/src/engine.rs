@@ -13,7 +13,7 @@
 //! feature but is never selected by the engine.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nql_ir::{
     Filter, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge, Select, Statement,
@@ -411,12 +411,31 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
 /// start) is returned once, in first-visit (BFS) order, scored by the depth
 /// at which it was first reached (`0.0` for the start record). A missing
 /// start record yields an empty result; dangling edges are skipped.
+///
+/// Edges are pre-indexed by endpoint (adjacency lists, store order within a
+/// vertex) so the walk touches only the frontier's incident edges instead of
+/// scanning the whole edge list per BFS level (O(N²) for long chains
+/// otherwise). Per-level tie-breaks become frontier-major (frontier vertices
+/// in first-visit order, their edges in store order) instead of
+/// store-interleaved — both orders are deterministic; single-vertex
+/// frontiers (chains, trees) are identical either way.
 fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
     if !store.records.contains_key(&path.start) {
         return Vec::new();
     }
 
+    // Adjacency index: incident edges per endpoint, in store order.
+    let mut by_from: HashMap<&RecordId, Vec<&RelationEdge>> = HashMap::new();
+    let mut by_to: HashMap<&RecordId, Vec<&RelationEdge>> = HashMap::new();
+    for edge in &store.edges {
+        by_from.entry(&edge.from).or_default().push(edge);
+        by_to.entry(&edge.to).or_default().push(edge);
+    }
+
+    // First-visit (BFS) order lives in `visited`; membership mirrors it in a
+    // HashSet so duplicate-reach checks stay O(1) as the walk grows.
     let mut visited: Vec<RecordId> = vec![path.start.clone()];
+    let mut visited_set: HashSet<RecordId> = HashSet::from([path.start.clone()]);
     let mut depth_of: BTreeMap<RecordId, u32> = BTreeMap::new();
     depth_of.insert(path.start.clone(), 0);
 
@@ -428,24 +447,33 @@ fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
         // Expand the current frontier to fixpoint along this step's edge.
         loop {
             let mut newly_reached: Vec<RecordId> = Vec::new();
-            for edge in &store.edges {
-                let (from_side, to_side) = match step.direction {
-                    MatchDirection::Out => (&edge.from, &edge.to),
-                    MatchDirection::In => (&edge.to, &edge.from),
+            for from in &frontier {
+                let incident = match step.direction {
+                    MatchDirection::Out => by_from.get(from),
+                    MatchDirection::In => by_to.get(from),
                 };
-                if edge.name != step.name || !frontier.contains(from_side) {
+                let Some(edges) = incident else {
                     continue;
-                }
-                if !matches_edge_props(edge, step.edge_props.as_ref()) {
-                    continue;
-                }
-                if !store.records.contains_key(to_side) {
-                    continue; // dangling edge: skip
-                }
-                if !visited.contains(to_side) {
-                    visited.push(to_side.clone());
-                    newly_reached.push(to_side.clone());
-                    depth_of.insert(to_side.clone(), next_depth);
+                };
+                for edge in edges {
+                    let to_side = match step.direction {
+                        MatchDirection::Out => &edge.to,
+                        MatchDirection::In => &edge.from,
+                    };
+                    if edge.name != step.name {
+                        continue;
+                    }
+                    if !matches_edge_props(edge, step.edge_props.as_ref()) {
+                        continue;
+                    }
+                    if !store.records.contains_key(to_side) {
+                        continue; // dangling edge: skip
+                    }
+                    if visited_set.insert(to_side.clone()) {
+                        visited.push(to_side.clone());
+                        newly_reached.push(to_side.clone());
+                        depth_of.insert(to_side.clone(), next_depth);
+                    }
                 }
             }
             if newly_reached.is_empty() {
