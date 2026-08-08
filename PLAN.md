@@ -81,11 +81,15 @@ Goal: prove the whole thing works end-to-end in one file, offline, deterministic
 
 ## Milestone 3 — Agents & MCP wiring
 
-- [ ] Server mode (network) + MCP server so agents talk to nqlite over MCP.
-- [ ] Example client integrations: chat memory, RAG, tool-call ledger, knowledge graph.
+- [x] Server mode (network) + MCP server so agents talk to nqlite over MCP
+      (`nql-server` TCP/stdio line protocol, `nql-mcp` — issues #15/#21).
+- [x] Example client integrations: chat memory, RAG, tool-call ledger,
+      knowledge graph (`nqlite/examples/` — issues #16, wave-10 adds
+      idempotent memory + context chain).
 - [ ] Deterministic extension points for the agent-side "learning" (edges, NEAR,
       count/decay) — clearly outside the engine.
-- [ ] Benchmarks on `context_of(record)` / full session recall patterns.
+- [x] Benchmarks on `context_of(record)` / full session recall patterns
+      (nql-bench `context_ms`/`recall_ms` scenarios, issue #78).
 
 ## Later / stretch
 
@@ -135,6 +139,18 @@ Every milestone ships with:
   WAL; ::bm25 unreachable from grammar; CLI had no persistence (`--db`);
   dead `tracing` dep; docs honesty (MCP re-scope, spec order_op/statement,
   PLAN state). ISSUE-17..19 tracked the follow-up.
+- 2026-08-07: **wave-10** merged — idempotent-memory + context-chain agent
+  examples (gated fleet process, deterministic/zero-LLM at engine level),
+  release notes (`docs/release-wave-10.md`). Released via PR #66; develop→main
+  via PR #67.
+- 2026-08-07: **hardening wave** — GitHub issue migration (#65), crate publish
+  metadata + `publish.yml` (#72, issue #68), benchmark wave (#73),
+  MCP inputSchema dict fix (#74, issue #70), determinism CI job (#75).
+- 2026-08-08: **docs + perf wave** — QueryResult doc fix (#76, issue #63),
+  ISSUES.md finalized as archive (#77, issue #62), M3 session-recall
+  benchmarks in nql-bench (#79, issue #78), adjacency-indexed CLOSURE
+  traversal — 12x on the chain shape (#81, issue #80). M3 remaining:
+  agent-side learning extension points.
 
 ## Tracker
 
