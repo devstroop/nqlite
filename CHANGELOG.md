@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- decisions §6 reconciled with measurements (issue #115): "reopen cold and
+  query a 100K-record store in **milliseconds**" retired in favor of the
+  profiled numbers (release, reference box: reopen ~0.7 s decode-bound,
+  exact-scan queries floor at 75–140 ms) with recall/determinism/WAL/ingest
+  targets annotated as met; the ambition moves to #133 (lazy history decode,
+  ~0.2–0.3 s target) and #96's ANN gate for sub-10 ms queries. E08's "1.8 s"
+  figure annotated as including ~0.9 s of harness-side output parsing.
 - Spec §2.3 now carries the **verified `ORDER BY` precedence matrix**
   (issue #119): score-based orders are honored in scan/kNN modes and ignored
   — relevance/fusion wins — in bm25/hybrid; structural orders (`::recency`,

@@ -158,13 +158,29 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   - Poisoning/drift: votes carry voter + trust weight; engine stores, agent
     decides trust policy; deterministic decay for old votes.
 
-## 6. Benchmark targets (aspirational, tune later)
+## 6. Benchmark targets vs measured (reconciled 2026-10-06, issue #115)
 
-- reopen cold and query a 100K-record store in milliseconds.
-- kNN recall@10 >= 0.95 on a standard set; ANN memory bounded.
-- deterministic: same input -> byte-identical output across runs.
-- crash in WAL mid-commit -> auto-recover, no corruption.
-- ingest 100K records < a few seconds.
+Measured on the reference box (Intel Xeon E5-2640 v4 @ 2.40 GHz, release
+profile, warm cache; tooling: `nqlite/examples/open_profile` + the E08
+release ladder — full numbers and method on issue #115):
+
+- **reopen cold a 100K-record store**: measured **~0.7 s** (`Database::open`:
+  55 ms read + ~0.6 s postcard decode; ~0.85 s CLI end-to-end). The earlier
+  "milliseconds" wording was aspirational and is **retired**: exact-scan
+  queries also floor at 75–140 ms @100K. The follow-up — lazy history decode
+  (**#133**) targeting ~0.2–0.3 s reopen, plus the ANN path for sub-10 ms
+  queries (#96's gate) — carries the ambition now. (E08's earlier "1.8 s"
+  figure included ~0.9 s of harness-side output parsing, not engine time.)
+- **kNN recall@10 >= 0.95**: met at 5k rows (**0.96**, CI gate in #114);
+  degrades at 50k (0.81) with default params — sweep flags exist; the gate
+  pins the 5k target.
+- **deterministic: same input -> byte-identical output across runs**: met —
+  248 workspace tests incl. transcript-digest checks.
+- **crash in WAL mid-commit -> auto-recover, no corruption**: met — CRC /
+  torn-frame tests (spec file-format §4).
+- **ingest 100K records < a few seconds**: met in-process (**3.74 s** line
+  protocol, release); the chunked CLI file tier is slower (67.7 s — dominated
+  by per-session reopens, issue #115/E08).
 
 ## 7. Tone for docs (repo conventions)
 
