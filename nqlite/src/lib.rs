@@ -116,10 +116,20 @@ impl Database {
     pub fn execute(&mut self, plan: &[Statement]) -> Result<Vec<QueryResult>> {
         let results = execute_plan(&mut self.store, plan)?;
         if let Some(file) = &mut self.file {
+            let mut logged = false;
             for stmt in plan {
                 if is_mutating(stmt) {
                     file.append(stmt)?;
+                    logged = true;
                 }
+            }
+            if logged {
+                // Plan-boundary marker (issue #109): replay must reset the
+                // memory context exactly where the runtime did — every plan
+                // starts at the root (spec §2.8), and a plan that ends inside
+                // a MEMORY block would otherwise leak its context into every
+                // later frame during WAL replay.
+                file.append(&Statement::ContextReset)?;
             }
             if file.needs_checkpoint() {
                 file.checkpoint(&self.store)?;
@@ -132,10 +142,15 @@ impl Database {
 /// True for statements that change the store (or its context) and therefore
 /// belong in the WAL. Read-only statements (`SELECT`, `MATCH`, `CLOSURE`) are
 /// never logged. `MEMORY` is logged: it carries the context switch that WAL
-/// replay needs to reconstruct memory scoping.
+/// replay needs to reconstruct memory scoping. `ContextReset` is a WAL-only
+/// sequencing marker appended by [`Database::execute`] itself — it is not a
+/// plan statement and never enters `Store::history`.
 fn is_mutating(stmt: &Statement) -> bool {
     !matches!(
         stmt,
-        Statement::Select(_) | Statement::Match(_) | Statement::Closure(_)
+        Statement::Select(_)
+            | Statement::Match(_)
+            | Statement::Closure(_)
+            | Statement::ContextReset
     )
 }

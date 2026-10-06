@@ -153,6 +153,10 @@ impl Ctx {
                 Ok(stmt.clone())
             }
             Statement::Memory { .. } => Ok(stmt.clone()),
+            // WAL-only plan-boundary marker (issue #109): the parser can
+            // never produce it and analyzed plans never contain it; pass
+            // through defensively instead of panicking.
+            Statement::ContextReset => Ok(stmt.clone()),
         }
     }
 }
