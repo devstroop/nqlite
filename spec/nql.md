@@ -195,6 +195,23 @@ Semantics:
   an agent re-asserts `MEMORY <name>` at the top of any plan that should run
   inside a memory. Same `table:id` in different memories are different
   records.
+- **Context never carries across a plan boundary.** Over `nql-server` each
+  protocol line is its own plan, and in the REPL each input line is — so
+  `MEMORY <name>;` on one line does **not** apply to the next line; an
+  unprefixed write after it silently targets the root store (answers `OK`).
+  On line-oriented inputs, prefix every statement that belongs to the
+  memory (issue #87):
+
+  ```
+  MEMORY ledger; CREATE TABLE note;             -- ok: one line, one plan
+  MEMORY ledger; INSERT INTO note:1 { "x": 1 }; -- ok
+  MEMORY ledger; SELECT * FROM note;            -- ok
+  MEMORY ledger;                                -- NO-OP for later lines!
+  INSERT INTO note:2 { "x": 2 };                -- writes ROOT, not ledger
+  ```
+
+  A multi-statement script passed to `nql --script` is a *single* plan, so
+  there a lone `MEMORY <name>;` does carry through the rest of the file.
 - `MEMORY` statements are logged to the WAL (they carry the context switch),
   so memory scoping survives reopen via replay. Executing `MEMORY` outside a
   plan (directly via the engine's statement API) is an error.
