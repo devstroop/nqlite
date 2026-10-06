@@ -338,7 +338,9 @@ pub enum Filter {
 pub enum Order {
     /// Cosine similarity (descending) vs the kNN query vector.
     Similarity,
-    /// α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback (agent-tuned α..δ).
+    /// α·similarity + β·strength(recency,freq) + γ·importance + δ·score with the
+    /// engine defaults α=0.7, β=0, γ=0, δ=0.3 (spec §2.3; agent-tuned per-query
+    /// via [`Order::SalienceWeighted`]).
     Salience,
     /// Laplace-smoothed mean of `:voted` edge weights on the record (each
     /// edge's explicit `weight`, falling back to its signed `value` when
@@ -350,6 +352,11 @@ pub enum Order {
     Feedback,
     /// created_at (descending).
     Recency,
+    /// `::salience(α, β, γ, δ)` — the same four terms as [`Order::Salience`]
+    /// with agent-tuned weights parsed from the parenthesized list (issue #88).
+    /// Appended variant: postcard tags of earlier variants stay stable (the
+    /// #109 discipline for serialized enums).
+    SalienceWeighted([f32; 4]),
 }
 
 /// Aggregated vote counts over a record's `:voted` edges (`(voter)->:voted {value:+1|-1}->(record)`).

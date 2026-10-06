@@ -50,8 +50,9 @@ vector_knn     = 'vector::similarity' '(' 'embedding' ',' vector ')' 'AND' 'k' '
 has_embedding  = 'embedding' 'IS' 'NOT' 'NULL' ;
 bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
 hybrid         = bm25 'AND' vector_knn | vector_knn 'AND' bm25 ;
-order_op       = 'similarity' | 'salience' | 'score' | 'votes' | 'feedback'
-               | 'recency' ;
+order_op       = 'similarity' | 'salience' [ '(' num ',' num ',' num ',' num ')' ]
+               | 'score' | 'votes' | 'feedback' | 'recency' ;
+num           = int | float ;
 
 object         = ( ident ':' value ) ( ',' ident ':' value )* | '' ;
 value          = 'null' | 'true' | 'false' | int | float | string
@@ -112,8 +113,18 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 5. **Order** — `ORDER BY ::op` (default: BTree order):
    - `::similarity` — cosine desc (requires kNN query).
    - `::salience` — `α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
-     with deterministic engine defaults (α..δ are AGENT-side knobs, not engine
-     config); without a kNN query, salience reduces to the feedback term.
+     with deterministic engine defaults **α=0.7, β=0, γ=0, δ=0.3** (α..δ are
+     AGENT-side knobs, not engine config); without a kNN query, the default
+     salience reduces to the feedback term. Agents tune per-query with
+     `ORDER BY ::salience(α, β, γ, δ)` — exactly four comma-separated numbers.
+     Term definitions (pure arithmetic, zero-LLM):
+     - `similarity` — cosine vs the kNN query vector (`0` without a kNN query);
+     - `strength` — `(recency + freq) / 2`, where `recency = 1/(1+age)` with
+       `age = max(0, clock − created_at)` and `freq = n/(n+1)` over the
+       record's incident edges (either direction);
+     - `importance` — the agent-written `importance` field clamped to `[0,1]`
+       (missing/non-numeric → `0`; the engine never invents it, §5);
+     - `score` — the Laplace-smoothed `::score` clamped to `[0,1]`.
    - `::score` — Laplace-smoothed mean over `:voted` edges, desc.
    - `::recency` — `created_at` desc.
    (Hybrid queries always order by the fused score; explicit `ORDER BY` is
@@ -225,7 +236,7 @@ Semantics:
 | `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing). Each edge's weight is its explicit `weight`, else its signed `value` (`value = -1` downvotes); an edge with neither counts as `+1` | pure arithmetic |
 | `::votes(record)` | `(up, down, net)` counts over `:voted` edges | pure arithmetic |
 | `::feedback(record)` | time-decayed recent feedback | engine-clock only |
-| `::salience` | `α·similarity + β·strength + γ·importance + δ·score` | fixed order, no races |
+| `::salience` | `α·similarity + β·strength + γ·importance + δ·score` (defaults 0.7/0/0/0.3; tune: `::salience(α, β, γ, δ)`) | fixed order, no races |
 | `::bm25(field, "q")` | Okapi BM25 lexical score (k1=1.2, b=0.75); every row scored, ordered by relevance | pure arithmetic |
 | `k = N` | kNN / BM25 result cap | — |
 
@@ -250,7 +261,9 @@ Semantics:
   compact, or rerank. Any learning lives in the agent/client.
 - Vectors arrive as `f32` arrays at INSERT time. `importance` is a number the
   AGENT writes; the engine never invents it.
-- Salience weights α..δ are agent-side; engine uses fixed deterministic defaults.
+- Salience weights α..δ are agent-side (passed per-query as
+  `ORDER BY ::salience(α, β, γ, δ)`); engine defaults are deterministic
+  (0.7, 0, 0, 0.3).
 
 ## 6. Examples
 

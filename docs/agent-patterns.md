@@ -40,11 +40,16 @@ SELECT * FROM turn
 ```
 
 The **importance knob**: the agent hand-writes an `importance` field on each
-turn and converts it into a `:voted` edge weight
-(`(agent) -[:voted {weight}]-> (turn)`). The engine's salience formula blends
-`0.7 · similarity + 0.3 · importance`, so a slightly less similar but much
-more important turn (importance 0.9) can outrank a nearer-but-less-important
-one (0.8) — the recalled "context" reflects what the *agent* judged valuable.
+turn. Two deterministic routes for it to matter — (a) the original one,
+converting it into a `:voted` edge weight
+(`(agent) -[:voted {weight}]-> (turn)`) so it enters the Laplace `::score`,
+or (b) the direct γ weight: `ORDER BY ::salience(0.7, 0, 0.3, 0)` blends
+`0.7 · similarity + 0.3 · importance` with no edge at all (spec §2.3; bare
+`ORDER BY ::salience` uses the engine defaults 0.7/0/0/0.3, i.e.
+`0.7 · similarity + 0.3 · score`). Either way a slightly less similar but
+much more important turn (importance 0.9) can outrank a
+nearer-but-less-important one (0.8) — the recalled "context" reflects what
+the *agent* judged valuable.
 
 ## 2. RAG loop — `examples/rag_loop.rs`
 

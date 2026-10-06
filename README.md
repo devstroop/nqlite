@@ -71,7 +71,8 @@ This gives you:
   - `::bm25(field, "query")` — BM25 lexical scoring
   - `::bm25(...) AND vector::similarity(...)` — hybrid retrieval, both
     signals fused with reciprocal-rank fusion (deterministic)
-  - `ORDER BY ::salience` — `α·similarity + β·strength + γ·importance + δ·feedback`
+  - `ORDER BY ::salience` — `α·similarity + β·strength + γ·importance + δ·score`
+    (engine defaults 0.7/0/0/0.3; tune per-query: `::salience(α, β, γ, δ)`)
   - `ORDER BY ::score` — Laplace-smoothed mean of `:voted` feedback edges
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering

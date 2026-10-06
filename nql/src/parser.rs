@@ -408,7 +408,7 @@ impl Parser {
                     let o = self.expect_ident("order key after ORDER BY")?;
                     order = Some(match o.to_ascii_lowercase().as_str() {
                         "similarity" => Order::Similarity,
-                        "salience" => Order::Salience,
+                        "salience" => self.parse_salience_order()?,
                         "score" => Order::Score,
                         "recency" => Order::Recency,
                         "votes" => Order::Votes,
@@ -761,6 +761,45 @@ impl Parser {
                 format!("expected an integer for {what}, found {}", describe(other)),
             )),
         }
+    }
+
+    /// `::salience` order key: bare (engine defaults α=0.7, β=0, γ=0, δ=0.3) or
+    /// agent-tuned `::salience(α, β, γ, δ)` — four comma-separated numbers
+    /// (issue #88, spec §2.3). Weights must be finite; arity is exactly 4.
+    fn parse_salience_order(&mut self) -> Result<Order, NqlError> {
+        if !matches!(self.peek_tok(), Token::LParen) {
+            return Ok(Order::Salience);
+        }
+        self.bump();
+        let mut w = [0.0f32; 4];
+        for (i, slot) in w.iter_mut().enumerate() {
+            if i > 0 {
+                self.expect_token(Token::Comma, "`,` between salience weights")?;
+            }
+            let s = self.bump();
+            let raw: f64 = match &s.tok {
+                Token::Int(n) => *n as f64,
+                Token::Float(f) => *f,
+                other => {
+                    return Err(self.err_at(
+                        &s,
+                        format!(
+                            "expected a number for salience weight {} of 4 \
+                             (α, β, γ, δ), found {}",
+                            i + 1,
+                            describe(other)
+                        ),
+                    ))
+                }
+            };
+            let v = raw as f32;
+            if !v.is_finite() {
+                return Err(self.err_at(&s, "salience weights must be finite".to_string()));
+            }
+            *slot = v;
+        }
+        self.expect_token(Token::RParen, "`)` after salience weights")?;
+        Ok(Order::SalienceWeighted(w))
     }
 }
 

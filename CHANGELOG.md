@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Per-query salience weights (issue #88): `ORDER BY ::salience(α, β, γ, δ)`
+  tunes all four spec §2.3 terms — `α·similarity + β·strength(recency,freq)
+  + γ·importance + δ·score` — with exactly four comma-separated numbers.
+  Bare `::salience` keeps the deterministic engine defaults (0.7/0/0/0.3),
+  value-identical to the previous behavior. Spec §2.3/§3/§5, decisions D9,
+  and agent-patterns now document the same formula.
 - Recall@K quality harness for the ANN path (issue #96): `nql-bench --recall`
   measures HNSW recall@10/50/100 against exact brute-force top-K on a
   deterministic dim-64 vector set (`--dim`, `--hnsw-m/--hnsw-efc/--hnsw-ef`
