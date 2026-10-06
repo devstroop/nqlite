@@ -379,8 +379,9 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("select", "SELECT")?;
-        // Field list (or `*`): parsed for syntax, not carried into the M0 IR.
-        self.parse_field_list()?;
+        // Field list (or `*`): carried into the IR as the projection
+        // (`None` = star = full records).
+        let fields = self.parse_field_list()?;
         self.expect_keyword("from", "FROM")?;
         let table = self.expect_ident("table name after FROM")?;
 
@@ -440,6 +441,7 @@ impl Parser {
             order,
             limit,
             as_of,
+            fields,
         }))
     }
 
@@ -458,16 +460,22 @@ impl Parser {
 
     // -- shared pieces ------------------------------------------------------
 
-    /// `SELECT <field>, ... | *` — consumed and discarded (M0 IR has no
-    /// projection; SELECT returns full records).
-    fn parse_field_list(&mut self) -> Result<(), NqlError> {
+    /// `SELECT <field>, ... | *` — carried into [`Select::fields`]: `None`
+    /// for `*` (full records), `Some(list)` for an explicit projection the
+    /// engine applies as the final pipeline step (spec §2.3).
+    fn parse_field_list(&mut self) -> Result<Option<Vec<String>>, NqlError> {
+        let mut fields = Vec::new();
+        let mut star = false;
         loop {
             match self.peek_tok() {
                 Token::Star => {
                     self.bump();
+                    star = true;
                 }
-                Token::Ident(_) => {
+                Token::Ident(name) => {
+                    let name = name.clone();
                     self.bump();
+                    fields.push(name);
                 }
                 _ => return Err(self.err_here("expected a field name or `*` in SELECT")),
             }
@@ -475,7 +483,7 @@ impl Parser {
                 break;
             }
         }
-        Ok(())
+        Ok(if star { None } else { Some(fields) })
     }
 
     /// `<ident>:<id>` — id is a number or a bare word.

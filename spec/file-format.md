@@ -49,6 +49,15 @@ then fsync of file + parent dir) and the WAL is truncated to zero length.
 - Therefore, after any crash: `open()` either recovers all acknowledged
   transactions, or (worst case) drops only a transaction whose commit was never
   fsynced — never a partially-applied one, and never corruption.
-- Single-writer: one process holds the DB for writing. Concurrent readers see
-  a consistent snapshot per `execute` (the store is swapped atomically at
-  checkpoint; in-memory reads are served from the current `Store`).
+- Single-writer: one process holds the DB for writing, **enforced** by an
+  exclusive sidecar lock `<name>.nql.lock` taken in `StoreFile::open` and held
+  until the store is dropped (issue #84). A second opener — other process or
+  other handle in the same process — fails fast with `Locked` instead of
+  racing the first writer to a checkpoint (which silently lost acknowledged
+  writes). On unix the lock is advisory `flock(2)`, released by the kernel on
+  close/crash (no stale locks; the lock file persists and is reused); where
+  std advisory locking is unavailable (MSRV 1.82 predates `File::try_lock`),
+  a `create_new` lock file is used and must be removed manually after a
+  crash. Concurrent readers see a consistent snapshot per `execute` (the
+  store is swapped atomically at checkpoint; in-memory reads are served from
+  the current `Store`).

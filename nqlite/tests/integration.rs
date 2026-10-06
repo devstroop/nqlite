@@ -3,7 +3,7 @@
 //! the nql-ir contract, end to end, deterministically, with zero LLM.
 
 use nql::parse;
-use nql_ir::{Store, Value};
+use nql_ir::{Record, RecordId, RelationEdge, Statement, Store, Value};
 use nqlite::Database;
 
 const SESSION: &str = r#"
@@ -139,6 +139,145 @@ fn nql_votes_flow_into_score_order() {
         (score - 19.0 / 30.0).abs() < 1e-6,
         "::score must reflect the vote, got {score}"
     );
+}
+
+#[test]
+fn nql_downvote_lowers_score_and_agrees_with_votes() {
+    // Regression for issue #85: `SET value = -1` with no explicit `weight`
+    // must LOWER ::score (weight defaults from the signed value), agreeing
+    // with ::votes — before the fix it counted as +1 and inverted the sign.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:a { "text": "a" };
+        INSERT INTO doc:b { "text": "b" };
+        RELATE (u:1) -> :voted -> (doc:a) SET value = -1;
+        SELECT * FROM doc ORDER BY ::score;
+        SELECT * FROM doc ORDER BY ::votes;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+
+    // ::score: a -> (-1 + 1)/(1 + 2) = 0.0, unvoted b -> 0.5. Before the fix
+    // a scored 0.6667 and outranked the unvoted record.
+    let by_score: Vec<String> = results[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(by_score, ["doc:b", "doc:a"]);
+    let score_a = results[0].rows[1].score;
+    assert!(
+        (score_a - 0.0).abs() < 1e-6,
+        "downvote -> 0.0, got {score_a}"
+    );
+
+    // Same relative order under ::votes (net: a=-1, b=0) — no sign skew.
+    let by_votes: Vec<String> = results[1]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(by_votes, ["doc:b", "doc:a"]);
+}
+
+#[test]
+fn nql_projection_returns_only_listed_fields() {
+    // Regression for issue #91: field lists were parsed and silently
+    // discarded — every row came back with ALL fields, and typos in the
+    // list succeeded unnoticed. Projection is presentation-only: same rows,
+    // same ids/scores, filtered bodies.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:1 { "text": "hello", "topic": "rust", "weight": 7 };
+        INSERT INTO doc:2 { "text": "world", "topic": "graph", "weight": 3 };
+        SELECT text, topic FROM doc;
+        SELECT nonexistant FROM doc;
+        SELECT * FROM doc;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 3);
+
+    // Projection: only the listed fields survive (BTree key order kept,
+    // `weight` dropped); ids and scores are untouched.
+    let projected = &results[0];
+    assert_eq!(projected.rows.len(), 2);
+    for row in &projected.rows {
+        let keys: Vec<_> = row.record.body.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["text", "topic"], "only listed fields in {:?}", keys);
+    }
+    assert_eq!(projected.rows[0].record.id.to_string(), "doc:1");
+
+    // A field the records don't have: no error, empty bodies (SQL-like),
+    // but the rows themselves still come back.
+    let typo = &results[1];
+    assert_eq!(typo.rows.len(), 2, "typo'd projection still returns rows");
+    assert!(typo.rows.iter().all(|r| r.record.body.is_empty()));
+
+    // `SELECT *` is unchanged: full records.
+    let star = &results[2];
+    let keys: Vec<_> = star.rows[0]
+        .record
+        .body
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["text", "topic", "weight"]);
+}
+
+#[test]
+fn colon_named_edges_traverse_from_nql_match() {
+    // Regression for issue #98: an IR-built edge that KEEPS the leading `:`
+    // (the chat_memory example's pattern) must still be reachable by a
+    // parsed `MATCH (a) -> :voted` — nql text strips the colon on write,
+    // IR construction may not, and both spellings must resolve to one graph.
+    let mut db = Database::new(Store::default());
+    let rec = |id: &str| Record {
+        id: RecordId::parse(id).unwrap(),
+        body: Default::default(),
+        embedding: None,
+        created_at: 0,
+    };
+    db.execute(&[
+        Statement::CreateTable {
+            table: "post".into(),
+            vector_dim: None,
+        },
+        Statement::Insert(rec("post:1")),
+        Statement::Insert(rec("agent:main")),
+        Statement::Relate(RelationEdge {
+            from: RecordId::parse("agent:main").unwrap(),
+            name: ":voted".into(), // colon kept (IR-built, issue #98)
+            to: RecordId::parse("post:1").unwrap(),
+            created_at: 0,
+            weight: Some(1.0),
+            props: Default::default(),
+        }),
+    ])
+    .expect("seed");
+
+    let results = db
+        .execute(&parse("MATCH (agent:main) -> :voted;").unwrap())
+        .expect("match");
+    assert_eq!(results[0].rows.len(), 1, "colon edge must be traversable");
+    assert_eq!(results[0].rows[0].record.id.to_string(), "post:1");
+
+    // CLOSURE resolves it too (same name check).
+    let results = db
+        .execute(&parse("CLOSURE (agent:main) -> :voted;").unwrap())
+        .expect("closure");
+    let ids: Vec<_> = results[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ids, ["agent:main", "post:1"]);
 }
 
 #[test]
@@ -314,4 +453,46 @@ fn nql_memory_blocks_end_to_end() {
         1,
         "archival note exists in its own store"
     );
+}
+
+#[test]
+fn memory_context_resets_between_plans() {
+    // Contract for issue #87 (spec §2.8): a plan ALWAYS starts at the root —
+    // `MEMORY` never leaks across plan boundaries. Over nql-server each
+    // protocol line is one plan, so a bare `MEMORY ledger;` line is a no-op
+    // for the next line and an unprefixed write silently targets root.
+    let mut db = Database::new(Store::default());
+
+    // Plan 1: write into the ledger memory (MEMORY shares the line).
+    db.execute(&parse("MEMORY ledger; CREATE TABLE note;").unwrap())
+        .expect("plan 1");
+    db.execute(&parse("MEMORY ledger; INSERT INTO note:1 { \"x\": 1 };").unwrap())
+        .expect("plan 1 write");
+
+    // Plan 2: a bare MEMORY line (the footgun) ...
+    db.execute(&parse("MEMORY ledger;").unwrap())
+        .expect("plan 2");
+    // ... then an UNPREFIXED write: it must land in ROOT, not the ledger.
+    db.execute(&parse("INSERT INTO note:2 { \"x\": 2 };").unwrap())
+        .expect("plan 3 root write");
+
+    // Root sees only the unprefixed write.
+    let root = db.execute(&parse("SELECT * FROM note;").unwrap()).unwrap();
+    let root_ids: Vec<_> = root[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(root_ids, ["note:2"], "unprefixed plan wrote to root");
+
+    // The ledger still holds only its own write.
+    let ledger = db
+        .execute(&parse("MEMORY ledger; SELECT * FROM note;").unwrap())
+        .unwrap();
+    let ledger_ids: Vec<_> = ledger[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ledger_ids, ["note:1"], "ledger unaffected by root write");
 }

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Field projection: `SELECT a, b FROM t` now returns only the listed fields
+  (previously parsed and silently discarded — every row came back full, and
+  typos in the field list succeeded unnoticed). Presentation-only: ranking
+  and limits still run on full records; `SELECT *` unchanged; missing keys
+  are absent from the row (spec §2.3 step 7).
+  ([#91](https://github.com/devstroop/nqlite/issues/91))
+- nql comments per spec §1: `--` to end of line and `/* */` block comments
+  are skipped by the lexer (previously both were lex errors, so spec §6's own
+  examples failed to parse); unterminated block comments report a positioned
+  error. ([#86](https://github.com/devstroop/nqlite/issues/86))
 - Hybrid retrieval: `WHERE ::bm25(field, "q") AND vector::similarity(embedding,
   $v) AND k = N` (clauses in either order) — lexical + vector signals fused
   with deterministic reciprocal-rank fusion (RRF); `ORDER BY` ignored in
@@ -49,3 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed dead `tracing` dependency.
 - Fixed: `::bm25` now reachable from the grammar (`WHERE ::bm25(...)`), MATCH
   edge-property filters, and vote-score colon mismatch (above).
+- Fixed: `::score` no longer counts `SET value = -1` downvotes as upvotes —
+  a `:voted` edge without an explicit `weight` now takes its weight from the
+  signed `value` (agreeing with `::votes`/`::feedback`); explicit `weight`
+  still overrides. Spec §3/§4 and decisions D9 updated (`weight: -1..=1`).
+  ([#85](https://github.com/devstroop/nqlite/issues/85))
+- Fixed: concurrent `--db` openers no longer lose acknowledged writes —
+  `StoreFile::open` now takes an exclusive sidecar lock (`<name>.nql.lock`;
+  `flock(2)` on unix, `create_new` file elsewhere, MSRV 1.82 preserved) and a
+  second opener fails fast with a `Locked` storage error. Spec
+  `file-format.md` §4 documents the enforcement.
+  ([#84](https://github.com/devstroop/nqlite/issues/84))
+- Fixed: IR-built edges that keep the leading `:` (`:voted`, as the
+  chat_memory example constructs them) are now honored by every reader —
+  `::score`/`::votes`/`::feedback` and MATCH/CLOSURE step matching — instead
+  of silently matching nothing (the example's importance knob was dead and
+  its printed claim false). The example now asserts its own output.
+  ([#98](https://github.com/devstroop/nqlite/issues/98))

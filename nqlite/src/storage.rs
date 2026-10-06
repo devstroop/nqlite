@@ -22,6 +22,7 @@ pub const CHECKPOINT_THRESHOLD: u64 = 1 << 20; // 1 MiB
 const MAGIC: &[u8; 8] = b"NQLITE01";
 const FORMAT_VERSION: u32 = 2;
 const WAL_SUFFIX: &str = ".wal";
+const LOCK_SUFFIX: &str = ".lock";
 
 /// Storage errors (all recoverable by re-opening / re-checkpointing).
 #[derive(Debug, Error)]
@@ -36,6 +37,12 @@ pub enum StorageError {
     BadMagic,
     #[error("torn/corrupt WAL frame at offset {0} (truncated)")]
     TornFrame(u64),
+    #[error(
+        "store is locked by another process (lock file: {0}); \
+         on platforms without advisory locking, delete the lock file only \
+         if no nql process is using this store"
+    )]
+    Locked(PathBuf),
 }
 
 // `std::io::Error` is neither `Clone` nor `Eq`, so derive both manually by
@@ -48,6 +55,7 @@ impl Clone for StorageError {
             Self::BadVersion(v) => Self::BadVersion(*v),
             Self::BadMagic => Self::BadMagic,
             Self::TornFrame(o) => Self::TornFrame(*o),
+            Self::Locked(p) => Self::Locked(p.clone()),
         }
     }
 }
@@ -60,6 +68,7 @@ impl PartialEq for StorageError {
             (Self::BadVersion(a), Self::BadVersion(b)) => a == b,
             (Self::BadMagic, Self::BadMagic) => true,
             (Self::TornFrame(a), Self::TornFrame(b)) => a == b,
+            (Self::Locked(a), Self::Locked(b)) => a == b,
             _ => false,
         }
     }
@@ -71,6 +80,12 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 ///
 /// `load` reads the main file (or an empty store if missing) and replays the
 /// WAL. `append` logs one mutating statement; `checkpoint` compacts.
+///
+/// **Single-writer enforcement (issue #84):** opening takes an exclusive
+/// cross-process lock on the sidecar `<name>.nql.lock` and holds it until the
+/// store is dropped. A second opener — another process, or another handle in
+/// the same process — fails with [`StorageError::Locked`] instead of silently
+/// racing the first writer to a checkpoint (which lost acknowledged writes).
 #[derive(Debug)]
 pub struct StoreFile {
     dir: PathBuf,
@@ -78,26 +93,85 @@ pub struct StoreFile {
     main: PathBuf,
     /// WAL path `<dir>/<name>.nql.wal`.
     wal: PathBuf,
+    /// Lock path `<dir>/<name>.nql.lock`.
+    _lock_path: PathBuf,
+    /// Held lock file (RAII): the fd keeps the advisory lock alive (unix);
+    /// underscore-prefixed because nothing on unix reads it back — the drop
+    /// of this handle *is* the release. Non-unix Drop reads both fields.
+    _lock: Option<File>,
     wal_len: u64,
+}
+
+/// Take the exclusive single-writer lock for `lock_path`.
+///
+/// Unix: advisory `flock(LOCK_EX | LOCK_NB)` — the kernel releases it when
+/// the fd closes for any reason (exit, crash, panic), so crashed writers
+/// never leave stale locks behind; the lock *file* persists and is reused.
+///
+/// Non-unix: std file locking is below MSRV 1.82 (`File::try_lock` needs
+/// 1.89), so fall back to a `create_new` lock file — exclusive but stale
+/// after a crash (the error text tells the user how to clear it).
+#[cfg(unix)]
+fn acquire_lock(lock_path: &Path) -> Result<File> {
+    use std::os::unix::io::AsRawFd;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    // SAFETY: `file` is a valid open fd for the duration of the call; flock(2)
+    // only reads the fd and reports errno via the return value.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(match err.kind() {
+            std::io::ErrorKind::WouldBlock => StorageError::Locked(lock_path.to_path_buf()),
+            _ => StorageError::Io(err),
+        });
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_lock(lock_path: &Path) -> Result<File> {
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+    {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(StorageError::Locked(lock_path.to_path_buf()))
+        }
+        Err(e) => Err(StorageError::Io(e)),
+    }
 }
 
 impl StoreFile {
     /// Open (or create) the store at `path` (e.g. `data.nql`).
     /// Creates the parent directory if missing.
+    ///
+    /// Fails with [`StorageError::Locked`] when another handle currently owns
+    /// the store (single-writer, issue #84).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let main = path.clone();
         let wal = append_suffix(&path, WAL_SUFFIX);
+        let lock_path = append_suffix(&path, LOCK_SUFFIX);
         if let Some(parent) = main.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
+        let lock = acquire_lock(&lock_path)?;
         let wal_len = fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             dir: main.parent().unwrap_or(Path::new(".")).to_path_buf(),
             main,
             wal,
+            _lock_path: lock_path,
+            _lock: Some(lock),
             wal_len,
         })
     }
@@ -248,6 +322,21 @@ impl StoreFile {
     }
 }
 
+// Without advisory locking (non-unix) the lock *file* is the lock: close the
+// fd and remove the file on graceful exit. A crash leaves the file behind and
+// the next opener gets `StorageError::Locked` with clearing instructions.
+// On unix no Drop impl is needed: the `File` field's drop closes the fd,
+// which releases the flock (kernel-owned liveness — the file is reused as-is).
+#[cfg(not(unix))]
+impl Drop for StoreFile {
+    fn drop(&mut self) {
+        if let Some(file) = self._lock.take() {
+            drop(file); // close first: Windows won't delete an open file
+            let _ = fs::remove_file(&self._lock_path);
+        }
+    }
+}
+
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
@@ -288,6 +377,7 @@ mod tests {
         let path = dir.join("db.nql");
         let mut sf = StoreFile::open(&path).unwrap();
         sf.checkpoint(&sample_store()).unwrap();
+        drop(sf); // single-writer: release the store lock before reopening
 
         let sf2 = StoreFile::open(&path).unwrap();
         let (store, replayed) = sf2.load().unwrap();
@@ -320,6 +410,7 @@ mod tests {
         crate::engine::execute_statement(&mut store, &insert).unwrap();
         sf.append(&create).unwrap();
         sf.append(&insert).unwrap();
+        drop(sf); // single-writer: release the store lock before reopening
 
         // Reopen from disk: WAL must reconstruct the store.
         let sf2 = StoreFile::open(&path).unwrap();
@@ -347,6 +438,7 @@ mod tests {
                 .unwrap();
             f.write_all(&[0x01, 0x02]).unwrap();
         }
+        drop(sf); // single-writer: release the store lock before reopening
         let sf2 = StoreFile::open(&path).unwrap();
         let (store, replayed) = sf2.load().unwrap();
         assert_eq!(replayed.len(), 1, "only the good frame is replayed");
@@ -376,10 +468,32 @@ mod tests {
         let mut sf = StoreFile::open(&path).unwrap();
         sf.checkpoint(&sample_store()).unwrap();
         let a = fs::read(&path).unwrap();
+        drop(sf); // single-writer: release the store lock before reopening
         let mut sf2 = StoreFile::open(&path).unwrap();
         sf2.checkpoint(&sample_store()).unwrap();
         let b = fs::read(&path).unwrap();
         assert_eq!(a, b, "identical stores serialize to identical bytes");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn second_open_is_rejected_while_held() {
+        // Issue #84: one live handle per store path. A second open (another
+        // process, or another handle in this one) must fail loudly instead of
+        // racing the first writer to a checkpoint.
+        let dir = temp_dir("lock");
+        let path = dir.join("db.nql");
+        let sf = StoreFile::open(&path).unwrap();
+        let err = StoreFile::open(&path).unwrap_err();
+        assert!(
+            matches!(err, StorageError::Locked(_)),
+            "second open must be Locked, got: {err:?}"
+        );
+        // Releasing the handle makes the store reopenable (flock dropped;
+        // the lock file itself is reusable).
+        drop(sf);
+        let sf2 = StoreFile::open(&path).unwrap();
+        drop(sf2);
         fs::remove_dir_all(&dir).ok();
     }
 }

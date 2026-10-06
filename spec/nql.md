@@ -119,6 +119,10 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    (Hybrid queries always order by the fused score; explicit `ORDER BY` is
    ignored in that mode.)
 6. **Limit** — keep first N (or the kNN/BM25 `k` cap, whichever is smallest).
+7. **Project** — keep only the fields listed in `select_list` (`SELECT *`
+   keeps every field). Presentation-only: filters, scores, ordering, and
+   limits all ran on the full record. A listed field a record does not have
+   is simply absent from that row (no error, BTree field order preserved).
 
 ### 2.4 Transactions
 
@@ -191,6 +195,23 @@ Semantics:
   an agent re-asserts `MEMORY <name>` at the top of any plan that should run
   inside a memory. Same `table:id` in different memories are different
   records.
+- **Context never carries across a plan boundary.** Over `nql-server` each
+  protocol line is its own plan, and in the REPL each input line is — so
+  `MEMORY <name>;` on one line does **not** apply to the next line; an
+  unprefixed write after it silently targets the root store (answers `OK`).
+  On line-oriented inputs, prefix every statement that belongs to the
+  memory (issue #87):
+
+  ```
+  MEMORY ledger; CREATE TABLE note;             -- ok: one line, one plan
+  MEMORY ledger; INSERT INTO note:1 { "x": 1 }; -- ok
+  MEMORY ledger; SELECT * FROM note;            -- ok
+  MEMORY ledger;                                -- NO-OP for later lines!
+  INSERT INTO note:2 { "x": 2 };                -- writes ROOT, not ledger
+  ```
+
+  A multi-statement script passed to `nql --script` is a *single* plan, so
+  there a lone `MEMORY <name>;` does carry through the rest of the file.
 - `MEMORY` statements are logged to the WAL (they carry the context switch),
   so memory scoping survives reopen via replay. Executing `MEMORY` outside a
   plan (directly via the engine's statement API) is an error.
@@ -201,7 +222,7 @@ Semantics:
 |---|---|---|
 | `vector::similarity(embedding, $q)` | cosine similarity `a·b / (|a||b|)`; zero-norm operands => `0.0` | exact f32 |
 | `::similarity` | order by cosine desc | total order w/ tie-break |
-| `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing) | pure arithmetic |
+| `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing). Each edge's weight is its explicit `weight`, else its signed `value` (`value = -1` downvotes); an edge with neither counts as `+1` | pure arithmetic |
 | `::votes(record)` | `(up, down, net)` counts over `:voted` edges | pure arithmetic |
 | `::feedback(record)` | time-decayed recent feedback | engine-clock only |
 | `::salience` | `α·similarity + β·strength + γ·importance + δ·score` | fixed order, no races |
@@ -215,6 +236,12 @@ Semantics:
   (provenance, started_on/ended_on per Zep research), `created_at` (engine).
 - **Votes are edges (decision D9):** `(voter)->:voted {value:+1|-1, weight, created_at}->(record)`.
   No separate vote machinery; provenance and one-transaction semantics come free.
+  The engine accepts both `voted` and `:voted` spellings at every reader
+  (nql text strips the colon on write; edges built directly through the IR
+  may keep it — see issue #98).
+  Vote `weight` spans `-1..=1` and defaults to the edge's `value` when omitted, so
+  `SET value = -1` alone is a downvote under `::score` too; an explicit `weight`
+  overrides `value` for `::score` only (`::votes`/`::feedback` always read `value`).
 - `FORGET` removes incident edges, keeping the graph clean.
 
 ## 5. Zero-LLM & BYO-vector contract

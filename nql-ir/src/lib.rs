@@ -251,6 +251,11 @@ pub struct Select {
     /// Temporal read: execute against the store as of this logical
     /// timestamp (`AS OF <int>`), replaying the mutation history up to it.
     pub as_of: Option<i64>,
+    /// Field projection: `None` = full records (`SELECT *`); `Some` = only
+    /// the listed body keys survive in output rows (missing keys are absent,
+    /// BTree order preserved). Filters/scores always see the full record —
+    /// projection is presentation-only (spec §2.3 step 7).
+    pub fields: Option<Vec<String>>,
 }
 
 /// The full "database" snapshot a query runs against. In M0 this is in-memory;
@@ -327,7 +332,9 @@ pub enum Order {
     Similarity,
     /// α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback (agent-tuned α..δ).
     Salience,
-    /// Laplace-smoothed mean of `:voted` edge values on the record.
+    /// Laplace-smoothed mean of `:voted` edge weights on the record (each
+    /// edge's explicit `weight`, falling back to its signed `value` when
+    /// `weight` is absent).
     Score,
     /// Net up−down vote count over `:voted` edges (descending; tie-break by RecordId).
     Votes,
