@@ -13,12 +13,12 @@
 //! are machine-dependent — L2 evidence needs commit + profile + machine,
 //! see the nqlite-experiments evidence ladder):
 //!
-//! - `load`    — `Database::open`: main-file read + postcard decode of the
-//!               whole `Store` (records, edges, history) + WAL check
-//! - `count`   — `SELECT COUNT(*) FROM doc` (parse + execute; one row)
-//! - `scan`    — `SELECT * FROM doc` (every row materialized, nothing
-//!               rendered — the render cost lives in the CLI, measured
-//!               separately with `time` on a line-protocol run)
+//! - `load`  — `Database::open`: main-file read + postcard decode of the
+//!   whole `Store` (records, edges, history) + WAL check
+//! - `count` — `SELECT COUNT(*) FROM doc` (parse + execute; one row)
+//! - `scan`  — `SELECT * FROM doc` (every row materialized, nothing
+//!   rendered — the render cost lives in the CLI, measured
+//!   separately with `time` on a line-protocol run)
 //!
 //! The gap between `load` and the E08 end-to-end cold-open number is the
 //! CLI's process/parse/render share; the gap between `count` and `scan` is

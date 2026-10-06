@@ -44,6 +44,11 @@ const RESERVED: &[&str] = &[
     "embedding",
     "true",
     "false",
+    // `id` is the record-identity pseudo-field in predicates (issue #128):
+    // `WHERE id <op>` only accepts `table:id` strings (positioned errors
+    // otherwise), so the generator must not emit it as a field name — the
+    // forms are covered by the parser/engine tests instead.
+    "id",
 ];
 
 fn ident() -> impl Strategy<Value = String> {
