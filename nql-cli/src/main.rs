@@ -87,12 +87,24 @@ fn main() -> io::Result<()> {
             None => Ok(Session::new(out)),
         }
     };
+    // Open failures (e.g. the single-writer lock, issue #84) print as a clean
+    // `error: ...` line instead of the io::Error Debug dump, matching the
+    // parser's error convention; exit 1 keeps scripts' failure detectable.
+    let open_session = |out: Box<dyn Write>| -> Session {
+        match make_session(out) {
+            Ok(session) => session,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
 
     match rest.as_slice() {
         [_, flag, path] if flag == "--script" || flag == "-s" => {
-            run_script(make_session(Box::new(BufWriter::new(io::stdout())))?, path)
+            run_script(open_session(Box::new(BufWriter::new(io::stdout()))), path)
         }
-        [_] => repl(make_session(Box::new(BufWriter::new(io::stdout())))?),
+        [_] => repl(open_session(Box::new(BufWriter::new(io::stdout())))),
         _ => {
             eprintln!("usage: nql [--db FILE] [--script FILE]");
             std::process::exit(2);

@@ -27,6 +27,12 @@ crc32fast = "1"
 # Pure-Rust HNSW, only compiled with the `hnsw` feature (see src/index.rs).
 fast-hnsw = { version = "1.0.1", optional = true }
 
+# Advisory flock(2) for the single-writer store lock (issue #84). Unix-only:
+# keeps the consumer MSRV at 1.82 (std file locking needs 1.89), and libc
+# predates it by years. Non-unix builds use a std create-new lock file instead.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Benchmark harness (see benches/). Benches are gated by the same CI checks as
 # the rest of the workspace (`cargo clippy --workspace --all-targets`).
