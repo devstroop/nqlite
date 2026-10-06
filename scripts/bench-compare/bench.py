@@ -80,7 +80,40 @@ def bench_nqlite(rows, knn, repo_root):
     out = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
     if out.returncode != 0:
         return {"db": "nqlite", "error": out.stderr.strip()[-300:]}
-    return json.loads(out.stdout.strip().splitlines()[-1])
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    result.update(bench_nqlite_recall(repo_root, rows))
+    return result
+
+
+def bench_nqlite_recall(repo_root, rows):
+    """Quality columns (issue #96): HNSW recall@K against exact brute-force.
+
+    Runs `nql-bench --recall` (its own dim-64 vector set — the timing corpus's
+    dim-8 vectors are trivially exact for HNSW). Tries the `hnsw` feature
+    first; without it the report honestly says the ANN path is off.
+    """
+    attempts = (
+        ["--features", "hnsw"],
+        [],
+    )
+    for features in attempts:
+        cmd = [
+            "cargo", "run", "-q", "-p", "nql-bench", *features, "--",
+            "--recall", "--rows", str(rows),
+        ]
+        out = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
+        if out.returncode != 0:
+            continue
+        lines = out.stdout.strip().splitlines()
+        if not lines:
+            continue
+        try:
+            data = json.loads(lines[-1])
+        except json.JSONDecodeError:
+            continue
+        if data.get("recall_mode"):
+            return data
+    return {"recall_error": "cargo run -p nql-bench -- --recall failed"}
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +235,16 @@ def fmt_cell(x):
     return f"{s:>12}"
 
 
+def fmt_recall(r):
+    """rec@10 column: HNSW recall@10 vs exact (issue #96); 'off'/'n/a' else."""
+    v = r.get("hnsw_recall_at_10")
+    if isinstance(v, (int, float)):
+        return f"{v:>10.4f}"
+    if "hnsw" in r:
+        return f"{'off':>10}"
+    return f"{'n/a':>10}"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--rows", type=int, default=1000)
@@ -230,7 +273,10 @@ def main():
     print(f"Cross-DB benchmark — {args.rows} rows, {args.knn} kNN queries, seed {SEED}")
     print(f"corpus: dim-{DIM} float vectors, 8-word vocabulary (xorshift64* deterministic)")
     print("-" * 78)
-    hdr = f"{'db':<12}{'ingest(ms)':>12}{'knn(ms)':>12}{'bm25(ms)':>12}{'hybrid(ms)':>12}"
+    hdr = (
+        f"{'db':<12}{'ingest(ms)':>12}{'knn(ms)':>12}{'bm25(ms)':>12}"
+        f"{'hybrid(ms)':>12}{'rec@10':>10}"
+    )
     print(hdr)
     print("-" * 78)
     for r in reports:
@@ -242,10 +288,12 @@ def main():
             continue
         print(
             f"{r['db']:<12}{r['ingest_ms']:>12}{r['knn_ms']:>12}"
-            f"{fmt_cell(r['bm25_ms'])}{fmt_cell(r['hybrid_ms'])}"
+            f"{fmt_cell(r['bm25_ms'])}{fmt_cell(r['hybrid_ms'])}{fmt_recall(r)}"
         )
     print("-" * 78)
     print("note: 'n/a' = competitor lacks that operator; compare only same-shape cells.")
+    print("rec@10 = HNSW recall@10 vs exact brute-force on a dim-64 set (issue #96);")
+    print("         'off' = nql-bench built without --features hnsw; competitors: n/a.")
 
 
 if __name__ == "__main__":

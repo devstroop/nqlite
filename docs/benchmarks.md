@@ -79,6 +79,54 @@ isn't installed. On this box none of the three drivers are present, so the
 matrix degrades honestly to nqlite-only (see "Reproduce" for how to install
 them).
 
+## Recall (quality, issue #96)
+
+Latency is half the story; the other half is whether the **opt-in HNSW index
+still returns the right neighbors**. `nql-bench --recall` measures the
+standard ANN metric — recall@K of HNSW against the exact brute-force top-K —
+on its own deterministic dim-64 vector set (seed 42, queries seeded apart
+from the corpus). The dim-8 *timing* corpus is deliberately not used here:
+in 8 dimensions HNSW is trivially exact and would report a meaningless 1.0.
+
+```sh
+# quality report (JSON; requires the hnsw feature for ANN numbers)
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 5000
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 50000 --queries 30 --dim 64
+
+# parameter sweep (recall degrades with N at default params — see below)
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 50000 --hnsw-m 32 --hnsw-ef 256
+
+# the gate: asserts recall@10 >= 0.95 (decisions §6 target)
+cargo test -p nqlite --test recall --features hnsw
+```
+
+Measured on this box (2026-10-06, `dim=64`, `HnswVectorIndex::new(seed=42, …)`):
+
+| rows | queries | m / efc / ef | recall@10 | recall@50 | recall@100 |
+|---:|---:|---|---:|---:|---:|
+| 5 000 | 20 | 16 / 200 / 64 (default) | **0.96** | 0.959 | 0.937 |
+| 50 000 | 30 | 16 / 200 / 64 (default) | **0.81** | 0.756 | 0.687 |
+
+**The honest finding: default parameters degrade with scale.** At 5k the ANN
+path clears decisions §6's `recall@10 ≥ 0.95` target; at 50k it falls to 0.81 —
+the gate (`nqlite/tests/recall.rs`, rows=5000) pins the 5k regime, and the
+`--hnsw-m/--hnsw-efc/--hnsw-ef` flags exist so the 50k regime can be swept
+(e.g. `--hnsw-m 32 --hnsw-ef 256` raises 2k-row recall to 1.0 in the smoke
+run) before any default-parameter claim at scale. Keep this table updated
+when params or the corpus change.
+
+Notes:
+
+- Recall numbers are **build-profile independent** — the HNSW graph and the
+  queries are seeded, so debug and release produce the same graph and the
+  same neighbors. (Latencies above are dev-profile; recall is not.)
+- Search beam: `fast-hnsw` widens `ef` to `max(ef, k)` — measuring with
+  `k = rows` would silently turn the gate into a near-exact run. Both the
+  bench and the gate cap `k` at 100 (see the comment in `nqlite/tests/recall.rs`).
+- `scripts/bench-compare/bench.py` now carries a `rec@10` column for nqlite
+  (`off` when built without `--features hnsw`; competitors report `n/a` until
+  a quality metric is wired for them).
+
 ## Reproduce
 
 ```sh
@@ -108,8 +156,9 @@ python3 -m venv /tmp/bench-venv
   a single k=10 kNN query costs ~140 ms; that is the price of exact,
   deterministic results, and it is 1–2 orders of magnitude slower than
   sqlite-vec/LanceDB/Chroma on the same data. The upside is that the exact
-  index is on by default and ANN (feature-gated HNSW-style) can be opted into
-  when determinism-per-query is not the binding constraint.
+  index is on by default and ANN (feature-gated HNSW) can be opted into — its
+  recall@10 vs exact is now measured (0.96 at 5k rows, see **Recall** above)
+  and gated by `cargo test -p nqlite --test recall --features hnsw`.
 - **These are dev-build numbers.** An unoptimized build is what the
   reproducible commands produce; release would be substantially faster, but
   then every reader would need the same `--release` flags to compare. State

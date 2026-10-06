@@ -9,6 +9,11 @@ description = "Deterministic cross-DB benchmark runner: emits JSON timings for n
 name = "nql-bench"
 path = "src/main.rs"
 
+[features]
+# Forward the ANN feature so `--recall` can score HNSW against exact
+# (issue #96): cargo run -p nql-bench --features hnsw -- --recall
+hnsw = ["nqlite/hnsw"]
+
 [dependencies]
 nql-ir = { path = "../nql-ir" }
 nqlite = { path = "../nqlite" }

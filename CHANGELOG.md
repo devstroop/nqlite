@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Recall@K quality harness for the ANN path (issue #96): `nql-bench --recall`
+  measures HNSW recall@10/50/100 against exact brute-force top-K on a
+  deterministic dim-64 vector set (`--dim`, `--hnsw-m/--hnsw-efc/--hnsw-ef`
+  for parameter sweeps; without `--features hnsw` the report says so). A gate
+  test (`nqlite/tests/recall.rs`, `--features hnsw`) asserts recall@10 ≥ 0.95
+  — decisions §6's target — measured **0.96 at 5k rows / 0.81 at 50k**
+  (default params degrade with scale; sweep flags exist for tuning).
+  `scripts/bench-compare/bench.py` carries a `rec@10` column for nqlite.
+  ([#96](https://github.com/devstroop/nqlite/issues/96))
 - `nql-mcp` typed `select` tool gains **`as_of`** (temporal read: logical
   timestamp, same semantics as `SELECT ... AS OF`) and **`memory`** (read a
   `MEMORY <name>` block's sub-store) — the capabilities previously reachable

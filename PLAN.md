@@ -69,8 +69,14 @@ Goal: prove the whole thing works end-to-end in one file, offline, deterministic
       triples → recall@K / precision@K vs real usage data; catches retrieval
       regressions on grammar/index/fusion changes.
 - [ ] Fuzz the parser (`cargo-fuzz`) and storage (proptest invariants).
-- [ ] Benchmark harness vs sqlite-vec, LanceDB, Chroma (ingest TPS, P95 kNN,
-      recall@10, cold-open latency).
+- [x] Benchmark harness vs sqlite-vec, LanceDB, Chroma (ingest TPS, P95 kNN,
+      recall@10, cold-open latency) — **recall@K quality shipped**
+      (`nql-bench --recall` vs exact + HNSW, gate `cargo test -p nqlite
+      --test recall --features hnsw` at ≥0.95, `rec@10` column in
+      bench-compare; docs/benchmarks.md §Recall). Remaining: competitor
+      driver installs for their quality columns (bench-compare skips them
+      honestly when absent); cold-open numbers live in nqlite-experiments
+      E08's file tier.
 
 ## Milestone 2 — nql grammar real (spec), analyzer, IR stability
 
