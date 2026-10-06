@@ -49,3 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed dead `tracing` dependency.
 - Fixed: `::bm25` now reachable from the grammar (`WHERE ::bm25(...)`), MATCH
   edge-property filters, and vote-score colon mismatch (above).
+- Fixed: `::score` no longer counts `SET value = -1` downvotes as upvotes —
+  a `:voted` edge without an explicit `weight` now takes its weight from the
+  signed `value` (agreeing with `::votes`/`::feedback`); explicit `weight`
+  still overrides. Spec §3/§4 and decisions D9 updated (`weight: -1..=1`).
+  ([#85](https://github.com/devstroop/nqlite/issues/85))
