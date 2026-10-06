@@ -119,6 +119,10 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    (Hybrid queries always order by the fused score; explicit `ORDER BY` is
    ignored in that mode.)
 6. **Limit** — keep first N (or the kNN/BM25 `k` cap, whichever is smallest).
+7. **Project** — keep only the fields listed in `select_list` (`SELECT *`
+   keeps every field). Presentation-only: filters, scores, ordering, and
+   limits all ran on the full record. A listed field a record does not have
+   is simply absent from that row (no error, BTree field order preserved).
 
 ### 2.4 Transactions
 

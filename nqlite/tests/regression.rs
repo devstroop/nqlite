@@ -77,6 +77,7 @@ fn run_knn(db: &mut Database, query: [f32; 6], k: usize) -> Vec<RecordId> {
         order: Some(nql_ir::Order::Similarity),
         limit: None,
         as_of: None,
+        fields: None,
     };
     let res = db
         .execute(&[nql_ir::Statement::Select(sel)])
@@ -175,6 +176,7 @@ fn results_carry_query_kind_for_disambiguation() {
         order: None,
         limit: Some(1),
         as_of: None,
+        fields: None,
     };
     let res = db
         .execute(&[nql_ir::Statement::Select(sel)])

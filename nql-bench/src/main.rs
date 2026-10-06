@@ -168,6 +168,7 @@ fn main() {
         order: None,
         limit: None,
         as_of: None,
+        fields: None,
     });
     let t1 = Instant::now();
     for _ in 0..knn {
@@ -187,6 +188,7 @@ fn main() {
         order: None,
         limit: None,
         as_of: None,
+        fields: None,
     });
     let t2 = Instant::now();
     for _ in 0..knn {
@@ -209,6 +211,7 @@ fn main() {
         order: None,
         limit: None,
         as_of: None,
+        fields: None,
     });
     let t3 = Instant::now();
     for _ in 0..knn {
@@ -230,6 +233,7 @@ fn main() {
         order: None,
         limit: None,
         as_of: None,
+        fields: None,
     });
     let closure = closure_stmt();
 
