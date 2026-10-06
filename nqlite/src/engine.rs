@@ -2799,6 +2799,241 @@ mod tests {
         );
     }
 
+    /// Shared fixtures for the #119 precedence/recipe tests: three docs with
+    /// text (bm25), `topic` (field sort / `IN` pool), vectors (kNN), a heavy
+    /// upvote on `doc:b` (so `::score` disagrees with relevance), and
+    /// insertion order a → b → c (so `::recency` is c → b → a).
+    fn precedence_fixture() -> Database {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record(
+                "doc:a",
+                BTreeMap::from([
+                    ("text".into(), str_("alpha alpha")),
+                    ("topic".into(), str_("z")),
+                ]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "doc:b",
+                BTreeMap::from([("text".into(), str_("beta")), ("topic".into(), str_("a"))]),
+                Some(vec![0.0, 1.0]),
+            )),
+            Statement::Insert(record(
+                "doc:c",
+                BTreeMap::from([
+                    ("text".into(), str_("alpha other")),
+                    ("topic".into(), str_("m")),
+                ]),
+                Some(vec![0.7, 0.7]),
+            )),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("u:1").unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse("doc:b").unwrap(),
+                created_at: 0,
+                weight: Some(5.0),
+                props: BTreeMap::from([("value".into(), Value::Int(1))]),
+            }),
+        ])
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn order_by_precedence_matrix_matches_spec() {
+        // The verified matrix (issue #119, spec §2.3 step 5): score-based
+        // orders are honored in scan/kNN modes and IGNORED in bm25/hybrid
+        // (relevance/fusion wins); structural orders are honored everywhere.
+        let mut db = precedence_fixture();
+        let mut run = |knn: bool, bm25: bool, order: Option<Order>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    knn: knn.then(|| Knn {
+                        query: vec![1.0, 0.0],
+                        k: 10,
+                    }),
+                    filter: bm25.then(|| Filter::Bm25 {
+                        field: "text".into(),
+                        query: "alpha".into(),
+                        k: None,
+                    }),
+                    order,
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let field_order = || Order::Field {
+            key: "topic".into(),
+            desc: false,
+        };
+
+        // scan mode: BTree default; the score-based op is honored (the heavy
+        // upvote floats doc:b).
+        assert_eq!(run(false, false, None), ["doc:a", "doc:b", "doc:c"]);
+        assert_eq!(
+            run(false, false, Some(Order::Score)),
+            ["doc:b", "doc:a", "doc:c"]
+        );
+        // kNN mode: similarity default; score-based and structural honored.
+        assert_eq!(run(true, false, None), ["doc:a", "doc:c", "doc:b"]);
+        assert_eq!(
+            run(true, false, Some(Order::Score)),
+            ["doc:b", "doc:a", "doc:c"]
+        );
+        assert_eq!(
+            run(true, false, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        // bm25 mode: relevance default; score-based IGNORED (byte-identical
+        // to the unordered query — the reported silent-OK hazard); structural
+        // orders honored.
+        let relevance = run(false, true, None);
+        assert_eq!(relevance, ["doc:a", "doc:c", "doc:b"]);
+        assert_eq!(run(false, true, Some(Order::Score)), relevance);
+        assert_eq!(
+            run(false, true, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        assert_eq!(
+            run(false, true, Some(field_order())),
+            ["doc:b", "doc:c", "doc:a"]
+        );
+        // hybrid mode: fused default; score-based IGNORED, structural honored.
+        let fused = run(true, true, None);
+        assert_eq!(run(true, true, Some(Order::Score)), fused);
+        assert_eq!(
+            run(true, true, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        assert_eq!(
+            run(true, true, Some(field_order())),
+            ["doc:b", "doc:c", "doc:a"]
+        );
+    }
+
+    #[test]
+    fn rerank_pool_recipe_scores_only_the_pool() {
+        // The #119 recipe: restrict FIRST (server-side IN, post-#93), then
+        // rank by ::score — never score the whole scan.
+        let mut db = precedence_fixture();
+        let mut run = |filter: Option<Filter>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter,
+                    order: Some(Order::Score),
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Unrestricted: ::score ranks every row — doc:b floats on its weight.
+        assert_eq!(run(None), ["doc:b", "doc:a", "doc:c"]);
+        // Restricted pool: only pool members are ranked (doc:b excluded even
+        // though it would have won).
+        let pool = run(Some(Filter::FieldIn {
+            field: "topic".into(),
+            values: vec![Value::Str("z".into()), Value::Str("m".into())],
+        }));
+        assert_eq!(pool, ["doc:a", "doc:c"], "pool only: {pool:?}");
+        assert!(!pool.contains(&"doc:b".to_string()));
+    }
+
+    #[test]
+    fn feedback_weight_and_value_disagree_by_design() {
+        // The #119 operator table: ::score reads `weight` (when set),
+        // ::votes reads `value` only — an explicit weight splits them on
+        // purpose (plus the post-#85 bare downvote).
+        let mut db = Database::default();
+        let vote = |to: &str, voter: &str, props: BTreeMap<String, Value>, weight: Option<f32>| {
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse(voter).unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse(to).unwrap(),
+                created_at: 0,
+                weight,
+                props,
+            })
+        };
+        db.execute(&[
+            create("doc", None),
+            Statement::Insert(record("doc:x", BTreeMap::new(), None)),
+            Statement::Insert(record("doc:y", BTreeMap::new(), None)),
+            Statement::Insert(record("doc:z", BTreeMap::new(), None)),
+            // x: upvote damped by an explicit weight …
+            vote(
+                "doc:x",
+                "u:1",
+                BTreeMap::from([("value".into(), Value::Int(1))]),
+                Some(0.3),
+            ),
+            // … y: plain upvote …
+            vote(
+                "doc:y",
+                "u:2",
+                BTreeMap::from([("value".into(), Value::Int(1))]),
+                None,
+            ),
+            // … z: bare downvote (works since #85).
+            vote(
+                "doc:z",
+                "u:3",
+                BTreeMap::from([("value".into(), Value::Int(-1))]),
+                None,
+            ),
+        ])
+        .unwrap();
+        let mut scores = |order: Order| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    order: Some(order),
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| (r.record.id.to_string(), r.score))
+                .collect::<Vec<_>>()
+        };
+
+        // ::score follows `weight`: (0.3+1)/3 < (1+1)/3, bare downvote lowest.
+        let ranked = scores(Order::Score);
+        let ids: Vec<_> = ranked.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, ["doc:y", "doc:x", "doc:z"]);
+        assert!((ranked[0].1 - 2.0 / 3.0).abs() < 1e-4, "{ranked:?}");
+        assert!((ranked[1].1 - 1.3 / 3.0).abs() < 1e-4, "{ranked:?}");
+        assert!((ranked[2].1 - 0.0).abs() < 1e-4, "{ranked:?}");
+
+        // ::votes follows `value` only: x still counts ONE upvote (the 0.3
+        // weight is ignored), z counts one downvote — nets 1, 1, -1.
+        let voted = scores(Order::Votes);
+        let by_id = |id: &str| {
+            voted
+                .iter()
+                .find(|(k, _)| k == id)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(|| panic!("{id} missing from {voted:?}"))
+        };
+        assert!(
+            (by_id("doc:x") - 1.0).abs() < 1e-4,
+            "weight ignored: {voted:?}"
+        );
+        assert!((by_id("doc:y") - 1.0).abs() < 1e-4, "{voted:?}");
+        assert!((by_id("doc:z") - -1.0).abs() < 1e-4, "{voted:?}");
+    }
+
     #[test]
     fn recency_orders_by_created_at_descending() {
         let mut db = Database::default();

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Spec §2.3 now carries the **verified `ORDER BY` precedence matrix**
+  (issue #119): score-based orders are honored in scan/kNN modes and ignored
+  — relevance/fusion wins — in bm25/hybrid; structural orders (`::recency`,
+  `<field> [DESC]`) are honored in every mode (supersedes the blanket
+  "ignored in hybrid"). `docs/agent-patterns.md` gains the re-ranking pool
+  recipe (post-#93 `IN`; RecordId pools → issue #128) and the
+  `::score` / `::votes` / `::feedback` weight-vs-value table — each pinned by
+  CI tests.
+
 ### Added
 - `HISTORY SINCE <ts>` (issue #118): exact mutation deltas for sync — one
   result row per CREATE/INSERT/RELATE/FORGET after the cutoff, with subject
