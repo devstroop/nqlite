@@ -3,7 +3,7 @@
 //! the nql-ir contract, end to end, deterministically, with zero LLM.
 
 use nql::parse;
-use nql_ir::{Store, Value};
+use nql_ir::{Record, RecordId, RelationEdge, Statement, Store, Value};
 use nqlite::Database;
 
 const SESSION: &str = r#"
@@ -229,6 +229,55 @@ fn nql_projection_returns_only_listed_fields() {
         .map(String::as_str)
         .collect();
     assert_eq!(keys, ["text", "topic", "weight"]);
+}
+
+#[test]
+fn colon_named_edges_traverse_from_nql_match() {
+    // Regression for issue #98: an IR-built edge that KEEPS the leading `:`
+    // (the chat_memory example's pattern) must still be reachable by a
+    // parsed `MATCH (a) -> :voted` — nql text strips the colon on write,
+    // IR construction may not, and both spellings must resolve to one graph.
+    let mut db = Database::new(Store::default());
+    let rec = |id: &str| Record {
+        id: RecordId::parse(id).unwrap(),
+        body: Default::default(),
+        embedding: None,
+        created_at: 0,
+    };
+    db.execute(&[
+        Statement::CreateTable {
+            table: "post".into(),
+            vector_dim: None,
+        },
+        Statement::Insert(rec("post:1")),
+        Statement::Insert(rec("agent:main")),
+        Statement::Relate(RelationEdge {
+            from: RecordId::parse("agent:main").unwrap(),
+            name: ":voted".into(), // colon kept (IR-built, issue #98)
+            to: RecordId::parse("post:1").unwrap(),
+            created_at: 0,
+            weight: Some(1.0),
+            props: Default::default(),
+        }),
+    ])
+    .expect("seed");
+
+    let results = db
+        .execute(&parse("MATCH (agent:main) -> :voted;").unwrap())
+        .expect("match");
+    assert_eq!(results[0].rows.len(), 1, "colon edge must be traversable");
+    assert_eq!(results[0].rows[0].record.id.to_string(), "post:1");
+
+    // CLOSURE resolves it too (same name check).
+    let results = db
+        .execute(&parse("CLOSURE (agent:main) -> :voted;").unwrap())
+        .expect("closure");
+    let ids: Vec<_> = results[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ids, ["agent:main", "post:1"]);
 }
 
 #[test]

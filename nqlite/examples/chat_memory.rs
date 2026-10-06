@@ -136,6 +136,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         println!("             mentions: {entities:?}");
     }
+    // The note below asserts an outcome — make it a real assertion
+    // (issue #98): with the `:voted` importance edges live, turn:2
+    // (importance 0.9) outranks turn:1 (similarity 1.0, importance 0.8).
+    let top_two: Vec<String> = recalled
+        .rows
+        .iter()
+        .take(2)
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(
+        top_two,
+        ["turn:2", "turn:1"],
+        "importance knob must lift turn:2 above turn:1 under ::salience"
+    );
     println!(
         "\nnote: turn:2 outranks turn:1 despite slightly lower similarity \
          (0.994 vs 1.000) — its importance knob (0.9) lifts its salience."

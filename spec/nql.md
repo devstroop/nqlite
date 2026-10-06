@@ -219,6 +219,9 @@ Semantics:
   (provenance, started_on/ended_on per Zep research), `created_at` (engine).
 - **Votes are edges (decision D9):** `(voter)->:voted {value:+1|-1, weight, created_at}->(record)`.
   No separate vote machinery; provenance and one-transaction semantics come free.
+  The engine accepts both `voted` and `:voted` spellings at every reader
+  (nql text strips the colon on write; edges built directly through the IR
+  may keep it — see issue #98).
   Vote `weight` spans `-1..=1` and defaults to the edge's `value` when omitted, so
   `SET value = -1` alone is a downvote under `::score` too; an explicit `weight`
   overrides `value` for `::score` only (`::votes`/`::feedback` always read `value`).
