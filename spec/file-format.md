@@ -17,6 +17,13 @@ offset 16  : payload = postcard(Store)
 `Store` = `{ records: BTreeMap<RecordId, Record>, edges: Vec<RelationEdge>,
 vector_dims: BTreeMap<String, usize> }` (see `nql-ir`).
 
+The payload also carries `Store.history`, which after `PRUNE HISTORY`
+(issue #95) contains a `Statement::Snapshot` entry: the compacted state
+plus the retained `CreateTable` declarations. **Downside caveat:** binaries
+older than the compaction feature cannot decode a pruned store (unknown
+statement variant) and fail loudly at `postcard` decode; unpruned stores
+decode unchanged.
+
 A missing main file means an empty store.
 
 ## 2. Write-ahead log (`<name>.nql.wal`)

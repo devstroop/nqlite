@@ -84,6 +84,10 @@ This gives you:
   property filters) and `CLOSURE` (transitive closure, BFS-depth scores);
   both accept `AS OF <ts>` (historical snapshots) and `MATCH ... COUNT`
   (edge multiplicity).
+- **Time travel** — `AS OF <ts>` on `SELECT`/`MATCH`/`CLOSURE`, backed by
+  deterministic history replay; `PRUNE HISTORY` compacts that history into a
+  snapshot (bounded growth, cheap recent `AS OF`; earlier timestamps fail
+  loudly instead of guessing).
 - **Embedded & serverless** — a single file; open a path, start recall.
   Network server mode (line protocol, TCP or stdio) and an MCP server
   (`nql-mcp`) are built in.

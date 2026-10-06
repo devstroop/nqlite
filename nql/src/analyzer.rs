@@ -161,6 +161,10 @@ impl Ctx {
             // never produce it and analyzed plans never contain it; pass
             // through defensively instead of panicking.
             Statement::ContextReset => Ok(stmt.clone()),
+            // History compaction (issue #95): PRUNE validates nothing;
+            // snapshots are replay-only and never reach analysis.
+            Statement::PruneHistory => Ok(stmt.clone()),
+            Statement::Snapshot(_) => Ok(stmt.clone()),
         }
     }
 }

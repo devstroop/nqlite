@@ -19,7 +19,8 @@ Keywords are case-insensitive. Whitespace/comments (`--` to end of line, `/* */`
 are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
-statement      = create_table | insert | relate | select | match | closure | memory | forget ;
+statement      = create_table | insert | relate | select | match | closure | memory | forget
+               | prune ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -37,6 +38,8 @@ select         = 'SELECT' select_list 'FROM' ident
 forget         = 'FORGET' recordid ;
 
 memory         = 'MEMORY' ident ;
+
+prune          = 'PRUNE' 'HISTORY' ;
 
 match          = 'MATCH' '(' recordid ')' path_step+ [ 'AS OF' int ] [ 'COUNT' ] ;
 closure        = 'CLOSURE' '(' recordid ')' path_step+ [ 'AS OF' int ] ;
@@ -94,6 +97,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH; accepts `AS OF <ts>` like MATCH (see §2.5). |
 | `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; paginates (`OFFSET`/`LIMIT`); `COUNT(*)` counts instead of listing; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
+| `PRUNE HISTORY` | Compacts the mutation history into a snapshot at the current clock: bounded growth, cheap `AS OF` from the snapshot onward; `AS OF` earlier than the snapshot errors (`HistoryPruned`). Applies to MEMORY blocks too (issue #95). |
 | `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
 
 ### 2.3 SELECT pipeline (fixed order)
@@ -231,6 +235,21 @@ snapshot). Semantics:
 - `AS OF` with a cutoff beyond the last mutation is the full current state.
 - The timestamp is the **logical** mutation counter, not a wall-clock
   datetime; a datetime-literal form is future work.
+- **History compaction (`PRUNE HISTORY`, issue #95):** replaces the history
+  with a snapshot of the current state at the current clock, plus the
+  `CreateTable` declaration statements retained at their original timestamps
+  (they are the only record of empty/dim-less tables — issue #89 — and
+  re-executing them is idempotent). Growth stops tracking superseded
+  versions, and later `AS OF` reads rebuild from the snapshot instead of
+  ts0. **Retention contract:** `AS OF T` with `T` earlier than the snapshot
+  fails with `HistoryPruned` ("history before ts N was compacted …") — loud,
+  never a partial view. Compaction applies to every `MEMORY` block's own
+  history too, is deterministic (a pure function of the store), is
+  WAL-logged (it survives a reopen without an explicit flush), and lands in
+  the main file at the next checkpoint. **Downside caveat:** a store pruned
+  by a binary with this feature cannot be opened by older binaries (the
+  snapshot entry is a new statement variant); unpruned stores decode
+  unchanged.
 
 ### 2.8 Memory blocks (`MEMORY <name>`)
 

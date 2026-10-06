@@ -144,7 +144,10 @@ impl Database {
 /// `CLOSURE`) are never logged. `MEMORY` is logged: it carries the context switch that WAL
 /// replay needs to reconstruct memory scoping. `ContextReset` is a WAL-only
 /// sequencing marker appended by [`Database::execute`] itself — it is not a
-/// plan statement and never enters `Store::history`.
+/// plan statement and never enters `Store::history`. `Snapshot` entries live
+/// only inside history (created by `PRUNE HISTORY`, issue #95) and are never
+/// WAL frames; `PRUNE HISTORY` itself IS logged, so compaction survives a
+/// reopen without an explicit flush.
 fn is_mutating(stmt: &Statement) -> bool {
     !matches!(
         stmt,
@@ -152,6 +155,7 @@ fn is_mutating(stmt: &Statement) -> bool {
             | Statement::Match(_)
             | Statement::MatchCount(_)
             | Statement::Closure(_)
+            | Statement::Snapshot(_)
             | Statement::ContextReset
     )
 }
