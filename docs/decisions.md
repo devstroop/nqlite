@@ -140,8 +140,10 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
     future agent-side reranker. The *learning* (weight tuning α..δ, reranker
     training) lives in the agent layer, never in the engine.
   - Salience gets a fourth deterministic term:
-    `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback_score`
-    (weights α..δ are agent-side knobs).
+    `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
+    (weights α..δ are agent-side knobs, passed per-query as
+    `ORDER BY ::salience(α, β, γ, δ)`; engine defaults 0.7/0/0/0.3 —
+    LANDED 2026-10-06, issue #88).
   - **LANDED (2026-08-03)**: `Order::Votes` + `Order::Feedback` in nql-ir;
     `vote_counts` (up/down/net over `:voted` edges) and `feedback_score`
     (time-decayed: Σ sign·1/(1+λ·age), `now` = max created_at in store — pure,

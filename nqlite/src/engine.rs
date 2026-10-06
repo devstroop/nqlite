@@ -641,8 +641,13 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
 /// - `Order::Salience` with kNN → `0.7 * similarity + 0.3 * normalized_score`,
 ///   where `normalized_score` is the Laplace score clamped to `[0, 1]`
 ///   (weights are treated as `[0, 1]` confidence values; the clamp keeps the
-///   blend in range even for out-of-range weights).
+///   blend in range even for out-of-range weights). These are the engine
+///   defaults of the spec §2.3 four-term formula (α=0.7, β=0, γ=0, δ=0.3).
 /// - `Order::Salience` without kNN → the normalized score alone.
+/// - `Order::SalienceWeighted([α, β, γ, δ])` → the same four-term formula with
+///   agent-tuned weights (parsed from `ORDER BY ::salience(α, β, γ, δ)`):
+///   `α·similarity + β·strength + γ·importance + δ·normalized_score` — see
+///   [`strength_of`] and [`importance_of`] for the β/γ term definitions.
 /// - Anything else → cosine similarity vs the kNN query (`0.0` when there is
 ///   no kNN clause, or when the record has no embedding / zero-norm vector).
 fn compute_score(
@@ -685,6 +690,13 @@ fn compute_score(
             0.7 * similarity + 0.3 * score_of(store, rec).clamp(0.0, 1.0)
         }
         Some(Order::Salience) => score_of(store, rec).clamp(0.0, 1.0),
+        Some(Order::SalienceWeighted(w)) => {
+            let [alpha, beta, gamma, delta] = *w;
+            alpha * similarity
+                + beta * strength_of(store, rec)
+                + gamma * importance_of(rec)
+                + delta * score_of(store, rec).clamp(0.0, 1.0)
+        }
         _ => similarity,
     }
 }
@@ -789,6 +801,42 @@ pub fn vote_counts(store: &Store, id: &RecordId) -> VoteCounts {
         down,
         net: up as i64 - down as i64,
     }
+}
+
+/// `strength(recency, freq)` — the β term of `::salience(α, β, γ, δ)`, in
+/// `[0, 1]`. Deterministic and pure (spec §2.3):
+///
+/// ```text
+/// strength = (recency + freq) / 2
+/// recency  = 1 / (1 + age),   age = max(0, clock − created_at)
+/// freq     = n / (n + 1),      n   = incident edges (either direction)
+/// ```
+///
+/// Recency uses the same `1/(1+λ·age)` shape (λ=1) as [`feedback_score`]; freq
+/// saturates toward 1 as the record draws more edges. A record stamped this
+/// transaction is age 0 → recency 1.0. Engine defaults give this term zero
+/// weight (β=0) — agents opt in per-query.
+fn strength_of(store: &Store, rec: &Record) -> f32 {
+    let age = (store.clock - rec.created_at).max(0) as f32;
+    let recency = 1.0 / (1.0 + age);
+    let n = store
+        .edges
+        .iter()
+        .filter(|e| e.from == rec.id || e.to == rec.id)
+        .count() as f32;
+    0.5 * recency + 0.5 * (n / (n + 1.0))
+}
+
+/// The γ term of `::salience(α, β, γ, δ)`: the agent-written `importance`
+/// field clamped to `[0, 1]`. Missing or non-numeric → `0.0` (spec §5: the
+/// engine never invents importance).
+fn importance_of(rec: &Record) -> f32 {
+    let v = match rec.body.get("importance") {
+        Some(Value::Float(v)) => *v as f32,
+        Some(Value::Int(v)) => *v as f32,
+        _ => 0.0,
+    };
+    v.clamp(0.0, 1.0)
 }
 
 /// Time-decayed recent feedback over a record's `:voted` edges.
@@ -1448,6 +1496,134 @@ mod tests {
         assert!((s1 - 0.9).abs() < 1e-5);
         assert!((s2 - 0.15).abs() < 1e-5);
         assert_eq!(res[0].rows[0].record.id.to_string(), "doc:1");
+    }
+
+    #[test]
+    fn salience_weighted_gamma_tunes_importance_field() {
+        let mut db = Database::default();
+        let body = |imp: f64| BTreeMap::from([("importance".into(), Value::Float(imp))]);
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record("doc:1", body(0.1), Some(vec![1.0, 0.0]))),
+            Statement::Insert(record("doc:2", body(0.9), Some(vec![1.0, 0.0]))),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(order),
+                ..select("doc")
+            })])
+            .unwrap()
+        };
+        // γ = 1: the agent-written `importance` field drives the ranking —
+        // identical embeddings, so similarity alone could not separate them.
+        let res = run(Order::SalienceWeighted([0.0, 0.0, 1.0, 0.0]));
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:2", "doc:1"]);
+        assert!((res[0].rows[0].score - 0.9).abs() < 1e-6);
+        assert!((res[0].rows[1].score - 0.1).abs() < 1e-6);
+        // Bare ::salience (defaults, γ = 0) ignores the field: same similarity,
+        // no votes → tie → RecordId order.
+        let res = run(Order::Salience);
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:1", "doc:2"]);
+    }
+
+    #[test]
+    fn salience_weighted_beta_tunes_strength_recency_freq() {
+        let mut db = Database::default();
+        let mut old = record("msg:aaa-old", BTreeMap::new(), None);
+        old.created_at = 1;
+        let mut new = record("msg:zzz-new", BTreeMap::new(), None);
+        new.created_at = 50;
+        db.execute(&[
+            create("msg", None),
+            Statement::Insert(old),
+            Statement::Insert(new),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                order: Some(order),
+                ..select("msg")
+            })])
+            .unwrap()
+        };
+        // β = 1: recency puts the newer record first even though its id sorts
+        // last — the RecordId tie-break can't mask the term.
+        let res = run(Order::SalienceWeighted([0.0, 1.0, 0.0, 0.0]));
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["msg:zzz-new", "msg:aaa-old"]);
+        // Defaults give strength zero weight: both score 0.5 → id order.
+        let res = run(Order::Salience);
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["msg:aaa-old", "msg:zzz-new"]);
+    }
+
+    #[test]
+    fn salience_weighted_default_weights_reproduce_bare_salience() {
+        // [0.7, 0, 0, 0.3] — the spec §2.3 engine defaults — must score
+        // identically to bare ORDER BY ::salience (backward compatibility).
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record("doc:1", BTreeMap::new(), Some(vec![1.0, 0.0]))),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("user:v").unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse("doc:1").unwrap(),
+                created_at: 1,
+                weight: Some(1.0),
+                props: BTreeMap::new(),
+            }),
+            // doc:2: no embedding, no votes -> sim 0, score 0.5.
+            Statement::Insert(record("doc:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(order),
+                ..select("doc")
+            })])
+            .unwrap()
+        };
+        let bare: Vec<f32> = run(Order::Salience)[0]
+            .rows
+            .iter()
+            .map(|r| r.score)
+            .collect();
+        let weighted: Vec<f32> = run(Order::SalienceWeighted([0.7, 0.0, 0.0, 0.3]))[0]
+            .rows
+            .iter()
+            .map(|r| r.score)
+            .collect();
+        assert_eq!(bare, weighted);
+        assert!((bare[0] - 0.9).abs() < 1e-5);
+        assert!((bare[1] - 0.15).abs() < 1e-5);
     }
 
     #[test]

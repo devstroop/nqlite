@@ -540,6 +540,45 @@ fn order_by_variants() {
 }
 
 #[test]
+fn salience_weighted_order_parses_and_validates() {
+    let plan = parse("SELECT * FROM t ORDER BY ::salience(0.5, 0, 0.25, 0.25) LIMIT 3").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.order,
+        Some(Order::SalienceWeighted([0.5, 0.0, 0.25, 0.25]))
+    );
+    assert_eq!(s.limit, Some(3));
+
+    // integer literals count as weights too
+    let plan = parse("SELECT * FROM t ORDER BY ::salience(1, 0, 0, 0)").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.order, Some(Order::SalienceWeighted([1.0, 0.0, 0.0, 0.0])));
+
+    // bare ::salience keeps the engine-default variant
+    let plan = parse("SELECT * FROM t ORDER BY ::salience").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.order, Some(Order::Salience));
+
+    // arity and shape errors: exactly four numbers, parens closed
+    for bad in [
+        "SELECT * FROM t ORDER BY ::salience()",
+        "SELECT * FROM t ORDER BY ::salience(0.5, 0.2)",
+        "SELECT * FROM t ORDER BY ::salience(0.5, 0.2, 0.1, 0.2, 0.1)",
+        "SELECT * FROM t ORDER BY ::salience(0.5, 0.2, 0.1, 0.2",
+        "SELECT * FROM t ORDER BY ::salience(a, 0, 0, 0)",
+        "SELECT * FROM t ORDER BY ::salience(0.5, 0.2, 0.1,)",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn empty_input_parses_to_empty_plan() {
     assert!(parse("").unwrap().is_empty());
     assert!(parse("   \n\t ").unwrap().is_empty());
