@@ -12,6 +12,7 @@ tracked issue log in [ISSUES.md](../ISSUES.md).
 | [positioning.md](positioning.md) | How we talk about nqlite: pitch, what it is/isn't, honest comparisons, terminology |
 | [research.md](research.md) | External research with sources: competitive landscape, engines, grammar, agent-memory |
 | [comparison.md](comparison.md) | Position vs sqlite-vec, LanceDB, Chroma, SurrealDB |
+| [integrations.md](integrations.md) | Integration boundaries: oio ↔ nqlite directions, third-party stacks, naming — cite this in the first adapter PR |
 
 ## Guides & reference
 
@@ -38,4 +39,3 @@ tracked issue log in [ISSUES.md](../ISSUES.md).
 - **Dated artifacts** (release notes, superseded boards) live in `archive/`.
 - **Docs move with code** — any code change that alters a decision updates the
   matching doc in the SAME PR.
-  the relevant doc in the same PR.
