@@ -136,6 +136,10 @@ impl Ctx {
                 validate_record_id(&path.start)?;
                 Ok(stmt.clone())
             }
+            Statement::MatchCount(path) => {
+                validate_record_id(&path.start)?;
+                Ok(stmt.clone())
+            }
             Statement::Closure(path) => {
                 validate_record_id(&path.start)?;
                 Ok(stmt.clone())

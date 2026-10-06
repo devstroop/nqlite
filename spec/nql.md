@@ -32,20 +32,24 @@ select         = 'SELECT' select_list 'FROM' ident
                  [ 'WHERE' where_clause ]
                  [ 'ORDER' 'BY' '::' order_op ]
                  [ 'AS' 'OF' int ]
-                 [ 'LIMIT' int ] ;
+                 [ 'OFFSET' int ] [ 'LIMIT' int [ 'OFFSET' int ] ] ;
 
 forget         = 'FORGET' recordid ;
 
 memory         = 'MEMORY' ident ;
 
-match          = 'MATCH' '(' recordid ')' path_step+ ;
+match          = 'MATCH' '(' recordid ')' path_step+ [ 'COUNT' ] ;
 closure        = 'CLOSURE' '(' recordid ')' path_step+ ;
 path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
-edge_props     = 'WHERE' field_equals ;
+edge_props     = 'WHERE' predicate ;
 
-select_list    = '*' | ident (',' ident)* ;
-where_clause   = field_equals | vector_knn | has_embedding | bm25 | hybrid ;
+select_list    = '*' | 'COUNT' '(' '*' ')' | ident (',' ident)* ;
+where_clause   = predicate | vector_knn | has_embedding | bm25 | hybrid ;
+predicate      = field_equals | field_cmp | field_in | field_between ;
 field_equals   = ident '=' value ;
+field_cmp      = ident ('!=' | '<' | '<=' | '>' | '>=') value ;
+field_in       = ident 'IN' '[' [ value (',' value)* ] ']' ;
+field_between  = ident 'BETWEEN' value 'AND' value ;
 vector_knn     = 'vector::similarity' '(' 'embedding' ',' vector ')' 'AND' 'k' '=' int ;
 has_embedding  = 'embedding' 'IS' 'NOT' 'NULL' ;
 bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
@@ -86,9 +90,9 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CREATE TABLE t [VECTOR<f32,N>]` | Declares table `t`; optional fixed embedding dim `N`. Re-declaring with a dim enforces it on future INSERTs. |
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
-| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <edge-prop> = <value>` to only traverse edges whose props match. Deterministic (see §2.5). |
+| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <predicate>` (equality, comparisons, `IN`, `BETWEEN`) to only traverse edges whose props match. `MATCH ... COUNT` returns the number of matching edge-path instances instead of records (multiplicity). Deterministic (see §2.5). |
 | `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
-| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; limits; returns records (+computed score). |
+| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; paginates (`OFFSET`/`LIMIT`); `COUNT(*)` counts instead of listing; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 | `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
 
@@ -97,6 +101,18 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 1. **Scan** — records of table `t` in BTree order.
 2. **Filter** — `WHERE`:
    - `field = value`: exact, deterministic equality against body value.
+   - `field != value`, `field < | <= | > | >= value`, `field IN [v, …]`,
+     `field BETWEEN a AND b` (inclusive) — the comparison predicates
+     (issues #93/#94). All but `!=`/`=`/`IN` order values with a **total
+     cross-type order**: type ranks `null < bool < number < string < array <
+     doc < vector < ref`; within numbers comparison is numeric and exact
+     (ints never round through floats; `NaN` sorts after every number);
+     arrays/docs/vectors compare element/key-wise, then by length. `=`,
+     `!=`, and `IN` keep exact value equality (`1` and `1.0` are different
+     values), so `= v` and `!= v` are complements. A record that does not
+     carry the field never matches (the long-standing `=` rule); an explicit
+     `null` participates and ranks lowest. The order is proptest-pinned
+     (reflexive, antisymmetric, transitive, never panics).
    - `embedding IS NOT NULL`: only records with vectors.
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
    - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
@@ -129,8 +145,15 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    - `::recency` — `created_at` desc.
    (Hybrid queries always order by the fused score; explicit `ORDER BY` is
    ignored in that mode.)
-6. **Limit** — keep first N (or the kNN/BM25 `k` cap, whichever is smallest).
-7. **Project** — keep only the fields listed in `select_list` (`SELECT *`
+6. **Offset / Limit** — `OFFSET n` skips the first `n` rows after ordering;
+   then keep the first N (or the kNN/BM25 `k` cap, whichever is smallest) of
+   what remains (issues #93/#94).
+7. **Aggregate** — `SELECT COUNT(*)` returns ONE row `{"count": <n>}`
+   instead of records: `n` is the number of records that passed step 2's
+   filter, so ordering, offset, limit, and projection never affect it (a
+   count is computed before them and builds no kNN/BM25 index). Deterministic
+   (issue #94).
+8. **Project** — keep only the fields listed in `select_list` (`SELECT *`
    keeps every field). Presentation-only: filters, scores, ordering, and
    limits all ran on the full record. A listed field a record does not have
    is simply absent from that row (no error, BTree field order preserved).
@@ -147,14 +170,22 @@ before a SELECT apply first, so a plan may create/insert/relate/query in one pas
   empty result — never an error.
 - Each step follows every edge with the given name in the given direction
   (`->` = outgoing from a frontier record, `<-` = incoming toward it). A step
-  may carry `WHERE <edge-prop> = <value>`: only edges whose `props` field
-  equals the value are traversed (exact equality against the edge's props).
+  may carry `WHERE <predicate>` — any field predicate of §2.3 (equality,
+  comparisons, `IN`, `BETWEEN`) evaluated against the edge's `props`:
+  only edges whose props match are traversed (issue #93).
 - Edges are scanned in append order; reached endpoints are deduplicated by
   `RecordId` keeping first appearance. The result rows carry the score of the
   first edge that reached them (`weight`, or `0.0` when unset).
 - Dangling edges (endpoints never inserted) are skipped.
 - `MATCH` (path semantics): only the final frontier is returned — intermediate
   hops are not in the output.
+- `MATCH ... COUNT` (issue #94): returns one row `{"count": <n>}` instead of
+  the frontier, where `n` is the number of edge-path **instances** (walks)
+  matching the steps — parallel edges count separately, so the multiplicity
+  between two records stays observable. Walk counts accumulate per node per
+  step as saturating `u64`s (order-independent, hence deterministic). The same
+  edge/prop filters and dangling-edge rules apply; a missing start yields
+  `{"count": 0}`.
 - `CLOSURE` (transitive closure): each step is expanded to a fixpoint (BFS,
   any number of hops) before the next step begins; every record ever reached —
   including the start — is returned once in first-visit order, scored by BFS

@@ -324,6 +324,8 @@ fn main() {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     });
     let t1 = Instant::now();
     for _ in 0..knn {
@@ -344,6 +346,8 @@ fn main() {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     });
     let t2 = Instant::now();
     for _ in 0..knn {
@@ -367,6 +371,8 @@ fn main() {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     });
     let t3 = Instant::now();
     for _ in 0..knn {
@@ -389,6 +395,8 @@ fn main() {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     });
     let closure = closure_stmt();
 

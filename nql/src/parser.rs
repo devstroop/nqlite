@@ -21,8 +21,8 @@
 
 use crate::lexer::{tokenize, Spanned, Token};
 use nql_ir::{
-    Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Plan, Record, RecordId,
-    RelationEdge, Select, Statement, Value,
+    Aggregate, CmpOp, Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Plan, Record,
+    RecordId, RelationEdge, Select, Statement, Value,
 };
 use std::collections::BTreeMap;
 
@@ -325,6 +325,12 @@ impl Parser {
     fn parse_match(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("match", "MATCH")?;
         let path = self.parse_path("MATCH")?;
+        // `MATCH ... COUNT` — walk-count mode (issue #94). Statements can only
+        // start with keywords, so a `COUNT` here can't be the next statement.
+        if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("count")) {
+            self.bump();
+            return Ok(Statement::MatchCount(path));
+        }
         Ok(Statement::Match(path))
     }
 
@@ -361,9 +367,9 @@ impl Parser {
             if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("where")) {
                 self.bump();
                 let field = self.expect_ident("edge-property field after WHERE")?;
-                self.expect_token(Token::Eq, "`=` in edge-property filter")?;
-                let value = self.parse_value()?;
-                edge_props = Some(Filter::FieldEquals { field, value });
+                // Same predicate grammar as a WHERE clause (issue #93): =,
+                // comparisons, IN, BETWEEN — evaluated against edge props.
+                edge_props = Some(self.parse_field_predicate(field)?);
             }
             steps.push(MatchStep {
                 direction,
@@ -379,9 +385,9 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("select", "SELECT")?;
-        // Field list (or `*`): carried into the IR as the projection
-        // (`None` = star = full records).
-        let fields = self.parse_field_list()?;
+        // Field list (or `*`), or `COUNT(*)`: carried into the IR as the
+        // projection (`None` = star = full records) and/or aggregate.
+        let (fields, aggregate) = self.parse_field_list()?;
         self.expect_keyword("from", "FROM")?;
         let table = self.expect_ident("table name after FROM")?;
 
@@ -389,6 +395,7 @@ impl Parser {
         let mut filter = None;
         let mut order = None;
         let mut limit = None;
+        let mut offset = None;
         let mut as_of = None;
 
         loop {
@@ -429,6 +436,17 @@ impl Parser {
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("limit") => {
                     self.bump();
                     limit = Some(self.expect_usize("LIMIT count")?);
+                    // `LIMIT n OFFSET m` in one clause …
+                    if matches!(self.peek_tok(), Token::Ident(k) if k.eq_ignore_ascii_case("offset"))
+                    {
+                        self.bump();
+                        offset = Some(self.expect_usize("OFFSET count")?);
+                    }
+                }
+                // … or OFFSET on its own (either clause order).
+                Token::Ident(kw) if kw.eq_ignore_ascii_case("offset") => {
+                    self.bump();
+                    offset = Some(self.expect_usize("OFFSET count")?);
                 }
                 _ => break,
             }
@@ -442,6 +460,8 @@ impl Parser {
             limit,
             as_of,
             fields,
+            offset,
+            aggregate,
         }))
     }
 
@@ -460,10 +480,21 @@ impl Parser {
 
     // -- shared pieces ------------------------------------------------------
 
-    /// `SELECT <field>, ... | *` — carried into [`Select::fields`]: `None`
-    /// for `*` (full records), `Some(list)` for an explicit projection the
-    /// engine applies as the final pipeline step (spec §2.3).
-    fn parse_field_list(&mut self) -> Result<Option<Vec<String>>, NqlError> {
+    /// `SELECT <field>, ... | * | COUNT(*)` — carried into
+    /// [`Select::fields`] (`None` for `*` = full records) and/or
+    /// [`Select::aggregate`]; the engine applies projection as the final
+    /// pipeline step (spec §2.3). `COUNT` is only an aggregate when followed
+    /// by `(*)`, so a field literally named `count` still works.
+    fn parse_field_list(&mut self) -> Result<(Option<Vec<String>>, Option<Aggregate>), NqlError> {
+        if matches!(self.peek_tok(), Token::Ident(c) if c.eq_ignore_ascii_case("count"))
+            && matches!(self.peek_n(1), Token::LParen)
+        {
+            self.bump(); // `count`
+            self.expect_token(Token::LParen, "`(` after COUNT")?;
+            self.expect_token(Token::Star, "`*` inside COUNT(")?;
+            self.expect_token(Token::RParen, "`)` after COUNT(")?;
+            return Ok((None, Some(Aggregate::CountStar)));
+        }
         let mut fields = Vec::new();
         let mut star = false;
         loop {
@@ -477,13 +508,15 @@ impl Parser {
                     self.bump();
                     fields.push(name);
                 }
-                _ => return Err(self.err_here("expected a field name or `*` in SELECT")),
+                _ => {
+                    return Err(self.err_here("expected a field name, `*`, or `COUNT(*)` in SELECT"))
+                }
             }
             if !self.eat_comma() {
                 break;
             }
         }
-        Ok(if star { None } else { Some(fields) })
+        Ok((if star { None } else { Some(fields) }, None))
     }
 
     /// `<ident>:<id>` — id is a number or a bare word.
@@ -539,9 +572,66 @@ impl Parser {
             self.expect_keyword("null", "NULL in `IS NOT NULL`")?;
             return Ok((None, Some(Filter::HasEmbedding)));
         }
-        self.expect_token(Token::Eq, "`=` in WHERE clause")?;
+        Ok((None, Some(self.parse_field_predicate(field)?)))
+    }
+
+    /// A field predicate once its name is consumed: `= <value>`,
+    /// `!= | < | <= | > | >= <value>`, `IN [<v>, …]`, or
+    /// `BETWEEN <lo> AND <hi>` (issues #93/#94, spec §2.3). Shared by
+    /// `WHERE` clauses and MATCH/CLOSURE edge-property filters.
+    fn parse_field_predicate(&mut self, field: String) -> Result<Filter, NqlError> {
+        let cmp = match self.peek_tok() {
+            Token::Eq => {
+                self.bump();
+                let value = self.parse_value()?;
+                return Ok(Filter::FieldEquals { field, value });
+            }
+            Token::Ne => CmpOp::Ne,
+            Token::Lt => CmpOp::Lt,
+            Token::Le => CmpOp::Le,
+            Token::Gt => CmpOp::Gt,
+            Token::Ge => CmpOp::Ge,
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("in") => {
+                self.bump();
+                // Element-wise, NOT parse_value: an all-numeric literal list
+                // would collapse to Value::Vector (M0 array contract) and
+                // `group IN [1, 2, 3]` could never match an Int field.
+                self.expect_token(Token::LBracket, "`[` after IN (e.g. `IN [1, 2, 3]`)")?;
+                let mut values = Vec::new();
+                loop {
+                    if matches!(self.peek_tok(), Token::RBracket) {
+                        self.bump();
+                        break;
+                    }
+                    values.push(self.parse_value()?);
+                    if !self.eat_comma() {
+                        self.expect_token(Token::RBracket, "`]` closing the IN list")?;
+                        break;
+                    }
+                }
+                return Ok(Filter::FieldIn { field, values });
+            }
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("between") => {
+                self.bump();
+                let lo = self.parse_value()?;
+                self.expect_keyword("and", "AND between BETWEEN bounds")?;
+                let hi = self.parse_value()?;
+                return Ok(Filter::FieldBetween { field, lo, hi });
+            }
+            _ => {
+                return Err(self.err_here(format!(
+                    "expected an operator after `{field}` \
+                     (`=`, `!=`, `<`, `<=`, `>`, `>=`, `IN [...]`, or `BETWEEN ... AND ...`)"
+                )))
+            }
+        };
+        self.bump(); // the comparison token
         let value = self.parse_value()?;
-        Ok((None, Some(Filter::FieldEquals { field, value })))
+        Ok(Filter::FieldCmp {
+            field,
+            op: cmp,
+            value,
+        })
     }
 
     /// `::bm25(<field>, "<query>") [AND k = <N>]` — the lexical filter alone.
@@ -823,8 +913,11 @@ fn describe(t: &Token) -> String {
         Token::Colon => "`:`".into(),
         Token::DoubleColon => "`::`".into(),
         Token::Eq => "`=`".into(),
+        Token::Ne => "`!=`".into(),
         Token::Lt => "`<`".into(),
+        Token::Le => "`<=`".into(),
         Token::Gt => "`>`".into(),
+        Token::Ge => "`>=`".into(),
         Token::Star => "`*`".into(),
         Token::Eof => "end of input".into(),
     }

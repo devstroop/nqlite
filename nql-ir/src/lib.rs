@@ -6,6 +6,7 @@
 //! arrays supplied by the client (BYO-vector). This is a hard guarantee.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -73,6 +74,122 @@ pub enum Value {
     Vector(Vec<f32>),
     /// A reference to another record (used inside documents and edge props).
     Ref(RecordId),
+}
+
+impl Value {
+    /// Total order over [`Value`] for the comparison filters (issue #93;
+    /// spec §2.3): type ranks `null < bool < number < string < array < doc <
+    /// vector < ref`. Within a rank:
+    ///
+    /// - `Bool`: `false < true`;
+    /// - numbers (`Int`/`Float`): numeric and **exact** — two ints compare as
+    ///   ints, mixed int/float compare without rounding (so `1` and `1.0` are
+    ///   equal even beyond 2⁵³), `NaN` sorts after every other number;
+    /// - `Str`: lexicographic byte order;
+    /// - `Arr`: element-wise, then shorter first;
+    /// - `Doc`: (key, value) pairs in BTree key order, then fewer keys first;
+    /// - `Vector`: element-wise ([`f32::total_cmp`]), then shorter first;
+    /// - `Ref`: `(table, id)`.
+    ///
+    /// Deterministic and total: any two values compare, and the function
+    /// never panics (proptest-verified in `nql::proptests`).
+    pub fn cmp_total(&self, other: &Value) -> Ordering {
+        fn rank(v: &Value) -> u8 {
+            match v {
+                Value::Null => 0,
+                Value::Bool(_) => 1,
+                Value::Int(_) | Value::Float(_) => 2,
+                Value::Str(_) => 3,
+                Value::Arr(_) => 4,
+                Value::Doc(_) => 5,
+                Value::Vector(_) => 6,
+                Value::Ref(_) => 7,
+            }
+        }
+        /// Exact `i64`-vs-`f64` comparison: never rounds the int through
+        /// `f64` (which would break transitivity above 2⁵³). `NaN` sorts
+        /// after every number, matching [`f64::total_cmp`] for floats.
+        fn cmp_int_float(a: i64, b: &f64) -> Ordering {
+            if b.is_nan() {
+                return Ordering::Less;
+            }
+            // i64 as f64 has upper bound 2^63 (exclusive); beyond it every
+            // float is greater than any i64.
+            if *b >= i64::MAX as f64 {
+                return Ordering::Less;
+            }
+            if *b < i64::MIN as f64 {
+                return Ordering::Greater;
+            }
+            // In [-2^63, 2^63): casts below are exact.
+            if b.fract() == 0.0 {
+                return a.cmp(&(*b as i64));
+            }
+            // Non-integer: compare against its floor (also exact here).
+            match a.cmp(&(b.floor() as i64)) {
+                Ordering::Equal => Ordering::Less, // a == floor(b) < b
+                other => other,
+            }
+        }
+        let (ra, rb) = (rank(self), rank(other));
+        if ra != rb {
+            return ra.cmp(&rb);
+        }
+        match (self, other) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Int(a), Value::Float(b)) => cmp_int_float(*a, b),
+            (Value::Float(a), Value::Int(b)) => cmp_int_float(*b, a).reverse(),
+            (Value::Float(a), Value::Float(b)) => {
+                if a == b {
+                    // Equal values — including `-0.0 == 0.0`, which
+                    // `total_cmp` would order: keeping zeros equal preserves
+                    // transitivity with the Int↔Float comparisons above.
+                    Ordering::Equal
+                } else {
+                    a.total_cmp(b) // NaN after every number; NaN == NaN
+                }
+            }
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            (Value::Arr(a), Value::Arr(b)) => {
+                for (x, y) in a.iter().zip(b) {
+                    let c = x.cmp_total(y);
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
+            (Value::Doc(a), Value::Doc(b)) => {
+                for ((ka, va), (kb, vb)) in a.iter().zip(b) {
+                    let c = ka.cmp(kb);
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                    let c = va.cmp_total(vb);
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
+            (Value::Vector(a), Value::Vector(b)) => {
+                for (x, y) in a.iter().zip(b) {
+                    let c = x.total_cmp(y);
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
+            (Value::Ref(a), Value::Ref(b)) => a.cmp(b),
+            // Ranks partition the enum, so same-rank pairs are always the
+            // same variant (handled above); this arm keeps the match total
+            // without ever panicking.
+            _ => Ordering::Equal,
+        }
+    }
 }
 
 /// A fixed-dimension vector column declaration, e.g. `VECTOR<f32, 384>`.
@@ -211,9 +328,15 @@ pub enum Statement {
     /// data change): `Database::execute` appends it to the write-ahead log
     /// after a plan's mutating statements so replay resets the memory context
     /// exactly where the runtime did — every plan starts at the root
-    /// (spec §2.8). Appended as the LAST enum variant so existing postcard
-    /// tags stay stable for old WALs.
+    /// (spec §2.8). Appended here: postcard tags are positional, so variants
+    /// may only ever be added AFTER this one, never before (#109 discipline).
     ContextReset,
+    /// `MATCH ... COUNT` — the same traversal as `Statement::Match`, but the
+    /// result is a single `{"count": <n>}` row: the number of edge-path
+    /// instances (walks) that matched, so parallel-edge multiplicity and
+    /// ledger sizes are observable (spec §2.5, issue #94). Read-only: never
+    /// logged to WAL or history.
+    MatchCount(MatchPath),
 }
 
 /// A graph traversal: start at `start`, walk `steps` in order.
@@ -233,9 +356,10 @@ pub struct MatchStep {
     pub direction: MatchDirection,
     /// Edge name to follow (`:mentions`, `:knows`, ...).
     pub name: String,
-    /// Optional per-step edge filter: only traverse edges whose `props` field
-    /// equals the given value (spec §1 `edge_props`). Only
-    /// [`Filter::FieldEquals`] is valid here.
+    /// Optional per-step edge filter (spec §1 `edge_props`): any field
+    /// predicate — `=`, comparisons, `IN`, `BETWEEN` (issue #93) — evaluated
+    /// against the edge's `props`. Non-field filters (embedding/BM25) are
+    /// meaningless here and never match.
     pub edge_props: Option<Filter>,
 }
 
@@ -262,8 +386,14 @@ pub struct Select {
     /// Field projection: `None` = full records (`SELECT *`); `Some` = only
     /// the listed body keys survive in output rows (missing keys are absent,
     /// BTree order preserved). Filters/scores always see the full record —
-    /// projection is presentation-only (spec §2.3 step 7).
+    /// projection is presentation-only (spec §2.3 step 8).
     pub fields: Option<Vec<String>>,
+    /// Row offset: `OFFSET <n>` skips the first `n` rows after ordering,
+    /// before the limit / k-cap truncate (spec §2.3; issue #94).
+    pub offset: Option<usize>,
+    /// Aggregate: `SELECT COUNT(*)` returns one `{"count": <n>}` row instead
+    /// of records (spec §2.3; issue #94).
+    pub aggregate: Option<Aggregate>,
 }
 
 /// The full "database" snapshot a query runs against. In M0 this is in-memory;
@@ -311,7 +441,8 @@ pub struct Knn {
     pub k: usize,
 }
 
-/// Field-level filter on record body values (M0: equality only).
+/// Field-level filter on record body values: equality plus the comparison,
+/// membership, and range operators (spec §2.3; issue #93).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Filter {
     /// `WHERE <field> = <value>`
@@ -331,6 +462,51 @@ pub enum Filter {
         /// Optional result cap (like `knn.k`). `None` = no cap from the filter.
         k: Option<usize>,
     },
+    /// `WHERE <field> <op> <value>` — comparison operators (issue #93).
+    /// `<`, `<=`, `>`, `>=` order the record's value against the literal with
+    /// [`Value::cmp_total`] (total cross-type order); `!=` is the negated
+    /// exact equality of `=`. A record that does not carry the field never
+    /// matches (same rule as `=`); an explicit `null` value participates and
+    /// ranks below every other type (spec §2.3).
+    FieldCmp {
+        field: String,
+        op: CmpOp,
+        value: Value,
+    },
+    /// `WHERE <field> IN [<v1>, <v2>, ...]` — membership by the same exact
+    /// value equality as `=` (so `1` and `1.0` are different values);
+    /// a record without the field never matches (issue #93).
+    FieldIn { field: String, values: Vec<Value> },
+    /// `WHERE <field> BETWEEN <lo> AND <hi>` — inclusive range under
+    /// [`Value::cmp_total`] (`lo <= value <= hi`); a record without the
+    /// field never matches (issue #93).
+    FieldBetween { field: String, lo: Value, hi: Value },
+}
+
+/// Comparison operators for [`Filter::FieldCmp`] (`!=`, `<`, `<=`, `>`, `>=`).
+/// Equality keeps its own variant ([`Filter::FieldEquals`]) for compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CmpOp {
+    /// `!=` — negated exact equality (the complement of `=`), so exactly one
+    /// of `= v` / `!= v` holds for every record that carries the field.
+    Ne,
+    /// `<` — less under [`Value::cmp_total`].
+    Lt,
+    /// `<=` — less or equal under [`Value::cmp_total`].
+    Le,
+    /// `>` — greater under [`Value::cmp_total`].
+    Gt,
+    /// `>=` — greater or equal under [`Value::cmp_total`].
+    Ge,
+}
+
+/// Aggregate shaping for `SELECT` (issue #94): present ⇒ the query returns
+/// one summary row instead of records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Aggregate {
+    /// `SELECT COUNT(*)` — the number of records that pass the WHERE filter,
+    /// as a single `{"count": <n>}` row (deterministic; spec §2.3).
+    CountStar,
 }
 
 /// Deterministic ordering operators (pure arithmetic — see docs/decisions.md D9).

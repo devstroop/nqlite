@@ -2,7 +2,9 @@
 //! error paths. All assertions are on the parsed IR (`nql_ir::Plan`).
 
 use crate::{parse, parse_statement, NqlError};
-use nql_ir::{Filter, Id, Knn, MatchDirection, Order, RecordId, Select, Statement, Value};
+use nql_ir::{
+    Aggregate, CmpOp, Filter, Id, Knn, MatchDirection, Order, RecordId, Select, Statement, Value,
+};
 use std::collections::BTreeMap;
 
 fn rid(s: &str) -> RecordId {
@@ -266,6 +268,8 @@ fn select_knn_order_limit() {
             order: Some(Order::Similarity),
             limit: Some(10),
             fields: None,
+            offset: None,
+            aggregate: None,
         }
     );
 }
@@ -579,6 +583,171 @@ fn salience_weighted_order_parses_and_validates() {
 }
 
 #[test]
+fn comparison_in_between_filters_parse() {
+    let cases: &[(&str, Filter)] = &[
+        (
+            "seq < 100",
+            Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Lt,
+                value: Value::Int(100),
+            },
+        ),
+        (
+            "conf <= 0.8",
+            Filter::FieldCmp {
+                field: "conf".into(),
+                op: CmpOp::Le,
+                value: Value::Float(0.8),
+            },
+        ),
+        (
+            "value > 1",
+            Filter::FieldCmp {
+                field: "value".into(),
+                op: CmpOp::Gt,
+                value: Value::Int(1),
+            },
+        ),
+        (
+            "weight >= 0.5",
+            Filter::FieldCmp {
+                field: "weight".into(),
+                op: CmpOp::Ge,
+                value: Value::Float(0.5),
+            },
+        ),
+        (
+            "name != \"x\"",
+            Filter::FieldCmp {
+                field: "name".into(),
+                op: CmpOp::Ne,
+                value: Value::Str("x".into()),
+            },
+        ),
+        (
+            "group IN [1, 2, 3]",
+            Filter::FieldIn {
+                field: "group".into(),
+                values: vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+            },
+        ),
+        (
+            "ts BETWEEN 10 AND 20",
+            Filter::FieldBetween {
+                field: "ts".into(),
+                lo: Value::Int(10),
+                hi: Value::Int(20),
+            },
+        ),
+        (
+            "tag = \"a\"",
+            Filter::FieldEquals {
+                field: "tag".into(),
+                value: Value::Str("a".into()),
+            },
+        ),
+    ];
+    for (pred, expected) in cases {
+        let plan = parse(&format!("SELECT * FROM t WHERE {pred}"))
+            .unwrap_or_else(|e| panic!("{pred}: {e}"));
+        let Statement::Select(s) = &plan[0] else {
+            panic!("expected Select for {pred}");
+        };
+        assert_eq!(s.filter.as_ref(), Some(expected), "{pred}");
+    }
+
+    // Malformed predicates are hard errors, never silently dropped.
+    for bad in [
+        "SELECT * FROM t WHERE seq ~ 100",
+        "SELECT * FROM t WHERE seq IN 5",
+        "SELECT * FROM t WHERE ts BETWEEN 10 20",
+        "SELECT * FROM t WHERE ts BETWEEN 10 AND",
+        "SELECT * FROM t WHERE seq ! 100",
+        "SELECT * FROM t WHERE seq ! = 100",
+        "SELECT * FROM t WHERE seq",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
+fn match_count_and_edge_prop_predicates_parse() {
+    // MATCH ... COUNT (walk-count mode, issue #94).
+    let plan = parse("MATCH (a:1) -> :mentions COUNT").unwrap();
+    let Statement::MatchCount(p) = &plan[0] else {
+        panic!("expected MatchCount");
+    };
+    assert_eq!(p.start, RecordId::parse("a:1").unwrap());
+
+    // Without COUNT it stays the row-returning match.
+    let plan = parse("MATCH (a:1) -> :mentions").unwrap();
+    assert!(matches!(plan[0], Statement::Match(_)));
+
+    // Edge-property filters share the full predicate grammar (issue #93).
+    let plan = parse("MATCH (a:1) -> :mentions WHERE confidence >= 0.5").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match");
+    };
+    assert_eq!(
+        p.steps[0].edge_props,
+        Some(Filter::FieldCmp {
+            field: "confidence".into(),
+            op: CmpOp::Ge,
+            value: Value::Float(0.5),
+        })
+    );
+}
+
+#[test]
+fn count_star_and_offset_parse() {
+    let plan = parse("SELECT COUNT(*) FROM ledger WHERE seq >= 10").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.aggregate, Some(Aggregate::CountStar));
+    assert_eq!(s.fields, None);
+    assert_eq!(
+        s.filter,
+        Some(Filter::FieldCmp {
+            field: "seq".into(),
+            op: CmpOp::Ge,
+            value: Value::Int(10),
+        })
+    );
+
+    // LIMIT n OFFSET m in one clause …
+    let plan = parse("SELECT * FROM t LIMIT 10 OFFSET 20").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!((s.limit, s.offset), (Some(10), Some(20)));
+
+    // … or OFFSET on its own.
+    let plan = parse("SELECT * FROM t OFFSET 5").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!((s.limit, s.offset), (None, Some(5)));
+
+    // A field literally named `count` is still a projection.
+    let plan = parse("SELECT count, name FROM t").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.fields,
+        Some(vec!["count".to_string(), "name".to_string()])
+    );
+    assert_eq!(s.aggregate, None);
+
+    // COUNT arity: `*` is the only argument.
+    for bad in ["SELECT COUNT(x) FROM t", "SELECT COUNT() FROM t"] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn empty_input_parses_to_empty_plan() {
     assert!(parse("").unwrap().is_empty());
     assert!(parse("   \n\t ").unwrap().is_empty());
@@ -761,7 +930,7 @@ fn comments_do_not_shadow_arrows_or_negative_numbers() {
     assert!(matches!(plan[2], Statement::Relate(_)));
 }
 
-// --- field projection (spec §2.3 step 7) — issue #91 ------------------------
+// --- field projection (spec §2.3 step 8) — issue #91 ------------------------
 
 #[test]
 fn select_projection_is_carried_into_ir() {

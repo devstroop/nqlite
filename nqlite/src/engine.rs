@@ -16,8 +16,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nql_ir::{
-    Filter, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge, Select, Statement,
-    Store, Value, VoteCounts,
+    Aggregate, CmpOp, Filter, Id, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge,
+    Select, Statement, Store, Value, VoteCounts,
 };
 
 use crate::bm25::{tokenize, Bm25Index};
@@ -201,6 +201,16 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
                 rows,
             }))
         }
+        Statement::MatchCount(path) => {
+            // Walk-count mode (issue #94): one `{"count": n}` row; the query
+            // kind stays `Match` so transports label the result unchanged.
+            let n = run_match_count(store, path);
+            let table = path.start.table.clone();
+            Ok(Some(QueryResult {
+                kind: QueryKind::Match(path.clone()),
+                rows: vec![count_row(&table, n)],
+            }))
+        }
         Statement::Closure(path) => {
             let rows = run_closure(store, path);
             Ok(Some(QueryResult {
@@ -257,6 +267,14 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         .filter(|r| matches_filter(r, sel.filter.as_ref()))
         .cloned()
         .collect();
+
+    // `SELECT COUNT(*)` (spec §2.3, issue #94): one `{"count": n}` row with
+    // the number of records that passed the WHERE filter — computed before
+    // scoring, ordering, offset/limit, and projection (those never affect the
+    // count), and no kNN/BM25 index is built for it.
+    if let Some(Aggregate::CountStar) = sel.aggregate {
+        return vec![count_row(&sel.table, candidates.len() as u64)];
+    }
 
     // Rank every embedded candidate against the query through the index.
     // Non-embedded records are absent from the index and fall back to a
@@ -348,11 +366,18 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
 
     order_rows(&mut rows, sel);
 
+    // `OFFSET n` (spec §2.3, issue #94): skip the first n rows after
+    // ordering; the limit / kNN-k / BM25-k caps then apply to what remains.
+    if let Some(offset) = sel.offset {
+        let skip = offset.min(rows.len());
+        rows.drain(..skip);
+    }
+
     if let Some(limit) = effective_limit(sel) {
         rows.truncate(limit);
     }
 
-    // Field projection (spec §2.3 step 7, issue #91): keep only the listed
+    // Field projection (spec §2.3 step 8, issue #91): keep only the listed
     // body keys — presentation only, after all filtering/scoring/ordering, so
     // a projection can never change which rows rank. Missing keys are simply
     // absent (SQL-like); `SELECT *` (`fields == None`) is untouched.
@@ -443,6 +468,53 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
             })
         })
         .collect()
+}
+
+/// `MATCH ... COUNT` (spec §2.5, issue #94): the number of edge-path
+/// INSTANCES (walks) matching the steps — parallel edges each count, so the
+/// multiplicity between two records stays observable (the endpoint dedup
+/// [`run_match`] applies for rows would hide it). At every step a node's
+/// walk count accumulates `walks(from)` once per matching edge, so for a
+/// single step the total is exactly the number of matching edges, and for
+/// multiple steps it is the number of distinct walks.
+///
+/// Deterministic (u64 accumulation is order-independent), saturating (never
+/// panics on overflow), and spec §2.5-consistent: a missing start yields 0
+/// and dangling edges are skipped.
+fn run_match_count(store: &Store, path: &MatchPath) -> u64 {
+    if !store.records.contains_key(&path.start) {
+        return 0;
+    }
+    // Frontier of node → number of walks reaching it.
+    let mut frontier: BTreeMap<RecordId, u64> = BTreeMap::from([(path.start.clone(), 1)]);
+    for step in &path.steps {
+        let mut next: BTreeMap<RecordId, u64> = BTreeMap::new();
+        for edge in &store.edges {
+            let (from_side, to_side) = match step.direction {
+                MatchDirection::Out => (&edge.from, &edge.to),
+                MatchDirection::In => (&edge.to, &edge.from),
+            };
+            if !edge_name_matches(&edge.name, &step.name) {
+                continue;
+            }
+            let Some(&walks) = frontier.get(from_side) else {
+                continue;
+            };
+            if !matches_edge_props(edge, step.edge_props.as_ref()) {
+                continue;
+            }
+            if !store.records.contains_key(to_side) {
+                continue; // dangling edge: skip
+            }
+            let slot = next.entry(to_side.clone()).or_insert(0);
+            *slot = slot.saturating_add(walks);
+        }
+        if next.is_empty() {
+            return 0;
+        }
+        frontier = next;
+    }
+    frontier.values().copied().fold(0u64, u64::saturating_add)
 }
 
 /// Execute a [`MatchPath`] as a transitive closure against `store`.
@@ -541,16 +613,17 @@ fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
         .collect()
 }
 
-/// Apply a step's optional edge-property filter: `edge.props[field] == value`.
-/// `None` accepts every edge; only `Filter::FieldEquals` is a valid filter
-/// here (the parser only produces that shape).
+/// Apply a step's optional edge-property filter (spec §2.5): any *field*
+/// predicate — equality, comparison, `IN`, `BETWEEN` (issue #93) — evaluated
+/// against the edge's props via [`matches_field_pred`]. `None` accepts every
+/// edge.
 fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
     match filter {
         None => true,
-        Some(Filter::FieldEquals { field, value }) => edge.props.get(field) == Some(value),
-        // The IR contract says only FieldEquals is valid; anything else is
-        // treated as a non-match rather than a panic (defensive).
-        Some(_) => false,
+        // Embedding presence and BM25 scoring are not edge-props predicates;
+        // the parser never produces them here. Defensive, not a panic.
+        Some(Filter::HasEmbedding | Filter::Bm25 { .. }) => false,
+        Some(f) => matches_field_pred(&edge.props, f),
     }
 }
 
@@ -613,16 +686,70 @@ fn effective_limit(sel: &Select) -> Option<usize> {
     caps.into_iter().min()
 }
 
-/// Apply the select's field filter. `FieldEquals` uses the derived `PartialEq`
-/// on [`Value`] (exact, deterministic equality); `HasEmbedding` requires a
-/// non-`None` embedding. `Bm25` is a *scoring* filter: it never prunes rows —
-/// every row of the table is returned and ranked by its lexical score.
+/// Apply the select's field filter. Field predicates (equality, comparison,
+/// `IN`, `BETWEEN`) use [`matches_field_pred`] — exact `PartialEq` for `=`
+/// and the total order [`Value::cmp_total`] for ranges (issue #93);
+/// `HasEmbedding` requires a non-`None` embedding. `Bm25` is a *scoring*
+/// filter: it never prunes rows — every row of the table is returned and
+/// ranked by its lexical score.
 fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
     match filter {
         None => true,
         Some(Filter::HasEmbedding) => rec.embedding.is_some(),
-        Some(Filter::FieldEquals { field, value }) => rec.body.get(field) == Some(value),
         Some(Filter::Bm25 { .. }) => true,
+        Some(f) => matches_field_pred(&rec.body, f),
+    }
+}
+
+/// A field-level predicate (equality / comparison / `IN` / `BETWEEN`)
+/// evaluated against a props map — record bodies and edge props share it
+/// (issue #93, spec §2.3).
+///
+/// Semantics: a record/edge that does not carry the field **never matches**
+/// (the same rule `=` has always had — so `= v` and `!= v` are complements).
+/// Values that are present compare with [`Value::cmp_total`] for the range
+/// operators (`<`, `<=`, `>`, `>=`, `BETWEEN`) — a total cross-type order in
+/// which an explicit `null` ranks below every other type — while `=`, `!=`,
+/// and `IN` use the exact derived equality on [`Value`].
+fn matches_field_pred(props: &BTreeMap<String, Value>, filter: &Filter) -> bool {
+    match filter {
+        Filter::FieldEquals { field, value } => props.get(field) == Some(value),
+        Filter::FieldCmp { field, op, value } => {
+            let Some(lhs) = props.get(field) else {
+                return false;
+            };
+            match op {
+                CmpOp::Ne => lhs != value,
+                CmpOp::Lt => lhs.cmp_total(value) == Ordering::Less,
+                CmpOp::Le => lhs.cmp_total(value) != Ordering::Greater,
+                CmpOp::Gt => lhs.cmp_total(value) == Ordering::Greater,
+                CmpOp::Ge => lhs.cmp_total(value) != Ordering::Less,
+            }
+        }
+        Filter::FieldIn { field, values } => props.get(field).is_some_and(|v| values.contains(v)),
+        Filter::FieldBetween { field, lo, hi } => {
+            let Some(lhs) = props.get(field) else {
+                return false;
+            };
+            lhs.cmp_total(lo) != Ordering::Less && lhs.cmp_total(hi) != Ordering::Greater
+        }
+        // Handled by the callers above — not body-value predicates.
+        Filter::HasEmbedding | Filter::Bm25 { .. } => true,
+    }
+}
+
+/// The single result row of an aggregate: `{"count": n}` as a synthetic
+/// record in the queried table (id `table:count`, no embedding, score 0), so
+/// it flows through every transport's normal row encoding unchanged.
+fn count_row(table: &str, n: u64) -> ScoredRecord {
+    ScoredRecord {
+        record: Record {
+            id: RecordId::new(table, Id::Str("count".into())),
+            body: BTreeMap::from([("count".into(), Value::Int(n as i64))]),
+            embedding: None,
+            created_at: 0,
+        },
+        score: 0.0,
     }
 }
 
@@ -1624,6 +1751,306 @@ mod tests {
         assert_eq!(bare, weighted);
         assert!((bare[0] - 0.9).abs() < 1e-5);
         assert!((bare[1] - 0.15).abs() < 1e-5);
+    }
+
+    #[test]
+    fn comparison_filters_prune_by_total_order() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("ledger", None),
+            Statement::Insert(record(
+                "ledger:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:2",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:3",
+                BTreeMap::from([("seq".into(), num(500))]),
+                None,
+            )),
+            // Type-mixed value: strings rank above every number.
+            Statement::Insert(record(
+                "ledger:4",
+                BTreeMap::from([("seq".into(), str_("abc"))]),
+                None,
+            )),
+            // No seq at all: never matches a field predicate (the `=` rule).
+            Statement::Insert(record("ledger:5", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("ledger")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // `< 100`: the two small seqs — the string ranks above, the absent
+        // field never matches.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Lt,
+                value: Value::Int(100),
+            }),
+            ["ledger:1", "ledger:2"]
+        );
+        // `> 100`: the big number AND the string (total order, cross-type).
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Gt,
+                value: Value::Int(100),
+            }),
+            ["ledger:3", "ledger:4"]
+        );
+        // Inclusive ends.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Le,
+                value: Value::Int(5),
+            }),
+            ["ledger:1"]
+        );
+        // `!=` is the complement of `=` among records that carry the field.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Ne,
+                value: Value::Int(50),
+            }),
+            ["ledger:1", "ledger:3", "ledger:4"]
+        );
+        // IN membership (exact equality, like `=`).
+        assert_eq!(
+            ids_where(Filter::FieldIn {
+                field: "seq".into(),
+                values: vec![Value::Int(5), Value::Int(500)],
+            }),
+            ["ledger:1", "ledger:3"]
+        );
+        // BETWEEN is inclusive on both ends.
+        assert_eq!(
+            ids_where(Filter::FieldBetween {
+                field: "seq".into(),
+                lo: Value::Int(5),
+                hi: Value::Int(50),
+            }),
+            ["ledger:1", "ledger:2"]
+        );
+        // Plain `=` still excludes the field-less record (regression).
+        assert_eq!(
+            ids_where(Filter::FieldEquals {
+                field: "seq".into(),
+                value: Value::Int(5),
+            }),
+            ["ledger:1"]
+        );
+    }
+
+    #[test]
+    fn count_star_returns_filtered_row_count() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("task", None),
+            Statement::Insert(record(
+                "task:1",
+                BTreeMap::from([("done".into(), Value::Bool(true))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "task:2",
+                BTreeMap::from([("done".into(), Value::Bool(false))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "task:3",
+                BTreeMap::from([("done".into(), Value::Bool(true))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut count_of = |filter: Option<Filter>, limit: Option<usize>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter,
+                    limit,
+                    aggregate: Some(Aggregate::CountStar),
+                    ..select("task")
+                })])
+                .unwrap();
+            assert_eq!(res[0].rows.len(), 1, "COUNT returns exactly one row");
+            res[0].rows[0].record.body.get("count").cloned()
+        };
+
+        // Whole table.
+        assert_eq!(count_of(None, None), Some(Value::Int(3)));
+        // Filtered.
+        assert_eq!(
+            count_of(
+                Some(Filter::FieldEquals {
+                    field: "done".into(),
+                    value: Value::Bool(true),
+                }),
+                None,
+            ),
+            Some(Value::Int(2))
+        );
+        // LIMIT never affects the aggregate (count = filtered total).
+        assert_eq!(count_of(None, Some(1)), Some(Value::Int(3)));
+        // Empty match → a count of zero, not an empty result.
+        assert_eq!(
+            count_of(
+                Some(Filter::FieldCmp {
+                    field: "done".into(),
+                    op: CmpOp::Gt,
+                    value: Value::Str("m".into()),
+                }),
+                None,
+            ),
+            Some(Value::Int(0))
+        );
+
+        // The row shape: synthetic id in the queried table.
+        let res = db
+            .execute(&[Statement::Select(Select {
+                aggregate: Some(Aggregate::CountStar),
+                ..select("task")
+            })])
+            .unwrap();
+        assert_eq!(res[0].rows[0].record.id.to_string(), "task:count");
+    }
+
+    #[test]
+    fn offset_skips_after_ordering_before_limit() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("page", None),
+            Statement::Insert(record("page:1", BTreeMap::new(), None)),
+            Statement::Insert(record("page:2", BTreeMap::new(), None)),
+            Statement::Insert(record("page:3", BTreeMap::new(), None)),
+            Statement::Insert(record("page:4", BTreeMap::new(), None)),
+            Statement::Insert(record("page:5", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut window = |offset: Option<usize>, limit: Option<usize>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    offset,
+                    limit,
+                    ..select("page")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // OFFSET alone: everything after the skip (BTree order).
+        assert_eq!(window(Some(2), None), ["page:3", "page:4", "page:5"]);
+        // OFFSET + LIMIT: a pagination window.
+        assert_eq!(window(Some(2), Some(2)), ["page:3", "page:4"]);
+        // Past the end: empty, no panic.
+        assert_eq!(window(Some(9), Some(3)), Vec::<String>::new());
+        // No offset → unchanged baseline.
+        assert_eq!(window(None, Some(2)), ["page:1", "page:2"]);
+    }
+
+    #[test]
+    fn match_count_reports_edge_multiplicity() {
+        let mut db = Database::default();
+        let rel = |from: &str, to: &str, confidence: f64| {
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse(from).unwrap(),
+                name: "edge".into(),
+                to: RecordId::parse(to).unwrap(),
+                created_at: 0,
+                weight: None,
+                props: BTreeMap::from([("confidence".into(), Value::Float(confidence))]),
+            })
+        };
+        db.execute(&[
+            create("a", None),
+            create("b", None),
+            create("c", None),
+            Statement::Insert(record("a:1", BTreeMap::new(), None)),
+            Statement::Insert(record("b:1", BTreeMap::new(), None)),
+            Statement::Insert(record("b:2", BTreeMap::new(), None)),
+            Statement::Insert(record("c:1", BTreeMap::new(), None)),
+            // Parallel edges a:1 -> b:1 that row-MATCH deduplicates away.
+            rel("a:1", "b:1", 0.9),
+            rel("a:1", "b:1", 0.9),
+            rel("a:1", "b:1", 0.2),
+            rel("a:1", "b:2", 0.9),
+            // Second hop: two b:1 -> c:1 edges, one b:2 -> c:1.
+            rel("b:1", "c:1", 0.5),
+            rel("b:1", "c:1", 0.5),
+            rel("b:2", "c:1", 0.5),
+        ])
+        .unwrap();
+        let path = |start: &str, hops: usize, filter: Option<Filter>| MatchPath {
+            start: RecordId::parse(start).unwrap(),
+            steps: (0..hops)
+                .map(|_| MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: filter.clone(),
+                })
+                .collect(),
+        };
+        // Row-returning MATCH still dedups endpoints (the gap COUNT closes):
+        // asserted BEFORE the count closure takes `db` mutably.
+        let res = db
+            .execute(&[Statement::Match(path("a:1", 1, None))])
+            .unwrap();
+        assert_eq!(res[0].rows.len(), 2);
+        let mut count_walks = |start: &str, hops: usize, filter: Option<Filter>| {
+            let res = db
+                .execute(&[Statement::MatchCount(path(start, hops, filter))])
+                .unwrap();
+            assert_eq!(res[0].rows.len(), 1, "count is a single row");
+            match res[0].rows[0].record.body.get("count") {
+                Some(Value::Int(n)) => *n as u64,
+                other => panic!("expected an integer count, got {other:?}"),
+            }
+        };
+
+        // 1 hop: four parallel edges → walks = 4 (rows would dedup to 2).
+        assert_eq!(count_walks("a:1", 1, None), 4);
+        // Edge-prop predicate filters the walks too (confidence >= 0.5).
+        assert_eq!(
+            count_walks(
+                "a:1",
+                1,
+                Some(Filter::FieldCmp {
+                    field: "confidence".into(),
+                    op: CmpOp::Ge,
+                    value: Value::Float(0.5),
+                })
+            ),
+            3
+        );
+        // 2 hops: walks multiply — 3 edges to b:1 × 2 onward + 1 × 1 = … wait,
+        // step 1 reaches b:1 via 3 edges and b:2 via 1; step 2 has b:1 -> c:1
+        // ×2 and b:2 -> c:1 ×1 → 3·2 + 1·1 = 7.
+        assert_eq!(count_walks("a:1", 2, None), 7);
+        // Missing start → count 0 (spec §2.5: empty result, never an error).
+        assert_eq!(count_walks("a:404", 1, None), 0);
     }
 
     #[test]
@@ -2658,6 +3085,8 @@ mod temporal_tests {
             limit: None,
             as_of,
             fields: None,
+            offset: None,
+            aggregate: None,
         })
     }
 
@@ -2828,6 +3257,8 @@ mod memory_tests {
             limit: None,
             as_of: None,
             fields: None,
+            offset: None,
+            aggregate: None,
         })
     }
 
@@ -2925,6 +3356,8 @@ mod memory_tests {
                     limit: None,
                     as_of: Some(2),
                     fields: None,
+                    offset: None,
+                    aggregate: None,
                 }),
             ])
             .unwrap();
@@ -2945,6 +3378,8 @@ mod memory_tests {
                 limit: None,
                 as_of: Some(2),
                 fields: None,
+                offset: None,
+                aggregate: None,
             })])
             .unwrap();
         assert_eq!(
