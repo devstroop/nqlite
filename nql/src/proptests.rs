@@ -328,6 +328,10 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         // cannot emit the WAL-only marker (issue #109), so it never reaches
         // this classification.
         Statement::ContextReset => unreachable!("parser never produces ContextReset"),
+        // Same story: the generator has no PRUNE statement (engine/parser
+        // tests cover it) and snapshots are replay-only (issue #95).
+        Statement::PruneHistory => unreachable!("generator never emits PRUNE HISTORY"),
+        Statement::Snapshot(_) => unreachable!("parser never produces snapshots"),
     }
 }
 

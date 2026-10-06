@@ -337,6 +337,49 @@ pub enum Statement {
     /// ledger sizes are observable (spec §2.5, issue #94). Read-only: never
     /// logged to WAL or history.
     MatchCount(MatchPath),
+    /// `PRUNE HISTORY` — compact the mutation history into one snapshot entry
+    /// at the current clock (issue #95): keeps the `CreateTable` declaration
+    /// statements plus the snapshot, so history growth stays bounded and
+    /// replay from the snapshot is cheap. `AS OF` before the snapshot then
+    /// fails loudly (`HistoryPruned`, spec §2.7). Mutating (WAL-logged);
+    /// prunes every MEMORY block's history too.
+    PruneHistory,
+    /// A history-compaction base (issue #95): the full store state captured
+    /// by [`Statement::PruneHistory`], carried inside the history itself.
+    /// Never present in plans or the WAL — replay executes it to install the
+    /// state the pruned prefix would have reconstructed. Boxed: the type is
+    /// recursive through [`Store`].
+    Snapshot(Box<SnapshotState>),
+}
+
+/// Store state captured by history compaction (issue #95): everything needed
+/// to reconstruct the store at `clock` without replaying the pruned prefix.
+/// `memories` are embedded already-pruned (each block carries its own
+/// snapshot entry in its own history). Declaration statements are NOT stored
+/// here — the pruned history retains them at their original timestamps,
+/// which is what re-seeding (issue #89) reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotState {
+    pub records: BTreeMap<RecordId, Record>,
+    pub edges: Vec<RelationEdge>,
+    pub vector_dims: BTreeMap<String, usize>,
+    pub clock: i64,
+    pub memories: BTreeMap<String, Store>,
+}
+
+impl SnapshotState {
+    /// Materialize the snapshot as a fresh [`Store`]: history starts empty
+    /// (the pruned prefix is gone by design; replay appends from here).
+    pub fn into_store(self) -> Store {
+        Store {
+            records: self.records,
+            edges: self.edges,
+            vector_dims: self.vector_dims,
+            clock: self.clock,
+            history: Vec::new(),
+            memories: self.memories,
+        }
+    }
 }
 
 /// A graph traversal: start at `start`, walk `steps` in order.

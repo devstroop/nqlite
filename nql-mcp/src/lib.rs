@@ -275,7 +275,7 @@ pub struct MatchParams {
 impl NqlMcp {
     /// Run an arbitrary nql program and return every result as JSON.
     #[tool(
-        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET/MEMORY, ';'-separated) and return all result rows as JSON. Carries the complete grammar: AS OF time travel (SELECT, MATCH, CLOSURE), comparison/range filters (< <= > >= !=, IN, BETWEEN), COUNT(*) and OFFSET pagination, MATCH ... COUNT walk counts, MEMORY blocks (prefix EVERY statement that belongs to a block — each program starts at root), edge-property filters, hybrid retrieval. Typed tools cover the root store (select and match/closure additionally support as_of; select also memory); use this tool for scoped writes and anything the typed tools don't expose."
+        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET/MEMORY, ';'-separated) and return all result rows as JSON. Carries the complete grammar: AS OF time travel (SELECT, MATCH, CLOSURE), comparison/range filters (< <= > >= !=, IN, BETWEEN), COUNT(*) and OFFSET pagination, MATCH ... COUNT walk counts, PRUNE HISTORY compaction, MEMORY blocks (prefix EVERY statement that belongs to a block — each program starts at root), edge-property filters, hybrid retrieval. Typed tools cover the root store (select and match/closure additionally support as_of; select also memory); use this tool for scoped writes and anything the typed tools don't expose."
     )]
     async fn execute_nql(
         &self,

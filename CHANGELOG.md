@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- History compaction (issue #95): `PRUNE HISTORY` replaces the mutation
+  history with a deterministic snapshot at the current clock (retaining the
+  `CreateTable` declarations so re-seeding keeps working), bounding memory
+  growth and making later `AS OF` reads rebuild from the snapshot instead of
+  ts0. `AS OF` earlier than the snapshot fails loudly with `HistoryPruned`
+  instead of returning a partial view; compaction covers MEMORY blocks,
+  survives reopen via the WAL, and is durable at the next checkpoint.
+  Spec §2.7 retention contract + file-format downgrade caveat documented.
 - Temporal graph traversal (issue #92): `MATCH ... AS OF <ts>` and
   `CLOSURE ... AS OF <ts>` replay the mutation history and traverse the
   reconstructed snapshot — the same machinery as `SELECT ... AS OF`, and it

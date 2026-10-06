@@ -377,6 +377,55 @@ mod tests {
     }
 
     #[test]
+    fn prune_history_preserves_reseed_across_reopen() {
+        // Issue #95 at the server level: compaction keeps the CreateTable
+        // declarations (issue #89) — an empty, no-dim table must survive a
+        // PRUNE + reopen, and the pruned window must fail loudly on the line
+        // protocol instead of silently returning a partial view.
+        let dir = std::env::temp_dir().join(format!("nqlite-server-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("store.nql");
+
+        {
+            let mut s = Server::open(&path).expect("first open");
+            assert_eq!(line(&mut s, "CREATE TABLE scratch;"), "OK"); // decl-only
+            assert_eq!(line(&mut s, "CREATE TABLE t;"), "OK");
+            assert_eq!(line(&mut s, r#"INSERT INTO t:1 { "n": 1 };"#), "OK");
+            assert_eq!(line(&mut s, "PRUNE HISTORY"), "OK");
+            // Live insert into the declaration-only table still works.
+            assert_eq!(
+                line(&mut s, r#"INSERT INTO scratch:1 { "n": 2 };"#),
+                "OK",
+                "declaration retained after prune"
+            );
+        }
+
+        {
+            let mut s = Server::open(&path).expect("reopen");
+            // Re-seeded from the retained declarations in the pruned history.
+            assert_eq!(
+                line(&mut s, r#"INSERT INTO scratch:2 { "n": 3 };"#),
+                "OK",
+                "empty table re-seeded after prune + reopen"
+            );
+            let out = line(&mut s, "SELECT * FROM scratch;");
+            assert!(
+                out.contains("scratch:1") && out.contains("scratch:2"),
+                "scratch rows: {out}"
+            );
+            // Pre-snapshot AS OF errors loudly …
+            let err = line(&mut s, "SELECT * FROM t AS OF 1;");
+            assert!(err.starts_with("ERR"), "pruned window errors: {err}");
+            assert!(err.contains("compacted"), "error explains why: {err}");
+            // … while current reads are unaffected.
+            let out = line(&mut s, "SELECT * FROM t;");
+            assert!(out.contains("t:1"), "current rows unaffected: {out}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn error_line_returns_err_and_session_survives() {
         let mut s = Server::new();
         let err = line(&mut s, "THIS IS NOT NQL");

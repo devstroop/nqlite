@@ -4,7 +4,7 @@
 //! Deterministic and zero-LLM, like the rest of nqlite.
 
 use nql::parse;
-use nqlite::Database;
+use nqlite::{Database, Error};
 
 #[test]
 fn file_backed_database_persists_across_reopen() {
@@ -305,6 +305,80 @@ fn memory_blocks_survive_wal_replay_across_reopen() {
             core[0].rows[0].record.body.get("name"),
             Some(&nql_ir::Value::Str("core".into()))
         );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn prune_history_compaction_survives_reopen() {
+    // Issue #95: PRUNE is WAL-logged, so compaction survives a reopen even
+    // without an explicit flush — the pruned window fails loudly, the rest
+    // reconstructs, and declaration-only tables keep working (issue #89).
+    let dir = std::env::temp_dir().join(format!("nqlite-prune-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE empty_t;\
+                 CREATE TABLE t;\
+                 INSERT INTO t:1 { \"name\": \"alpha\" };\
+                 INSERT INTO t:2 { \"name\": \"beta\" };",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.execute(&parse("PRUNE HISTORY").unwrap()).unwrap();
+        assert!(
+            db.store()
+                .history
+                .iter()
+                .any(|(_, s)| matches!(s, nql_ir::Statement::Snapshot(_))),
+            "compacted live"
+        );
+    }
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let snap_ts = db
+            .store()
+            .history
+            .iter()
+            .find_map(|(ts, s)| matches!(s, nql_ir::Statement::Snapshot(_)).then_some(*ts))
+            .expect("snapshot survives reopen (WAL frame or checkpoint)");
+        assert_eq!(
+            db.store().records.len(),
+            2,
+            "data intact after pruned reopen"
+        );
+
+        // Declarations retained → an empty table still inserts after reopen.
+        db.execute(&parse(r#"INSERT INTO empty_t:x { "v": 1 };"#).unwrap())
+            .unwrap();
+
+        // The pruned window fails loudly …
+        let err = db.execute(&parse("SELECT * FROM t AS OF 1;").unwrap());
+        assert!(
+            matches!(err, Err(Error::HistoryPruned { .. })),
+            "pre-snapshot AS OF errors, got {err:?}"
+        );
+        // … and from the snapshot onward temporal reads work, including for
+        // mutations made after the reopen.
+        let at = db
+            .execute(&parse(&format!("SELECT * FROM t AS OF {snap_ts};")).unwrap())
+            .unwrap();
+        assert_eq!(at[0].rows.len(), 2, "snapshot view reconstructs");
+        db.execute(&parse(r#"INSERT INTO t:3 { "name": "gamma" };"#).unwrap())
+            .unwrap();
+        let now_ts = db.store().clock;
+        let later = db
+            .execute(&parse(&format!("SELECT * FROM t AS OF {now_ts};")).unwrap())
+            .unwrap();
+        assert_eq!(later[0].rows.len(), 3, "post-snapshot delta replays");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -738,6 +738,21 @@ fn match_and_closure_accept_as_of() {
 }
 
 #[test]
+fn prune_history_parses() {
+    let plan = parse("PRUNE HISTORY").unwrap();
+    assert!(matches!(plan[0], Statement::PruneHistory));
+
+    for bad in [
+        "PRUNE",
+        "PRUNE HISTORY NOW",
+        "PRUNE STORE",
+        "PRUNE HISTORYARY",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn count_star_and_offset_parse() {
     let plan = parse("SELECT COUNT(*) FROM ledger WHERE seq >= 10").unwrap();
     let Statement::Select(s) = &plan[0] else {

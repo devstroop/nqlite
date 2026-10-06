@@ -223,11 +223,21 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("memory") => self.parse_memory(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("prune") => self.parse_prune(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET, PRUNE), found {}",
                 describe(other)
             ))),
         }
+    }
+
+    /// `PRUNE HISTORY` — compact the mutation history into a snapshot at the
+    /// current clock (issue #95): bounded growth, cheap replay from the
+    /// snapshot; `AS OF` before it then errors loudly (spec §2.7).
+    fn parse_prune(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("prune", "PRUNE")?;
+        self.expect_keyword("history", "HISTORY after PRUNE")?;
+        Ok(Statement::PruneHistory)
     }
 
     fn parse_create(&mut self) -> Result<Statement, NqlError> {

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nql_ir::{
     Aggregate, CmpOp, Filter, Id, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge,
-    Select, Statement, Store, Value, VoteCounts,
+    Select, SnapshotState, Statement, Store, Value, VoteCounts,
 };
 use std::borrow::Cow;
 
@@ -134,6 +134,20 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
         // point; the arm exists for exhaustive matching (and `replay_as_of`,
         // whose per-store history never contains markers).
         Statement::ContextReset => Ok(None),
+        // History compaction (issue #95): PRUNE snapshots the current state
+        // (memories depth-first) and keeps only declarations + the snapshot.
+        Statement::PruneHistory => {
+            prune_history(store);
+            Ok(None)
+        }
+        // History-compaction base (issue #95): only replay executes this — it
+        // installs the state the pruned prefix would have reconstructed, and
+        // the statements after it replay on top exactly as they did
+        // originally. Never in plans or the WAL.
+        Statement::Snapshot(state) => {
+            *store = state.as_ref().clone().into_store();
+            Ok(None)
+        }
         Statement::CreateTable { table, vector_dim } => {
             // Declaring a table with a dim sets `vector_dims[table]`;
             // declaring without one clears any previous declaration.
@@ -189,14 +203,14 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             Ok(None)
         }
         Statement::Select(sel) => {
-            let rows = run_select(store, sel);
+            let rows = run_select(store, sel)?;
             Ok(Some(QueryResult {
                 kind: QueryKind::Select(sel.clone()),
                 rows,
             }))
         }
         Statement::Match(path) => {
-            let target = temporal_target(store, path.as_of);
+            let target = temporal_target(store, path.as_of)?;
             let rows = run_match(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
@@ -207,7 +221,7 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             // Walk-count mode (issue #94): one `{"count": n}` row; the query
             // kind stays `Match` so transports label the result unchanged.
             let table = path.start.table.clone();
-            let target = temporal_target(store, path.as_of);
+            let target = temporal_target(store, path.as_of)?;
             let n = run_match_count(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
@@ -215,7 +229,7 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             }))
         }
         Statement::Closure(path) => {
-            let target = temporal_target(store, path.as_of);
+            let target = temporal_target(store, path.as_of)?;
             let rows = run_closure(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Closure(path.clone()),
@@ -230,10 +244,10 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
 /// `SELECT ... AS OF` uses — or the current store otherwise. `MATCH`,
 /// `MATCH ... COUNT`, and `CLOSURE` all go through here, so a historical
 /// traversal sees exactly the records and edges that existed at the cutoff.
-fn temporal_target(store: &Store, as_of: Option<i64>) -> Cow<'_, Store> {
+fn temporal_target(store: &Store, as_of: Option<i64>) -> Result<Cow<'_, Store>> {
     match as_of {
-        Some(cutoff) => Cow::Owned(replay_as_of(store, cutoff)),
-        None => Cow::Borrowed(store),
+        Some(cutoff) => Ok(Cow::Owned(replay_as_of(store, cutoff)?)),
+        None => Ok(Cow::Borrowed(store)),
     }
 }
 
@@ -262,15 +276,16 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 /// configured [`VectorIndex`] (default: exact [`BruteForceVectorIndex`])
 /// rather than an inline cosine scan. The index is rebuilt from the filtered
 /// candidates on every call, so the result stays a pure, deterministic
-/// function of `(store, select)`.
-fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
+/// function of `(store, select)`. A temporal read whose cutoff predates the
+/// store's history snapshot returns [`Error::HistoryPruned`] (issue #95).
+fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
     // Temporal read (`AS OF T`): replay the mutation history up to the
     // cutoff into a fresh store and query THAT — the historical view is a
     // pure function of (history, T). Everything below runs against `target`.
     let replay_store;
     let target = match sel.as_of {
         Some(cutoff) => {
-            replay_store = replay_as_of(store, cutoff);
+            replay_store = replay_as_of(store, cutoff)?;
             &replay_store
         }
         None => store,
@@ -289,7 +304,7 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
     // scoring, ordering, offset/limit, and projection (those never affect the
     // count), and no kNN/BM25 index is built for it.
     if let Some(Aggregate::CountStar) = sel.aggregate {
-        return vec![count_row(&sel.table, candidates.len() as u64)];
+        return Ok(vec![count_row(&sel.table, candidates.len() as u64)]);
     }
 
     // Rank every embedded candidate against the query through the index.
@@ -402,15 +417,30 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
             row.record.body.retain(|k, _| fields.iter().any(|f| f == k));
         }
     }
-    rows
+    Ok(rows)
 }
 
 /// Replay the store's mutation history up to (and including) logical
 /// timestamp `cutoff` into a fresh [`Store`], then return it. Deterministic:
 /// history is append-only in execution order, and each replayed statement is
 /// executed the same way it originally was — so the view is a pure function
-/// of `(store.history, cutoff)`.
-fn replay_as_of(store: &Store, cutoff: i64) -> Store {
+/// of `(store.history, cutoff)` (or an [`Error::HistoryPruned`] when a
+/// compaction snapshot postdates the cutoff, issue #95).
+fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
+    // Compacted history (issue #95): a cutoff before the snapshot cannot be
+    // reconstructed — the pruned prefix is gone. Fail loudly rather than
+    // returning a partial (declarations-only) view.
+    if let Some(snap_ts) = store
+        .history
+        .iter()
+        .find_map(|(ts, stmt)| matches!(stmt, Statement::Snapshot(_)).then_some(*ts))
+    {
+        if cutoff < snap_ts {
+            return Err(Error::HistoryPruned {
+                pruned_through: snap_ts,
+            });
+        }
+    }
     let mut view = Store::default();
     for (ts, stmt) in &store.history {
         if *ts > cutoff {
@@ -421,7 +451,40 @@ fn replay_as_of(store: &Store, cutoff: i64) -> Store {
         // corrupt history, so panic loudly rather than silently truncate.
         let _ = execute_statement(&mut view, stmt).expect("history replay is total");
     }
-    view
+    Ok(view)
+}
+
+/// History compaction (`PRUNE HISTORY`, issue #95): replace `store`'s history
+/// with the `CreateTable` declaration statements it contained (at their
+/// original timestamps — the only record of empty/dim-less table
+/// declarations, issue #89; re-executing them is idempotent) plus a single
+/// [`Statement::Snapshot`] entry at the current clock. Memories are pruned
+/// depth-first first, so the embedded stores arrive already compact.
+///
+/// Deterministic (a pure function of the store) and bounded: history stops
+/// growing by one entry per mutation forever. `AS OF` before the snapshot now
+/// fails with [`Error::HistoryPruned`]; from the snapshot onward, replay
+/// rebuilds the view without walking the pruned prefix.
+fn prune_history(store: &mut Store) {
+    for memory in store.memories.values_mut() {
+        prune_history(memory);
+    }
+    let decls: Vec<(i64, Statement)> = store
+        .history
+        .iter()
+        .filter(|(_, stmt)| matches!(stmt, Statement::CreateTable { .. }))
+        .cloned()
+        .collect();
+    let state = SnapshotState {
+        records: store.records.clone(),
+        edges: store.edges.clone(),
+        vector_dims: store.vector_dims.clone(),
+        clock: store.clock,
+        memories: store.memories.clone(),
+    };
+    let mut history = decls;
+    history.push((store.clock, Statement::Snapshot(Box::new(state))));
+    store.history = history;
 }
 
 /// Execute a [`MatchPath`] against `store`.
@@ -2159,6 +2222,161 @@ mod tests {
         assert_eq!(closure_ids(None), ["g:a", "g:b", "g:c"]);
         // Cutoff before the start record exists → empty, never an error.
         assert_eq!(closure_ids(Some(1)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prune_history_compacts_and_bounds_growth() {
+        // Timeline: create=1, i1=2, i2=3 → prune snapshots at clock 3.
+        let mut db = Database::default();
+        db.execute(&[
+            create("ledger", None),
+            Statement::Insert(record(
+                "ledger:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:2",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        assert_eq!(db.store().history.len(), 3, "one entry per mutation");
+
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        {
+            let store = db.store();
+            // Only the retained declaration (original ts) + one snapshot.
+            assert_eq!(store.history.len(), 2, "compacted: {:?}", store.history);
+            assert!(matches!(store.history[0].1, Statement::CreateTable { .. }));
+            assert!(matches!(store.history[1].1, Statement::Snapshot(_)));
+            assert_eq!(store.history[1].0, 3, "snapshot stamped at the clock");
+        }
+
+        // Growth is now bounded: one entry per later mutation, and re-prune
+        // rebuilds the snapshot in place instead of stacking them.
+        db.execute(&[Statement::Insert(record("ledger:3", BTreeMap::new(), None))])
+            .unwrap();
+        assert_eq!(db.store().history.len(), 3);
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        assert_eq!(
+            db.store().history.len(),
+            2,
+            "re-prune does not stack snapshots"
+        );
+
+        // Data is untouched by compaction: current state has all three rows.
+        let now = db
+            .execute(&[Statement::Select(Select { ..select("ledger") })])
+            .unwrap();
+        assert_eq!(now[0].rows.len(), 3);
+    }
+
+    #[test]
+    fn as_of_before_snapshot_errors_after_prune() {
+        // create=1, i1=2, i2=3 → snapshot at 3; AS OF 1/2 must fail loudly
+        // (the pruned prefix is gone) instead of returning a declarations-only
+        // partial view (issue #95).
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::new(), None)),
+            Statement::Insert(record("t:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+
+        // Before pruning: the old window still replays (regression).
+        let ok = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(2),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(ok[0].rows.len(), 1, "pre-prune AS OF unchanged");
+
+        db.execute(&[Statement::PruneHistory]).unwrap();
+
+        let err = db.execute(&[Statement::Select(Select {
+            as_of: Some(2),
+            ..select("t")
+        })]);
+        assert!(
+            matches!(err, Err(Error::HistoryPruned { pruned_through: 3 })),
+            "pre-snapshot AS OF fails loudly, got {err:?}"
+        );
+
+        // From the snapshot onward everything reconstructs.
+        let at = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(3),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(at[0].rows.len(), 2, "snapshot view = state at the clock");
+        db.execute(&[Statement::Insert(record("t:3", BTreeMap::new(), None))])
+            .unwrap();
+        let later = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(4),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(later[0].rows.len(), 3, "post-snapshot delta replays");
+    }
+
+    #[test]
+    fn prune_history_compacts_memory_blocks_too() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("root_t", None),
+            Statement::Memory { name: "blk".into() },
+            create("inner", None),
+            Statement::Insert(record("inner:1", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        {
+            let store = db.store();
+            let only_decls_and_snap = |h: &Vec<(i64, Statement)>| {
+                h.iter().all(|(_, s)| {
+                    matches!(s, Statement::CreateTable { .. } | Statement::Snapshot(_))
+                })
+            };
+            assert!(only_decls_and_snap(&store.history), "root compacted");
+            let blk = store.memories.get("blk").expect("memory block exists");
+            assert!(
+                only_decls_and_snap(&blk.history),
+                "memory compacted with its own snapshot"
+            );
+            assert!(
+                blk.records
+                    .contains_key(&RecordId::parse("inner:1").unwrap()),
+                "memory data intact"
+            );
+        }
+
+        // AS OF inside the memory, before its snapshot → HistoryPruned.
+        let past = db.execute(&[
+            Statement::Memory { name: "blk".into() },
+            Statement::Select(Select {
+                as_of: Some(1),
+                ..select("inner")
+            }),
+        ]);
+        assert!(
+            matches!(past, Err(Error::HistoryPruned { .. })),
+            "memory-scoped temporal read fails loudly, got {past:?}"
+        );
+
+        // Current reads in the memory are untouched.
+        let now = db
+            .execute(&[
+                Statement::Memory { name: "blk".into() },
+                Statement::Select(Select { ..select("inner") }),
+            ])
+            .unwrap();
+        assert_eq!(now[0].rows.len(), 1);
     }
 
     #[test]
