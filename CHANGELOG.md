@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Temporal graph traversal (issue #92): `MATCH ... AS OF <ts>` and
+  `CLOSURE ... AS OF <ts>` replay the mutation history and traverse the
+  reconstructed snapshot — the same machinery as `SELECT ... AS OF`, and it
+  composes with `MATCH ... COUNT`. The typed MCP `match`/`closure` tools gain
+  an `as_of` parameter (schema-advertised, parity with `select`).
 - Comparison and range filters (issue #93): `WHERE` accepts `!=`, `<`, `<=`,
   `>`, `>=`, `IN [..]`, and `BETWEEN a AND b` — evaluated over a documented,
   proptest-pinned total order of values (`null < bool < number < string <

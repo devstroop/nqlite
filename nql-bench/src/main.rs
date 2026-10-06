@@ -106,6 +106,7 @@ fn closure_stmt() -> Statement {
             name: "follows_from".into(),
             edge_props: None,
         }],
+        as_of: None,
     })
 }
 

@@ -380,7 +380,21 @@ impl Parser {
         if steps.is_empty() {
             return Err(self.err_here(format!("{kw} requires at least one edge step (`-> :name`)")));
         }
-        Ok(MatchPath { start, steps })
+        // `[ 'AS OF' int ]` (issue #92): shared by MATCH and CLOSURE — the
+        // engine traverses the history-replayed snapshot (spec §2.7), the
+        // same machinery `SELECT ... AS OF` uses. It precedes a trailing
+        // MATCH `COUNT` (parse_match consumes COUNT after this returns).
+        let mut as_of = None;
+        if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("as")) {
+            self.bump();
+            self.expect_keyword("of", "OF after AS")?;
+            as_of = Some(self.expect_int("AS OF timestamp")?);
+        }
+        Ok(MatchPath {
+            start,
+            steps,
+            as_of,
+        })
     }
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {
