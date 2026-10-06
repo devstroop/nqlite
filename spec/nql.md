@@ -31,7 +31,7 @@ relate         = 'RELATE' '(' recordid ')' '->' ':' ident '->' '(' recordid ')'
 
 select         = 'SELECT' select_list 'FROM' ident
                  [ 'WHERE' where_clause ]
-                 [ 'ORDER' 'BY' '::' order_op ]
+                 [ 'ORDER' 'BY' order_key ]
                  [ 'AS' 'OF' int ]
                  [ 'OFFSET' int ] [ 'LIMIT' int [ 'OFFSET' int ] ] ;
 
@@ -59,6 +59,7 @@ bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
 hybrid         = bm25 'AND' vector_knn | vector_knn 'AND' bm25 ;
 order_op       = 'similarity' | 'salience' [ '(' num ',' num ',' num ',' num ')' ]
                | 'score' | 'votes' | 'feedback' | 'recency' ;
+order_key      = '::'? order_op | field [ 'DESC' ] ;
 num           = int | float ;
 
 object         = ( ident ':' value ) ( ',' ident ':' value )* | '' ;
@@ -147,6 +148,16 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
      - `score` — the Laplace-smoothed `::score` clamped to `[0,1]`.
    - `::score` — Laplace-smoothed mean over `:voted` edges, desc.
    - `::recency` — `created_at` desc.
+   - `<field> [DESC]` (issue #117) — sort by a body field under the same
+     total order as the §2.3 filters (`Value::cmp_total`): absent fields and
+     explicit `null`s rank lowest. `DESC` reverses the **key only** — ties
+     always keep ascending RecordId (the §2.1 total order holds in both
+     directions). If the query returns rows but no record of the table
+     carries the field, the query errors (`UnknownSortField`) — a typo must
+     not become a silent all-equal sort. `DESC` after a `::` operator is a
+     positioned error (operators have fixed directions). Like `::recency`,
+     an explicit field sort applies even in kNN/BM25 modes (score-based
+     orders defer to those rankings — precedence documented with #119).
    (Hybrid queries always order by the fused score; explicit `ORDER BY` is
    ignored in that mode.)
 6. **Offset / Limit** — `OFFSET n` skips the first `n` rows after ordering;

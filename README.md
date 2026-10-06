@@ -80,6 +80,8 @@ This gives you:
   - `ORDER BY ::score` — Laplace-smoothed mean of `:voted` feedback edges
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering
+  - `ORDER BY seq [DESC]` — sort by a body field (same total order as the
+    filters; ties keep record-id ascending; typo'd fields error loudly)
 - **Graph traversal** — `MATCH` (1+ hops, both directions, per-step edge
   property filters) and `CLOSURE` (transitive closure, BFS-depth scores);
   both accept `AS OF <ts>` (historical snapshots) and `MATCH ... COUNT`

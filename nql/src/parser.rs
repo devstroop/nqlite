@@ -433,7 +433,9 @@ impl Parser {
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("order") => {
                     self.bump();
                     self.expect_keyword("by", "BY after ORDER")?;
-                    if matches!(self.peek_tok(), Token::DoubleColon | Token::Colon) {
+                    let colon_prefixed =
+                        matches!(self.peek_tok(), Token::DoubleColon | Token::Colon);
+                    if colon_prefixed {
                         self.bump();
                     }
                     let o = self.expect_ident("order key after ORDER BY")?;
@@ -444,12 +446,38 @@ impl Parser {
                         "recency" => Order::Recency,
                         "votes" => Order::Votes,
                         "feedback" => Order::Feedback,
-                        _ => {
+                        // A bare non-operator identifier is a body-field sort
+                        // (issue #117). `::` commits to the operator list, so
+                        // `::seq` stays a positioned error, not a field.
+                        _ if colon_prefixed => {
                             return Err(self.err_here(format!(
-                                "unknown ORDER BY key `{o}` (expected similarity, salience, score, recency, votes, or feedback)"
+                                "unknown ORDER BY operator `{o}` (expected similarity, \
+                                 salience, score, recency, votes, or feedback — or a \
+                                 bare field name without `::`)"
                             )));
                         }
+                        _ => Order::Field {
+                            key: o,
+                            desc: false,
+                        },
                     });
+                    // `<field> [DESC]` (issue #117). Operator keys have fixed
+                    // directions, so DESC after one is a positioned error —
+                    // never a silent no-op (#91's lesson).
+                    if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("desc"))
+                    {
+                        self.bump();
+                        match &mut order {
+                            Some(Order::Field { desc, .. }) => *desc = true,
+                            _ => {
+                                return Err(self.err_here(
+                                    "`DESC` applies to field sorts only \
+                                     (`ORDER BY <field> DESC`); `::` operators have \
+                                     fixed directions",
+                                ));
+                            }
+                        }
+                    }
                 }
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("as") => {
                     self.bump();

@@ -580,6 +580,12 @@ pub enum Order {
     /// Appended variant: postcard tags of earlier variants stay stable (the
     /// #109 discipline for serialized enums).
     SalienceWeighted([f32; 4]),
+    /// `ORDER BY <field> [DESC]` — sort by a body field under
+    /// [`Value::cmp_total`] (the same total order the filters use, issue
+    /// #117). Absent fields rank as `null` (lowest); `desc` reverses the key
+    /// only — ties keep ascending `RecordId`. Appended variant (postcard-tag
+    /// stable).
+    Field { key: String, desc: bool },
 }
 
 /// Aggregated vote counts over a record's `:voted` edges (`(voter)->:voted {value:+1|-1}->(record)`).
