@@ -161,6 +161,15 @@ printf 'MEMORY core; CREATE TABLE note; MEMORY core; INSERT INTO note:1 { "text"
   | cargo run -q -p nql-server -- --stdio
 ```
 
+Add `--db memory.nql` (either mode) to serve a **persistent** store — same
+semantics as `nql-cli --db`, including the single-writer lock; without it the
+server is in-memory and everything is lost on exit:
+
+```bash
+cargo run -q -p nql-server -- --db memory.nql            # TCP on :7878
+cargo run -q -p nql-server -- --db memory.nql --stdio    # line protocol on stdio
+```
+
 Or in Rust, programmatically:
 
 ```rust
@@ -232,7 +241,7 @@ nqlite/   engine: deterministic execution over Store
    ├─ records (BTreeMap)  ──  relations (edges)  ──  vectors (VectorIndex)
    └─ ACID transaction (single-writer, snapshot readers)  [M1: file + WAL]
 
-nql-server/  line-protocol server (TCP + stdio)
+nql-server/  line-protocol server (TCP + stdio, optional `--db` persistence)
 nql-mcp/     MCP server (stdio) — exposes nqlite as tools for AI agents
 ```
 

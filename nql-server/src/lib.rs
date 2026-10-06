@@ -39,6 +39,24 @@ impl Server {
         Server::default()
     }
 
+    /// Open a server over a persistent single-file store (`nql-server --db`).
+    ///
+    /// The analyzer's cross-line table context cannot be rebuilt from records
+    /// alone (an empty, dimension-less table leaves no trace outside its
+    /// `CreateTable` statement), so `declared` is re-seeded by replaying the
+    /// persisted mutation histories — the root store's plus every memory
+    /// block's — in order, last declaration winning (matching the engine's
+    /// dim-set/dim-clear semantics). Tables created before a restart stay
+    /// usable after it.
+    ///
+    /// Fails with the store's open error (issue #84's `Locked` surfaces here
+    /// when another process owns the file).
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let db = Database::open(path).map_err(|e| std::io::Error::other(format!("open: {e}")))?;
+        let declared = seed_declared(&db);
+        Ok(Server { db, declared })
+    }
+
     /// Handle one line of the protocol: parse, analyze (with cross-line table
     /// context), execute against the shared database, and return the response
     /// text. Never panics on bad input; a malformed line yields `ERR ...` and
@@ -100,6 +118,32 @@ impl Server {
             Err(e) => format!("ERR {e}"),
         }
     }
+}
+
+/// Rebuild the analyzer's cross-line table context from a reopened store.
+///
+/// Replays the persisted mutation histories — the root store's plus every
+/// memory block's, in append order, last declaration winning (mirroring the
+/// engine's `vector_dims` set/dim-clear semantics) — collecting every
+/// `CreateTable`. Records alone can't seed this: an empty, dimension-less
+/// table (e.g. `CREATE TABLE notes;` with no rows yet) exists *only* as a
+/// history statement. Issue #89.
+fn seed_declared(db: &Database) -> BTreeMap<String, Option<usize>> {
+    let mut declared: BTreeMap<String, Option<usize>> = BTreeMap::new();
+    let store = db.store();
+    for (_, stmt) in &store.history {
+        if let Statement::CreateTable { table, vector_dim } = stmt {
+            declared.insert(table.clone(), *vector_dim);
+        }
+    }
+    for memory in store.memories.values() {
+        for (_, stmt) in &memory.history {
+            if let Statement::CreateTable { table, vector_dim } = stmt {
+                declared.insert(table.clone(), *vector_dim);
+            }
+        }
+    }
+    declared
 }
 
 /// One response line for a read result (SELECT or MATCH): the statement's
@@ -238,6 +282,98 @@ mod tests {
             "second row present with 4dp score, got: {out}"
         );
         assert!(out.ends_with("\nOK"), "final OK terminator, got: {out}");
+    }
+
+    #[test]
+    fn open_persists_and_reseeds_declared_tables() {
+        // Issue #89 (--db mode): reopening must restore BOTH the data and the
+        // analyzer's cross-line table context — including an empty, no-dim
+        // table (exists only as a history statement) and a memory-block table.
+        let dir = std::env::temp_dir().join(format!("nqlite-server-db-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("store.nql");
+
+        {
+            let mut s = Server::open(&path).expect("first open");
+            assert_eq!(line(&mut s, "CREATE TABLE t VECTOR<f32, 2>;"), "OK");
+            assert_eq!(
+                line(
+                    &mut s,
+                    r#"INSERT INTO t:1 { "text": "x" } EMBED [0.5, 0.5];"#
+                ),
+                "OK"
+            );
+            assert_eq!(line(&mut s, "CREATE TABLE scratch;"), "OK");
+            assert_eq!(line(&mut s, "MEMORY m; CREATE TABLE mt;"), "OK");
+            assert_eq!(
+                line(&mut s, r#"MEMORY m; INSERT INTO mt:1 { "v": 1 };"#),
+                "OK"
+            );
+        } // drop: WAL persisted, single-writer lock released
+
+        {
+            let mut s = Server::open(&path).expect("reopen");
+            // Data survived the restart.
+            let out = line(&mut s, "SELECT * FROM t;");
+            assert!(out.contains("t:1"), "persisted row after reopen: {out}");
+            // Pre-restart tables are analyzable again...
+            assert_eq!(
+                line(
+                    &mut s,
+                    r#"INSERT INTO t:2 { "text": "y" } EMBED [0.5, 0.5];"#
+                ),
+                "OK",
+                "INSERT into a table declared before the restart"
+            );
+            // ...including the empty no-dim one (history-only state)...
+            assert_eq!(
+                line(&mut s, r#"INSERT INTO scratch:1 { "n": 1 };"#),
+                "OK",
+                "empty table must be re-seeded from history"
+            );
+            // ...and the memory-scoped one.
+            assert_eq!(
+                line(&mut s, r#"MEMORY m; INSERT INTO mt:2 { "v": 2 };"#),
+                "OK",
+                "memory-scoped table must be re-seeded"
+            );
+            let out = line(&mut s, "MEMORY m; SELECT * FROM mt;");
+            assert!(
+                out.contains("mt:1") && out.contains("mt:2"),
+                "memory rows: {out}"
+            );
+            let out = line(&mut s, "SELECT * FROM scratch;");
+            assert!(out.contains("scratch:1"), "scratch rows: {out}");
+        }
+
+        // Third open: pins the #109 fix at the server level — scope 2's
+        // root writes (t:2, scratch:1) were logged AFTER a plan that ended
+        // inside memory m (scope 1's last line); replay must put them at
+        // root, and the memory store must not gain them.
+        {
+            let mut s = Server::open(&path).expect("third open");
+            let out = line(&mut s, "SELECT * FROM t;");
+            assert!(
+                out.contains("t:1") && out.contains("t:2"),
+                "root writes after a memory-ending plan must survive replay: {out}"
+            );
+            let out = line(&mut s, "SELECT * FROM scratch;");
+            assert!(out.contains("scratch:1"), "scratch survives replay: {out}");
+            let out = line(&mut s, "MEMORY m; SELECT * FROM mt;");
+            assert!(
+                out.contains("mt:1") && out.contains("mt:2"),
+                "memory holds its own rows: {out}"
+            );
+            // Row-shaped leak check ("mt:2" contains "t:2" as a substring,
+            // so a bare contains() would false-positive on the last id).
+            let t2_leaked = out.contains(": t:2 score=") || out.contains("; t:2 score=");
+            assert!(
+                !t2_leaked,
+                "root t:2 must not appear in the memory store: {out}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
