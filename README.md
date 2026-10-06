@@ -148,7 +148,10 @@ cargo run -q -p nql-mcp -- --db memory.nql   # persistent
 ```
 
 `nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
-`relate`, `select`, `match_path`, `forget`) with deterministic JSON results.
+`relate`, `select`, `match_path`, `forget`) with deterministic JSON results;
+`select` supports temporal reads (`as_of`) and `MEMORY`-block reads
+(`memory`), and `execute_nql` carries the full grammar (including
+`AS OF` and `MEMORY` scoping).
 
 Or speak the line protocol directly (`nql-server`, TCP or stdio) — **each line
 is its own plan starting at the root store**, so `MEMORY` must prefix every

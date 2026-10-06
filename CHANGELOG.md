@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `nql-mcp` typed `select` tool gains **`as_of`** (temporal read: logical
+  timestamp, same semantics as `SELECT ... AS OF`) and **`memory`** (read a
+  `MEMORY <name>` block's sub-store) — the capabilities previously reachable
+  only by knowing to smuggle them through `execute_nql`. The tool schema
+  advertises both (discoverable by agents), and `execute_nql`'s description
+  now documents the full grammar: `AS OF`, `MEMORY` prefixing rules (each
+  program starts at root), edge filters, hybrid retrieval.
+  ([#90](https://github.com/devstroop/nqlite/issues/90))
 - WAL plan-boundary marker (`Statement::ContextReset`): replay now resets the
   memory context exactly where the runtime does — **every plan starts at the
   root** (spec §2.8). Before this, the flat write-ahead log carried

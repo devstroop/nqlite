@@ -246,6 +246,15 @@ pub struct SelectParams {
     pub order_by: Option<String>,
     /// Optional row cap.
     pub limit: Option<usize>,
+    /// Temporal read: execute against the store as of this logical timestamp
+    /// (`SELECT ... AS OF <int>` — replays the mutation history up to it).
+    /// Omit for current state.
+    pub as_of: Option<i64>,
+    /// Read inside a `MEMORY <name>` block (spec §2.8): rows come from that
+    /// block's own sub-store (created lazily). Omit for the root store.
+    /// Scoped *writes* go through `execute_nql` with a per-statement
+    /// `MEMORY <name>;` prefix (each line/program boundary starts at root).
+    pub memory: Option<String>,
 }
 
 /// Tool parameters: MATCH graph traversal.
@@ -262,7 +271,7 @@ pub struct MatchParams {
 impl NqlMcp {
     /// Run an arbitrary nql program and return every result as JSON.
     #[tool(
-        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET, ';'-separated) and return all result rows as JSON."
+        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET/MEMORY, ';'-separated) and return all result rows as JSON. Carries the complete grammar: AS OF time travel, MEMORY blocks (prefix EVERY statement that belongs to a block — each program starts at root), edge-property filters, hybrid retrieval. Typed tools cover the root store (select additionally supports as_of/memory); use this tool for scoped writes and anything the typed tools don't expose."
     )]
     async fn execute_nql(
         &self,
@@ -394,7 +403,7 @@ impl NqlMcp {
 
     /// SELECT with optional kNN / equality filter / ORDER BY / LIMIT.
     #[tool(
-        description = "Scan a table, optionally filter by field equality, rank by kNN similarity, order, and limit. Returns rows as JSON in deterministic order."
+        description = "Scan a table, optionally filter by field equality, rank by kNN similarity, order, and limit. Supports temporal reads (as_of = logical timestamp, AS OF) and MEMORY-block reads (memory = block name). Returns rows as JSON in deterministic order."
     )]
     async fn select(
         &self,
@@ -406,6 +415,8 @@ impl NqlMcp {
             k,
             order_by,
             limit,
+            as_of,
+            memory,
         }): Parameters<SelectParams>,
     ) -> String {
         use nql_ir::{Filter, Knn, Order, Select, Statement};
@@ -441,17 +452,26 @@ impl NqlMcp {
             },
             None => None,
         };
-        let stmt = Statement::Select(Select {
+        // Plan: optional MEMORY context switch first (every plan starts at
+        // root — spec §2.8), then the SELECT with optional AS OF. Prefixing
+        // is what makes `memory`-scoped reads work through execute_plan.
+        let mut stmts: Vec<Statement> = Vec::new();
+        if let Some(block) = &memory {
+            stmts.push(Statement::Memory {
+                name: block.clone(),
+            });
+        }
+        stmts.push(Statement::Select(Select {
             table,
             knn,
             filter,
             order,
             limit,
-            as_of: None,
+            as_of,
             fields: None,
-        });
+        }));
         let mut db = self.db.lock().unwrap();
-        match db.execute(&[stmt]) {
+        match db.execute(&stmts) {
             Ok(results) => {
                 let rows: Vec<serde_json::Value> = results[0]
                     .rows
@@ -664,11 +684,132 @@ mod tests {
                 k: Some(1),
                 order_by: None,
                 limit: None,
+                as_of: None,
+                memory: None,
             }))
             .await
         });
         assert!(out.contains("\"turn:1\""), "top-1 is turn:1: {out}");
         assert!(!out.contains("\"turn:2\""), "k=1 caps: {out}");
+    }
+
+    #[test]
+    fn select_schema_advertises_as_of_and_memory() {
+        // Issue #90: the temporal/scope capabilities must be discoverable in
+        // the tool schema agents actually read.
+        let schema = schemars::schema_for!(SelectParams);
+        let json = serde_json::to_value(&schema).unwrap();
+        let props = json["properties"].as_object().expect("object schema");
+        assert!(props.contains_key("as_of"), "as_of in schema: {props:?}");
+        assert!(props.contains_key("memory"), "memory in schema: {props:?}");
+    }
+
+    #[test]
+    fn select_tool_time_travels_with_as_of() {
+        // Issue #90: typed select can now reconstruct history. Setup does
+        // create=ts1, insert turn:1=ts2, insert turn:2=ts3; overwriting
+        // turn:1 is ts4 — AS OF 3 must show the ORIGINAL text.
+        let s = test_service();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            s.insert_record(Parameters(InsertParams {
+                id: "turn:1".into(),
+                body: serde_json::json!({ "text": "OVERWRITTEN" }),
+                embedding: Some(serde_json::json!([1.0, 0.0])),
+            }))
+            .await;
+        });
+        let now = rt.block_on(async {
+            s.select(Parameters(SelectParams {
+                table: "turn".into(),
+                field: None,
+                value: None,
+                query: None,
+                k: None,
+                order_by: None,
+                limit: None,
+                as_of: None,
+                memory: None,
+            }))
+            .await
+        });
+        assert!(now.contains("OVERWRITTEN"), "current state: {now}");
+        let past = rt.block_on(async {
+            s.select(Parameters(SelectParams {
+                table: "turn".into(),
+                field: None,
+                value: None,
+                query: None,
+                k: None,
+                order_by: None,
+                limit: None,
+                as_of: Some(3),
+                memory: None,
+            }))
+            .await
+        });
+        assert!(
+            past.contains("hello world") && !past.contains("OVERWRITTEN"),
+            "AS OF 3 must reconstruct pre-overwrite state: {past}"
+        );
+    }
+
+    #[test]
+    fn select_tool_reads_memory_block() {
+        // Issue #90: typed select can read a MEMORY block; root stays empty
+        // for a block-scoped table.
+        let s = NqlMcp::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            s.execute_nql(Parameters(ExecuteNqlParams {
+                program: "MEMORY blk; CREATE TABLE memt; MEMORY blk; INSERT INTO memt:1 \
+                          { \"src\": \"from-block\" };"
+                    .into(),
+            }))
+            .await;
+        });
+        let in_block = rt.block_on(async {
+            s.select(Parameters(SelectParams {
+                table: "memt".into(),
+                field: None,
+                value: None,
+                query: None,
+                k: None,
+                order_by: None,
+                limit: None,
+                as_of: None,
+                memory: Some("blk".into()),
+            }))
+            .await
+        });
+        assert!(
+            in_block.contains("from-block"),
+            "block row via typed select: {in_block}"
+        );
+        let at_root = rt.block_on(async {
+            s.select(Parameters(SelectParams {
+                table: "memt".into(),
+                field: None,
+                value: None,
+                query: None,
+                k: None,
+                order_by: None,
+                limit: None,
+                as_of: None,
+                memory: None,
+            }))
+            .await
+        });
+        assert!(
+            at_root.contains("\"rows\": []"),
+            "root must not see the block's rows: {at_root}"
+        );
     }
 
     #[test]
