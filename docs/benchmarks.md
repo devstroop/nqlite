@@ -75,9 +75,17 @@ range) because both are exact scans over in-memory data; hybrid ≈ kNN + BM25.
 `scripts/bench-compare/bench.py` runs the same corpus against sqlite-vec,
 LanceDB and Chroma **when their Python drivers are importable**; a missing
 driver is reported as `skipped` — the harness never fails because a competitor
-isn't installed. On this box none of the three drivers are present, so the
-matrix degrades honestly to nqlite-only (see "Reproduce" for how to install
-them).
+isn't installed. sqlite-vec is now wired **including the `rec@10` quality
+column** (mean over 30 queries vs exact cosine top-10 on the shared corpus;
+vec0's L2-only ranking is made cosine-equivalent by unit-normalizing vectors —
+see the driver comments); LanceDB/Chroma still report latency only.
+
+Latest run with all columns: [`scripts/bench-compare/report-2026-10-06.md`](../scripts/bench-compare/report-2026-10-06.md)
+(Xeon box: recall nqlite **1.0000 @1k / 0.96 @5k** vs sqlite-vec **1.0000** —
+different bases, stated plainly in the report). The earlier
+`report-2026-08-04.md` (Raspberry Pi, all three drivers) remains the
+three-driver *latency* reference — numbers are never comparable across those
+two machines.
 
 ## Recall (quality, issue #96)
 
@@ -123,9 +131,10 @@ Notes:
 - Search beam: `fast-hnsw` widens `ef` to `max(ef, k)` — measuring with
   `k = rows` would silently turn the gate into a near-exact run. Both the
   bench and the gate cap `k` at 100 (see the comment in `nqlite/tests/recall.rs`).
-- `scripts/bench-compare/bench.py` now carries a `rec@10` column for nqlite
-  (`off` when built without `--features hnsw`; competitors report `n/a` until
-  a quality metric is wired for them).
+- `scripts/bench-compare/bench.py` carries a `rec@10` column: nqlite's own
+  HNSW-vs-exact (its dim-64 set) and — since 2026-10-06 — sqlite-vec's recall
+  vs exact cosine top-10 on the shared corpus (`off` when nql-bench is built
+  without `--features hnsw`; LanceDB/Chroma `n/a` — no quality metric wired).
 
 ## Reproduce
 
