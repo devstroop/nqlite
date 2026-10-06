@@ -322,6 +322,10 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         Statement::Memory { .. } => StmtKind::Memory,
         Statement::Select(_) => StmtKind::Select,
         Statement::Forget { .. } => StmtKind::Forget,
+        // The generator builds source text the parser re-parses — the parser
+        // cannot emit the WAL-only marker (issue #109), so it never reaches
+        // this classification.
+        Statement::ContextReset => unreachable!("parser never produces ContextReset"),
     }
 }
 

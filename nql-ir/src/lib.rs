@@ -206,6 +206,14 @@ pub enum Statement {
     /// the named memory's own store. Named memories are core/archival/shared
     /// partitions for agents (spec §2.8).
     Memory { name: String },
+    /// WAL sequencing marker — **end of a plan** (issue #109). Never produced
+    /// by the parser and never stored in `Store::history` (no clock tick, no
+    /// data change): `Database::execute` appends it to the write-ahead log
+    /// after a plan's mutating statements so replay resets the memory context
+    /// exactly where the runtime did — every plan starts at the root
+    /// (spec §2.8). Appended as the LAST enum variant so existing postcard
+    /// tags stay stable for old WALs.
+    ContextReset,
 }
 
 /// A graph traversal: start at `start`, walk `steps` in order.

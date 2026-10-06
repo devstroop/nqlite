@@ -196,6 +196,68 @@ fn as_of_history_survives_checkpoint_and_reopen() {
 }
 
 #[test]
+fn memory_context_resets_across_reopen() {
+    // Regression for issue #109: a plan that ENDS inside a MEMORY block must
+    // not leak its context into later plans' WAL frames. Runtime: every plan
+    // starts at root (spec §2.8); the flat WAL needs an explicit boundary
+    // marker (`Statement::ContextReset`) for replay to agree with the runtime.
+    let dir = std::env::temp_dir().join(format!("nqlite-wal-ctx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1: root write, then a plan that ENDS inside memory m.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:a { \"text\": \"root\" };
+                 MEMORY m; INSERT INTO t:mem { \"text\": \"in-m\" };",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Session 2: fresh process — this plan runs at ROOT (context resets per
+    // plan). Its frames must not replay under m's context.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(&parse("INSERT INTO t:b { \"text\": \"root2\" };").unwrap())
+            .unwrap();
+    }
+
+    // Session 3: replay must reconstruct both scopes exactly.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let root = db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        let mut ids: Vec<String> = root[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["t:a", "t:b"],
+            "root write after a memory-ending plan must replay at root (issue #109)"
+        );
+        let m = db
+            .execute(&parse("MEMORY m; SELECT * FROM t;").unwrap())
+            .unwrap();
+        let mids: Vec<String> = m[0].rows.iter().map(|r| r.record.id.to_string()).collect();
+        assert_eq!(
+            mids,
+            ["t:mem"],
+            "memory store must not gain root rows, got {mids:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn memory_blocks_survive_wal_replay_across_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-memory-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

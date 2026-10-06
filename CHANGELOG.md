@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- WAL plan-boundary marker (`Statement::ContextReset`): replay now resets the
+  memory context exactly where the runtime does — **every plan starts at the
+  root** (spec §2.8). Before this, the flat write-ahead log carried
+  `current_memory` across plan boundaries, so a root write issued *after* a
+  plan that ended inside a `MEMORY` block was replayed into that memory —
+  silent data misplacement on every persistent line-oriented path
+  (`nql-server --db`, the `nql-cli` REPL). `Database::execute` appends the
+  marker after a plan's mutating statements; it is WAL-only (never in
+  `Store::history`, no clock tick) and added as the last `Statement` variant
+  so existing postcard tags stay stable. Downside note: a WAL written by this
+  version consumed by a pre-marker binary truncates at the first marker.
+  Single-plan scripts and `AS OF` (per-store history) were unaffected.
+  ([#109](https://github.com/devstroop/nqlite/issues/109))
 - Engine now stamps `created_at` on every mutation when it arrives unset —
   records get the statement's logical timestamp on INSERT, edges on RELATE —
   the contract `nql`'s parser has always documented ("Engine clocks

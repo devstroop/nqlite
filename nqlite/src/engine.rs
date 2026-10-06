@@ -108,6 +108,13 @@ pub fn execute_in_context(
         *current_memory = Some(name.clone());
         return Ok(None);
     }
+    // WAL plan-boundary marker (issue #109): the flat write-ahead log has no
+    // other way to say "the plan ended here" — reset the context so later
+    // frames replay at root, matching execute_plan's fresh-plan start.
+    if let Statement::ContextReset = stmt {
+        *current_memory = None;
+        return Ok(None);
+    }
     match current_memory {
         Some(name) => {
             let memory = store.memories.get_mut(name).expect("memory created above");
@@ -122,6 +129,10 @@ pub fn execute_in_context(
 pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<QueryResult>> {
     match stmt {
         Statement::Memory { name } => Err(Error::MemoryWithoutContext { name: name.clone() }),
+        // WAL-only marker: intercepted by `execute_in_context` before this
+        // point; the arm exists for exhaustive matching (and `replay_as_of`,
+        // whose per-store history never contains markers).
+        Statement::ContextReset => Ok(None),
         Statement::CreateTable { table, vector_dim } => {
             // Declaring a table with a dim sets `vector_dims[table]`;
             // declaring without one clears any previous declaration.
