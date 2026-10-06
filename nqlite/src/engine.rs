@@ -138,12 +138,34 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
         }
         Statement::Insert(rec) => {
             validate_embedding(store, rec)?;
-            store.insert(rec.clone());
+            // Clock created_at to the mutation timestamp this INSERT is about
+            // to receive — but only when unset (issue #107): the parser
+            // always leaves 0 ("Engine clocks created_at per-transaction"),
+            // and without a stamp `ORDER BY ::recency` degenerates to id
+            // order. Explicit IR-provided values are honored as-is.
+            // `log_mutation` below does `clock += 1`, so `clock + 1` *is*
+            // this statement's timestamp — WAL/AS OF replay re-derives the
+            // same stamps from statement order (and passes explicit values
+            // through unchanged), keeping the determinism contract.
+            let mut rec = rec.clone();
+            if rec.created_at == 0 {
+                rec.created_at = store.clock + 1;
+            }
+            store.insert(rec);
             store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Relate(edge) => {
-            store.edges.push(edge.clone());
+            // Same rule as Insert (issue #107): edge.created_at drives
+            // ::feedback's decay. nql `SET created_at = ...` lands in `props`
+            // (only `weight` is special-cased), so the field arrives as 0
+            // from every nql/MCP path and gets stamped; explicit IR values
+            // pass through.
+            let mut edge = edge.clone();
+            if edge.created_at == 0 {
+                edge.created_at = store.clock + 1;
+            }
+            store.edges.push(edge);
             store.log_mutation(stmt);
             Ok(None)
         }
@@ -1290,6 +1312,93 @@ mod tests {
             .map(|r| r.record.id.to_string())
             .collect();
         assert_eq!(ids, ["post:a", "post:b"]);
+    }
+
+    #[test]
+    fn created_at_stamped_per_mutation() {
+        // Issue #107: the parser leaves created_at = 0 with the comment
+        // "Engine clocks created_at per-transaction" — the clocking lives
+        // HERE. Each stamp is the statement's mutation timestamp (CREATE=1),
+        // which is also what AS OF replay re-derives from statement order.
+        let mut db = Database::default();
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:a", BTreeMap::new(), None)),
+            Statement::Insert(record("post:b", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+
+        let created_at_of = |id: &str| -> i64 {
+            db.store()
+                .records
+                .values()
+                .find(|r| r.id.to_string() == id)
+                .unwrap()
+                .created_at
+        };
+        assert_eq!(created_at_of("post:a"), 2, "first INSERT = ts2");
+        assert_eq!(created_at_of("post:b"), 3, "second INSERT = ts3");
+
+        // ::recency now orders newest-first (before the fix: all-zero
+        // timestamps tie-broke to ascending id — the *oldest* first).
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Recency),
+                ..select("post")
+            })])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["post:b", "post:a"], "newest first under ::recency");
+    }
+
+    #[test]
+    fn feedback_decay_uses_stamped_edge_created_at() {
+        // Issue #107: edges get stamped per RELATE, so ::feedback finally
+        // decays: two upvotes on one record at consecutive timestamps are
+        // 1.0 (age 0) + 0.5 (age 1) = 1.5 — not the age-0 2.0.
+        // NB ::feedback reads the `value` prop (like ::votes), and edges
+        // arrive with created_at = 0 from nql → stamped by the engine.
+        let vote = |user: &str| RelationEdge {
+            from: RecordId::parse(user).unwrap(),
+            name: "voted".into(),
+            to: RecordId::parse("post:1").unwrap(),
+            created_at: 0, // stamped by execute (issue #107)
+            weight: None,
+            props: BTreeMap::from([("value".into(), Value::Int(1))]),
+        };
+        let mut db = Database::default();
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:1", BTreeMap::new(), None)),
+            Statement::Relate(vote("user:u1")),
+            Statement::Relate(vote("user:u2")),
+        ])
+        .unwrap();
+
+        // Stamps: CREATE=1, INSERT=2, votes at 3 and 4 → now=4, ages 1 and 0.
+        let edge_ages: Vec<i64> = db.store().edges.iter().map(|e| e.created_at).collect();
+        assert_eq!(edge_ages, [3, 4], "edges stamped at their mutation ts");
+
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Feedback),
+                ..select("post")
+            })])
+            .unwrap();
+        let score = res[0]
+            .rows
+            .iter()
+            .find(|r| r.record.id.to_string() == "post:1")
+            .unwrap()
+            .score;
+        assert!(
+            (score - 1.5).abs() < 1e-6,
+            "expected 1.5 (second vote age-1 decayed), got {score}"
+        );
     }
 
     #[test]

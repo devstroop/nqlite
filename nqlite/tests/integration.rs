@@ -281,6 +281,31 @@ fn colon_named_edges_traverse_from_nql_match() {
 }
 
 #[test]
+fn recency_orders_newest_first_end_to_end() {
+    // Regression for issue #107 (the original repro): created_at is stamped
+    // per mutation by the engine, so ORDER BY ::recency returns the NEWEST
+    // record first. Before the fix every timestamp was 0, ties broke to
+    // ascending id, and the older record came back first.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE t;
+        INSERT INTO t:a { "text": "old" };
+        INSERT INTO t:b { "text": "new" };
+        SELECT * FROM t ORDER BY ::recency;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    let ids: Vec<String> = results[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ids, ["t:b", "t:a"], "newest first, got {ids:?}");
+}
+
+#[test]
 fn nql_bm25_lexical_retrieval_end_to_end() {
     let mut db = Database::new(Store::default());
     let plan = parse(
