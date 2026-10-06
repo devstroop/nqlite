@@ -201,7 +201,7 @@ Semantics:
 |---|---|---|
 | `vector::similarity(embedding, $q)` | cosine similarity `a·b / (|a||b|)`; zero-norm operands => `0.0` | exact f32 |
 | `::similarity` | order by cosine desc | total order w/ tie-break |
-| `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing) | pure arithmetic |
+| `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing). Each edge's weight is its explicit `weight`, else its signed `value` (`value = -1` downvotes); an edge with neither counts as `+1` | pure arithmetic |
 | `::votes(record)` | `(up, down, net)` counts over `:voted` edges | pure arithmetic |
 | `::feedback(record)` | time-decayed recent feedback | engine-clock only |
 | `::salience` | `α·similarity + β·strength + γ·importance + δ·score` | fixed order, no races |
@@ -215,6 +215,9 @@ Semantics:
   (provenance, started_on/ended_on per Zep research), `created_at` (engine).
 - **Votes are edges (decision D9):** `(voter)->:voted {value:+1|-1, weight, created_at}->(record)`.
   No separate vote machinery; provenance and one-transaction semantics come free.
+  Vote `weight` spans `-1..=1` and defaults to the edge's `value` when omitted, so
+  `SET value = -1` alone is a downvote under `::score` too; an explicit `weight`
+  overrides `value` for `::score` only (`::votes`/`::feedback` always read `value`).
 - `FORGET` removes incident edges, keeping the graph clean.
 
 ## 5. Zero-LLM & BYO-vector contract

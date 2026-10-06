@@ -142,6 +142,48 @@ fn nql_votes_flow_into_score_order() {
 }
 
 #[test]
+fn nql_downvote_lowers_score_and_agrees_with_votes() {
+    // Regression for issue #85: `SET value = -1` with no explicit `weight`
+    // must LOWER ::score (weight defaults from the signed value), agreeing
+    // with ::votes — before the fix it counted as +1 and inverted the sign.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:a { "text": "a" };
+        INSERT INTO doc:b { "text": "b" };
+        RELATE (u:1) -> :voted -> (doc:a) SET value = -1;
+        SELECT * FROM doc ORDER BY ::score;
+        SELECT * FROM doc ORDER BY ::votes;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+
+    // ::score: a -> (-1 + 1)/(1 + 2) = 0.0, unvoted b -> 0.5. Before the fix
+    // a scored 0.6667 and outranked the unvoted record.
+    let by_score: Vec<String> = results[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(by_score, ["doc:b", "doc:a"]);
+    let score_a = results[0].rows[1].score;
+    assert!(
+        (score_a - 0.0).abs() < 1e-6,
+        "downvote -> 0.0, got {score_a}"
+    );
+
+    // Same relative order under ::votes (net: a=-1, b=0) — no sign skew.
+    let by_votes: Vec<String> = results[1]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(by_votes, ["doc:b", "doc:a"]);
+}
+
+#[test]
 fn nql_bm25_lexical_retrieval_end_to_end() {
     let mut db = Database::new(Store::default());
     let plan = parse(

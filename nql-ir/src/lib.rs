@@ -327,7 +327,9 @@ pub enum Order {
     Similarity,
     /// α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback (agent-tuned α..δ).
     Salience,
-    /// Laplace-smoothed mean of `:voted` edge values on the record.
+    /// Laplace-smoothed mean of `:voted` edge weights on the record (each
+    /// edge's explicit `weight`, falling back to its signed `value` when
+    /// `weight` is absent).
     Score,
     /// Net up−down vote count over `:voted` edges (descending; tie-break by RecordId).
     Votes,

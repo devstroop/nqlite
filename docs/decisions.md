@@ -124,8 +124,10 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   `USearch`. Keep the trait so we can A/B and swap.
 - D9. (new) Feedback / upvote-downvote as first-class signal:
   - **A vote is just an edge** — no new storage machinery:
-    `(voter)->:voted {value:+1|-1, weight:0..1, created_at}->(record)`.
+    `(voter)->:voted {value:+1|-1, weight:-1..=1, created_at}->(record)`.
     Provenance, time, per-voter granularity, and one-transaction all come free.
+    `weight` defaults to the `value` when omitted (so `value:-1` downvotes under
+    `::score` too); an explicit `weight` overrides `value` for `::score` only.
   - Deterministic engine operators (allowed — pure arithmetic, zero-LLM):
     `::votes(record)` → (up, down, net); `::score(record)` → **Laplace-smoothed
     mean** (M1 default: robust with few votes; Wilson lower bound deferred to

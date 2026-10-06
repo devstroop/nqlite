@@ -591,6 +591,8 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
 ///   relevance" semantics.
 /// - `Order::Score` → Laplace-smoothed mean of the `:voted` edge weights
 ///   pointing at the record: `(sum + 1) / (n + 2)` — `0.5` with zero votes.
+///   Each edge's weight is its explicit `weight`, or its signed `value` when
+///   `weight` is absent (`value = -1` downvotes; see [`score_of`]).
 /// - `Order::Votes` → net up−down vote count (see [`vote_counts`]).
 /// - `Order::Feedback` → time-decayed recent feedback (see [`feedback_score`]).
 /// - `Order::Salience` with kNN → `0.7 * similarity + 0.3 * normalized_score`,
@@ -646,22 +648,44 @@ fn compute_score(
 
 /// Laplace-smoothed mean of `:voted` edge weights on the record.
 ///
-/// A vote edge is any edge with `name == "voted"` pointing **to** the record;
-/// `weight` defaults to `1.0` when absent (an upvote). The estimate
-/// `(sum + 1) / (n + 2)` starts at `0.5` with zero votes and moves toward the
-/// observed mean as votes accumulate. The edge name is stored **without** the
-/// `:` prefix — the parser strips it (`RELATE (a) -> :voted -> (b)` stores
-/// `"voted"`), and `::votes`/`::feedback` use the same convention.
+/// A vote edge is any edge with `name == "voted"` pointing **to** the record.
+/// Each edge contributes its [`vote_weight`]: the explicit `weight` when set,
+/// otherwise the edge's signed `value` — so `SET value = -1` (no weight) is a
+/// **downvote** here too, agreeing with `::votes`/`::feedback` instead of
+/// inverting them. The estimate `(sum + 1) / (n + 2)` starts at `0.5` with
+/// zero votes and moves toward the observed mean as votes accumulate.
+/// The edge name is stored **without** the `:` prefix — the parser strips it
+/// (`RELATE (a) -> :voted -> (b)` stores `"voted"`), and `::votes`/`::feedback`
+/// use the same convention.
 fn score_of(store: &Store, rec: &Record) -> f32 {
     let mut sum = 0.0f32;
     let mut n = 0usize;
     for edge in &store.edges {
         if edge.name == "voted" && edge.to == rec.id {
-            sum += edge.weight.unwrap_or(1.0);
+            sum += vote_weight(edge);
             n += 1;
         }
     }
     (sum + 1.0) / (n as f32 + 2.0)
+}
+
+/// The signed weight `::score` counts for one `:voted` edge.
+///
+/// Explicit `weight` wins (an agent may down-weight a positive vote or pin an
+/// exact value). When `weight` is absent the edge's `value` supplies the sign
+/// (`value = -1` → `-1.0`, `value = 1` → `1.0`) — the fix for downvotes being
+/// counted as upvotes (issue #85). Only an edge with *neither* field falls
+/// back to the legacy `1.0` (an upvote); D9 defines votes as carrying
+/// `value`, so that case is degenerate.
+fn vote_weight(edge: &RelationEdge) -> f32 {
+    if let Some(w) = edge.weight {
+        return w;
+    }
+    match edge.props.get("value") {
+        Some(Value::Int(v)) => *v as f32,
+        Some(Value::Float(v)) => *v as f32,
+        _ => 1.0,
+    }
 }
 
 /// The `:voted` edges pointing **at** `id`, in store (append) order.
@@ -1098,6 +1122,104 @@ mod tests {
             .find(|r| r.record.id.to_string() == "post:3")
             .unwrap();
         assert!((post3.score - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_defaults_weight_from_vote_value() {
+        // Issue #85: `SET value = -1` without `weight` must DOWNvote under
+        // ::score (previously weight defaulted to +1, inverting the vote and
+        // disagreeing with ::votes/::feedback).
+        let mut db = Database::default();
+        let vote = |to: &str, value: i64, weight: Option<f32>| {
+            let mut props = BTreeMap::new();
+            props.insert("value".into(), Value::Int(value));
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("user:voter").unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse(to).unwrap(),
+                created_at: 1,
+                weight,
+                props,
+            })
+        };
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:a", BTreeMap::new(), None)),
+            Statement::Insert(record("post:b", BTreeMap::new(), None)),
+            Statement::Insert(record("post:c", BTreeMap::new(), None)),
+            Statement::Insert(record("post:d", BTreeMap::new(), None)),
+            // a: downvote, no weight -> -1 (was +1 before the fix)
+            vote("post:a", -1, None),
+            // c: upvote, no weight -> +1
+            vote("post:c", 1, None),
+            // d: explicit weight overrides the -1 value (agent's choice)
+            vote("post:d", -1, Some(0.9)),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Score),
+                ..select("post")
+            })])
+            .unwrap();
+        let score_of_id = |id: &str| -> f32 {
+            res[0]
+                .rows
+                .iter()
+                .find(|r| r.record.id.to_string() == id)
+                .unwrap()
+                .score
+        };
+        // a: (-1 + 1) / (1 + 2) = 0.0  (downvote pulls below the 0.5 baseline)
+        assert!((score_of_id("post:a") - 0.0).abs() < 1e-6);
+        // b: no votes -> 0.5 baseline
+        assert!((score_of_id("post:b") - 0.5).abs() < 1e-6);
+        // c: (1 + 1) / (1 + 2) = 2/3
+        assert!((score_of_id("post:c") - 2.0 / 3.0).abs() < 1e-6);
+        // d: (0.9 + 1) / (1 + 2) = 1.9/3 — explicit weight wins over value
+        assert!((score_of_id("post:d") - 1.9 / 3.0).abs() < 1e-6);
+
+        // Ordering: downvoted record must rank LAST (below unvoted).
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["post:c", "post:d", "post:b", "post:a"]);
+
+        // Sign agreement with ::votes: the downvoted records (a, d — both
+        // value=-1) sit below the unvoted b and the upvoted c, with the same
+        // relative order for a as under ::score (a is the global minimum in
+        // both orderings).
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Votes),
+                ..select("post")
+            })])
+            .unwrap();
+        let net_of_id = |id: &str| -> f32 {
+            res[0]
+                .rows
+                .iter()
+                .find(|r| r.record.id.to_string() == id)
+                .unwrap()
+                .score
+        };
+        assert!((net_of_id("post:a") - (-1.0)).abs() < 1e-6);
+        assert!((net_of_id("post:b") - 0.0).abs() < 1e-6);
+        assert!((net_of_id("post:c") - 1.0).abs() < 1e-6);
+        let pos = |id: &str| -> usize {
+            res[0]
+                .rows
+                .iter()
+                .position(|r| r.record.id.to_string() == id)
+                .unwrap()
+        };
+        assert!(
+            pos("post:a") > pos("post:b"),
+            "::score and ::votes must agree on sign ordering"
+        );
     }
 
     #[test]
