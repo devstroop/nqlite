@@ -133,6 +133,13 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
      hybrid, §2.6) — mixing them into an `AND` chain is a positioned error.
      The same conjunction grammar drives MATCH/CLOSURE edge-property filters
      (§2.5), evaluated all-of against the edge's `props`.
+   - `id = | != | IN [...]` (issue #128): compares against the record's own
+     identity in display form (`table:id`) — the rerank-pool predicate
+     (`WHERE id IN ["doc:7", …]` server-side). The literal must be that
+     string; ordered forms (`<`, `<=`, `>`, `>=`, `BETWEEN`) are positioned
+     errors (ids are not an ordered value). A body key named `id` never
+     shadows the pseudo-field; in edge-property filters — edges have no
+     record identity — `id` is an ordinary prop lookup.
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
    - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
      ranked by BM25 relevance over the field; `k` caps the returned rows.

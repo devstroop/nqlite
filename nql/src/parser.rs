@@ -695,10 +695,28 @@ impl Parser {
     /// `BETWEEN <lo> AND <hi>` (issues #93/#94, spec §2.3). Shared by
     /// `WHERE` clauses and MATCH/CLOSURE edge-property filters.
     fn parse_field_predicate(&mut self, field: String) -> Result<Filter, NqlError> {
+        // `id` is the pseudo-field bound to the record's `table:id` display
+        // string (issue #128): `=`, `!=`, and `IN` only — ids are not an
+        // ordered value, so ordered comparisons are positioned errors.
+        let is_id = field == "id";
+        if is_id
+            && matches!(
+                self.peek_tok(),
+                Token::Lt | Token::Le | Token::Gt | Token::Ge
+            )
+        {
+            return Err(self.err_here(
+                "`id` supports only `=`, `!=`, and `IN [...]` — ids are not an \
+                 ordered value (issue #128)",
+            ));
+        }
         let cmp = match self.peek_tok() {
             Token::Eq => {
                 self.bump();
                 let value = self.parse_value()?;
+                if is_id {
+                    self.require_id_string(&value)?;
+                }
                 return Ok(Filter::FieldEquals { field, value });
             }
             Token::Ne => CmpOp::Ne,
@@ -724,9 +742,20 @@ impl Parser {
                         break;
                     }
                 }
+                if is_id {
+                    for v in &values {
+                        self.require_id_string(v)?;
+                    }
+                }
                 return Ok(Filter::FieldIn { field, values });
             }
             Token::Ident(kw) if kw.eq_ignore_ascii_case("between") => {
+                if is_id {
+                    return Err(self.err_here(
+                        "`id` supports only `=`, `!=`, and `IN [...]` — ids are not an \
+                         ordered value (issue #128)",
+                    ));
+                }
                 self.bump();
                 let lo = self.parse_value()?;
                 self.expect_keyword("and", "AND between BETWEEN bounds")?;
@@ -742,11 +771,28 @@ impl Parser {
         };
         self.bump(); // the comparison token
         let value = self.parse_value()?;
+        if is_id {
+            self.require_id_string(&value)?;
+        }
         Ok(Filter::FieldCmp {
             field,
             op: cmp,
             value,
         })
+    }
+
+    /// `WHERE id <op> …` compares against the `table:id` display string
+    /// (issue #128): a non-string literal is a positioned error, not a
+    /// silent never-match.
+    fn require_id_string(&self, value: &Value) -> Result<(), NqlError> {
+        if matches!(value, Value::Str(_)) {
+            Ok(())
+        } else {
+            Err(self.err_here(
+                "`id` predicates compare against the `table:id` string, e.g. \
+                 `id = \"doc:7\"` (issue #128)",
+            ))
+        }
     }
 
     /// `::bm25(<field>, "<query>") [AND k = <N>]` — the lexical filter alone.

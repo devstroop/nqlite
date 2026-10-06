@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI tests.
 
 ### Added
+- `WHERE id = / != / IN [...]` (issue #128): the record-id pseudo-field —
+  compares against the record's own `table:id` display string, making the
+  rerank-pool recipe (`WHERE id IN [...] ORDER BY ::score`) server-side.
+  Ordered forms on `id` and non-string literals are positioned errors (ids
+  are not an ordered value); a body key named `id` never shadows the
+  pseudo-field; on edge filters (no record identity) `id` stays an ordinary
+  prop. Composes with `AND` conjunctions.
 - `WHERE` conjunctions (issue #125): field predicates and `IS NOT NULL` now
   compose n-ary with `AND` (`Filter::And`, appended) — all-of per row, one
   operator so no precedence exists; scoring clauses keep their own forms
