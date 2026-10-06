@@ -58,3 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed `value` (agreeing with `::votes`/`::feedback`); explicit `weight`
   still overrides. Spec §3/§4 and decisions D9 updated (`weight: -1..=1`).
   ([#85](https://github.com/devstroop/nqlite/issues/85))
+- Fixed: concurrent `--db` openers no longer lose acknowledged writes —
+  `StoreFile::open` now takes an exclusive sidecar lock (`<name>.nql.lock`;
+  `flock(2)` on unix, `create_new` file elsewhere, MSRV 1.82 preserved) and a
+  second opener fails fast with a `Locked` storage error. Spec
+  `file-format.md` §4 documents the enforcement.
+  ([#84](https://github.com/devstroop/nqlite/issues/84))
