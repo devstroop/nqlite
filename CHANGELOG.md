@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version consumed by a pre-marker binary truncates at the first marker.
   Single-plan scripts and `AS OF` (per-store history) were unaffected.
   ([#109](https://github.com/devstroop/nqlite/issues/109))
+- `nql-server [--db FILE]` (both TCP and stdio modes): the line-protocol
+  server can now serve a persistent single-file store with the same semantics
+  as `nql-cli --db` (WAL, checkpoint, single-writer lock). On reopen the
+  analyzer's cross-line table context is re-seeded by replaying the persisted
+  mutation histories (root + memory blocks), so tables created before a
+  restart — including empty, dimension-less ones that exist only as history
+  statements — stay usable. Clean `error: ...` on open failure (e.g. `Locked`).
+  ([#89](https://github.com/devstroop/nqlite/issues/89))
 - Engine now stamps `created_at` on every mutation when it arrives unset —
   records get the statement's logical timestamp on INSERT, edges on RELATE —
   the contract `nql`'s parser has always documented ("Engine clocks
