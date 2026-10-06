@@ -251,6 +251,11 @@ pub struct Select {
     /// Temporal read: execute against the store as of this logical
     /// timestamp (`AS OF <int>`), replaying the mutation history up to it.
     pub as_of: Option<i64>,
+    /// Field projection: `None` = full records (`SELECT *`); `Some` = only
+    /// the listed body keys survive in output rows (missing keys are absent,
+    /// BTree order preserved). Filters/scores always see the full record —
+    /// projection is presentation-only (spec §2.3 step 7).
+    pub fields: Option<Vec<String>>,
 }
 
 /// The full "database" snapshot a query runs against. In M0 this is in-memory;

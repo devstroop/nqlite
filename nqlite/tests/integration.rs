@@ -184,6 +184,54 @@ fn nql_downvote_lowers_score_and_agrees_with_votes() {
 }
 
 #[test]
+fn nql_projection_returns_only_listed_fields() {
+    // Regression for issue #91: field lists were parsed and silently
+    // discarded — every row came back with ALL fields, and typos in the
+    // list succeeded unnoticed. Projection is presentation-only: same rows,
+    // same ids/scores, filtered bodies.
+    let mut db = Database::new(Store::default());
+    let plan = parse(
+        r#"
+        CREATE TABLE doc;
+        INSERT INTO doc:1 { "text": "hello", "topic": "rust", "weight": 7 };
+        INSERT INTO doc:2 { "text": "world", "topic": "graph", "weight": 3 };
+        SELECT text, topic FROM doc;
+        SELECT nonexistant FROM doc;
+        SELECT * FROM doc;
+        "#,
+    )
+    .expect("parse");
+    let results = db.execute(&plan).expect("execute");
+    assert_eq!(results.len(), 3);
+
+    // Projection: only the listed fields survive (BTree key order kept,
+    // `weight` dropped); ids and scores are untouched.
+    let projected = &results[0];
+    assert_eq!(projected.rows.len(), 2);
+    for row in &projected.rows {
+        let keys: Vec<_> = row.record.body.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["text", "topic"], "only listed fields in {:?}", keys);
+    }
+    assert_eq!(projected.rows[0].record.id.to_string(), "doc:1");
+
+    // A field the records don't have: no error, empty bodies (SQL-like),
+    // but the rows themselves still come back.
+    let typo = &results[1];
+    assert_eq!(typo.rows.len(), 2, "typo'd projection still returns rows");
+    assert!(typo.rows.iter().all(|r| r.record.body.is_empty()));
+
+    // `SELECT *` is unchanged: full records.
+    let star = &results[2];
+    let keys: Vec<_> = star.rows[0]
+        .record
+        .body
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["text", "topic", "weight"]);
+}
+
+#[test]
 fn nql_bm25_lexical_retrieval_end_to_end() {
     let mut db = Database::new(Store::default());
     let plan = parse(

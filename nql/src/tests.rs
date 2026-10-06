@@ -265,6 +265,7 @@ fn select_knn_order_limit() {
             as_of: None,
             order: Some(Order::Similarity),
             limit: Some(10),
+            fields: None,
         }
     );
 }
@@ -719,4 +720,43 @@ fn comments_do_not_shadow_arrows_or_negative_numbers() {
     };
     assert_eq!(rec.body.get("delta"), Some(&Value::Int(-1)));
     assert!(matches!(plan[2], Statement::Relate(_)));
+}
+
+// --- field projection (spec §2.3 step 7) — issue #91 ------------------------
+
+#[test]
+fn select_projection_is_carried_into_ir() {
+    let plan = parse("SELECT text, group FROM t").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.fields,
+        Some(vec!["text".to_string(), "group".to_string()]),
+        "explicit field list must reach the IR"
+    );
+}
+
+#[test]
+fn select_star_carries_no_projection() {
+    let plan = parse("SELECT * FROM t").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.fields, None, "`*` means full records");
+}
+
+#[test]
+fn select_projection_tolerates_star_mixed_syntax() {
+    // `SELECT a, b` vs `SELECT *` both parse; only the list form projects.
+    for (src, expect) in [
+        ("SELECT * FROM t", None),
+        ("SELECT a FROM t", Some(vec!["a".to_string()])),
+    ] {
+        let plan = parse(src).unwrap();
+        let Statement::Select(s) = &plan[0] else {
+            panic!("expected Select");
+        };
+        assert_eq!(s.fields, expect, "src: {src}");
+    }
 }

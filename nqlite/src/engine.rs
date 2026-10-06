@@ -318,6 +318,16 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
     if let Some(limit) = effective_limit(sel) {
         rows.truncate(limit);
     }
+
+    // Field projection (spec §2.3 step 7, issue #91): keep only the listed
+    // body keys — presentation only, after all filtering/scoring/ordering, so
+    // a projection can never change which rows rank. Missing keys are simply
+    // absent (SQL-like); `SELECT *` (`fields == None`) is untouched.
+    if let Some(fields) = &sel.fields {
+        for row in &mut rows {
+            row.record.body.retain(|k, _| fields.iter().any(|f| f == k));
+        }
+    }
     rows
 }
 
@@ -2291,6 +2301,7 @@ mod temporal_tests {
             order: None,
             limit: None,
             as_of,
+            fields: None,
         })
     }
 
@@ -2460,6 +2471,7 @@ mod memory_tests {
             order: None,
             limit: None,
             as_of: None,
+            fields: None,
         })
     }
 
@@ -2556,6 +2568,7 @@ mod memory_tests {
                     order: None,
                     limit: None,
                     as_of: Some(2),
+                    fields: None,
                 }),
             ])
             .unwrap();
@@ -2575,6 +2588,7 @@ mod memory_tests {
                 order: None,
                 limit: None,
                 as_of: Some(2),
+                fields: None,
             })])
             .unwrap();
         assert_eq!(
