@@ -332,6 +332,7 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         // tests cover it) and snapshots are replay-only (issue #95).
         Statement::PruneHistory => unreachable!("generator never emits PRUNE HISTORY"),
         Statement::Snapshot(_) => unreachable!("parser never produces snapshots"),
+        Statement::HistorySince(_) => unreachable!("generator never emits HISTORY SINCE"),
     }
 }
 

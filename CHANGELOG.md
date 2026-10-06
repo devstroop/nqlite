@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `HISTORY SINCE <ts>` (issue #118): exact mutation deltas for sync — one
+  result row per CREATE/INSERT/RELATE/FORGET after the cutoff, with subject
+  ids (rows AND edges + tombstones), so consumers no longer diff two full
+  `AS OF` replays (which miss edge-only mutations). Deterministic
+  (`(history, ts)` pure function), exclusive cutoff, MEMORY-block scoped,
+  read-only, and bounded by the `PRUNE HISTORY` retention horizon
+  (`HistoryPruned` below the snapshot). New `QueryKind::History` label on
+  CLI/server/MCP.
 - `ORDER BY <field> [DESC]` (issue #117): sort by a body field under the same
   proptest-pinned total order the filters use (`Value::cmp_total`); absent
   fields rank as `null`, `DESC` reverses the key only (ties keep ascending

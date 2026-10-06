@@ -186,6 +186,7 @@ fn format_result(res: &nqlite::QueryResult) -> String {
                 .collect();
             format!("CLOSURE {} {}", path.start, hops.join(" "))
         }
+        nqlite::QueryKind::History { since } => format!("HISTORY SINCE {since}"),
     };
     let rows: Vec<String> = res.rows.iter().map(format_row).collect();
     if rows.is_empty() {

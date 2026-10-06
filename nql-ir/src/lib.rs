@@ -350,6 +350,13 @@ pub enum Statement {
     /// state the pruned prefix would have reconstructed. Boxed: the type is
     /// recursive through [`Store`].
     Snapshot(Box<SnapshotState>),
+    /// `HISTORY SINCE <ts>` — exact delta read (issue #118): every mutation
+    /// strictly after the cutoff, one result row per entry (kinds CREATE /
+    /// INSERT / RELATE / FORGET with their subject ids — rows AND edges, so
+    /// sync consumers never miss a graph-only change). Read-only: never
+    /// WAL'd, never logged to history. Below the compaction horizon it fails
+    /// with `HistoryPruned` (spec §2.7).
+    HistorySince(i64),
 }
 
 /// Store state captured by history compaction (issue #95): everything needed

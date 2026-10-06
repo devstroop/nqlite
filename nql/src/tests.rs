@@ -787,6 +787,29 @@ fn order_by_field_and_desc_parse() {
 }
 
 #[test]
+fn history_since_parses() {
+    let plan = parse("HISTORY SINCE 5").unwrap();
+    assert!(matches!(plan[0], Statement::HistorySince(5)));
+
+    let plan = parse("HISTORY SINCE 0").unwrap();
+    assert!(matches!(plan[0], Statement::HistorySince(0)));
+
+    // The shared HISTORY keyword does not disturb PRUNE HISTORY (issue #95).
+    let plan = parse("PRUNE HISTORY").unwrap();
+    assert!(matches!(plan[0], Statement::PruneHistory));
+
+    for bad in [
+        "HISTORY",
+        "HISTORY SINCE",
+        "HISTORY BEFORE 5",
+        "HISTORY SINCE five",
+        "HISTORY SINCE 5 AGO",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn prune_history_parses() {
     let plan = parse("PRUNE HISTORY").unwrap();
     assert!(matches!(plan[0], Statement::PruneHistory));
