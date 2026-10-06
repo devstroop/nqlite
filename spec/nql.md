@@ -134,7 +134,8 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    row's final score is the reciprocal-rank fusion (RRF) of its rank in the
    lexical list and its rank in the vector list: `1/(60 + rank_lex) +
    1/(60 + rank_vec)`, ranks 1-based, ties broken by RecordId asc (see §2.6).
-5. **Order** — `ORDER BY ::op` (default: BTree order):
+5. **Order** — `ORDER BY ::op` or `ORDER BY <field> [DESC]` (default: BTree
+   order):
    - `::similarity` — cosine desc (requires kNN query).
    - `::salience` — `α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
      with deterministic engine defaults **α=0.7, β=0, γ=0, δ=0.3** (α..δ are
@@ -161,8 +162,26 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
      positioned error (operators have fixed directions). Like `::recency`,
      an explicit field sort applies even in kNN/BM25 modes (score-based
      orders defer to those rankings — precedence documented with #119).
-   (Hybrid queries always order by the fused score; explicit `ORDER BY` is
-   ignored in that mode.)
+   **Mode precedence (verified, issue #119).** The score a row *displays* is
+   always the mode's score (kNN similarity, bm25 relevance, hybrid RRF
+   fusion); the sort key follows this table:
+
+   | mode \ `ORDER BY` | *(none)* | score-based ops (`::similarity`, `::salience`, `::score`, `::votes`, `::feedback`) | `::recency` | `<field> [DESC]` |
+   |---|---|---|---|---|
+   | scan | BTree (RecordId asc) | honored — the op's own score | honored | honored |
+   | kNN | similarity desc | honored — the op's own score | honored | honored |
+   | bm25 | relevance desc | **ignored — relevance wins** | honored | honored |
+   | hybrid | fused (RRF) desc | **ignored — fusion wins** | honored | honored |
+
+   Relevance dominance is the point of the bm25/hybrid modes: a score-based
+   order would silently undo the ranking the query asked for (silent-OK was
+   the reported hazard, issue #119). Structural orders — `::recency` and
+   `<field> [DESC]` — are honored in **every** mode: they sort by data the
+   mode's score does not contain. Note the display/order split: rows always
+   *show* the mode's score even when a structural order re-sorts them.
+   (This supersedes the earlier blanket "explicit `ORDER BY` is ignored in
+   hybrid": that holds for score-based ops only — every cell above is
+   pinned by the `order_by_precedence_matrix_matches_spec` test.)
 6. **Offset / Limit** — `OFFSET n` skips the first `n` rows after ordering;
    then keep the first N (or the kNN/BM25 `k` cap, whichever is smallest) of
    what remains (issues #93/#94).

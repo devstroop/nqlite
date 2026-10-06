@@ -95,6 +95,57 @@ are removed in one step, so the audit trail stays consistent.
 
 ---
 
+## 4. Re-ranking & feedback recipes (post-#93)
+
+### Restrict the pool first, then score
+
+`ORDER BY ::score` ranks *the scan* — there is no candidate-set concept
+(pool-by-design). The rerank recipe is therefore **restrict first, score
+second**:
+
+```sql
+-- the retriever's candidates are keyed by a body field:
+SELECT * FROM doc
+    WHERE topic IN ["rust", "wasm"]     -- server-side pool (#93's IN)
+    ORDER BY ::score
+    LIMIT 2;
+```
+
+`IN` makes the restriction server-side whenever the pool carries a body key
+(the `WHERE topic = …` + client-intersect workaround from exp02 still works
+and still scales to pools keyed by anything else). Retriever pools keyed by
+**RecordId** — the common case, since kNN returns ids — have no id predicate
+yet: intersect the id set client-side, or use `WHERE id IN [...]` once #128
+lands (it turns this recipe into one query). Either way the rule is the
+same: `::score` over an unrestricted table is `::score` over *every* row.
+
+### Which feedback operator reads what
+
+After #85 the three operators are sign-consistent but they do **not** read
+the same fields — an explicit `weight` splits them by design:
+
+| operator | reads | explicit `weight` | `value` |
+|---|---|---|---|
+| `::score` | edge `weight` (fallback: signed `value`, then `1.0`) | **overrides `value`** — magnitude *and* sign come from `weight` | used only when `weight` is absent |
+| `::votes` | edge `value` (`+1` / `-1` counts) | **ignored** | the only input |
+| `::feedback` | edge `value` sign × time decay | **ignored** | the only input |
+
+Recipes:
+
+- plain up/down: `SET value = 1` / `SET value = -1` — since #85 a bare
+  `value = -1` already *lowers* `::score` (weight derives from value).
+- confidence-weighted score without changing the vote count:
+  `(agent) -[:voted {value: 1, weight: 0.3}]-> (doc:x)` — `::score` sees the
+  0.3, `::votes` still counts exactly one upvote, `::feedback` still decays
+  its `+1`.
+- never set the two to opposite signs unless you mean it: `::score` follows
+  `weight`, the other two follow `value` — they *will* disagree by design.
+
+These tables are pinned by tests that run in CI: the full mode matrix is
+`order_by_precedence_matrix_matches_spec`, the pool recipe is
+`rerank_pool_recipe_scores_only_the_pool`, and the weight/value split is
+`feedback_weight_and_value_disagree_by_design`.
+
 ## Why the engine stays deterministic while the agent learns
 
 The line between "agent" and "engine" is sharp by design:
