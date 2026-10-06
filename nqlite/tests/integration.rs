@@ -454,3 +454,45 @@ fn nql_memory_blocks_end_to_end() {
         "archival note exists in its own store"
     );
 }
+
+#[test]
+fn memory_context_resets_between_plans() {
+    // Contract for issue #87 (spec §2.8): a plan ALWAYS starts at the root —
+    // `MEMORY` never leaks across plan boundaries. Over nql-server each
+    // protocol line is one plan, so a bare `MEMORY ledger;` line is a no-op
+    // for the next line and an unprefixed write silently targets root.
+    let mut db = Database::new(Store::default());
+
+    // Plan 1: write into the ledger memory (MEMORY shares the line).
+    db.execute(&parse("MEMORY ledger; CREATE TABLE note;").unwrap())
+        .expect("plan 1");
+    db.execute(&parse("MEMORY ledger; INSERT INTO note:1 { \"x\": 1 };").unwrap())
+        .expect("plan 1 write");
+
+    // Plan 2: a bare MEMORY line (the footgun) ...
+    db.execute(&parse("MEMORY ledger;").unwrap())
+        .expect("plan 2");
+    // ... then an UNPREFIXED write: it must land in ROOT, not the ledger.
+    db.execute(&parse("INSERT INTO note:2 { \"x\": 2 };").unwrap())
+        .expect("plan 3 root write");
+
+    // Root sees only the unprefixed write.
+    let root = db.execute(&parse("SELECT * FROM note;").unwrap()).unwrap();
+    let root_ids: Vec<_> = root[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(root_ids, ["note:2"], "unprefixed plan wrote to root");
+
+    // The ledger still holds only its own write.
+    let ledger = db
+        .execute(&parse("MEMORY ledger; SELECT * FROM note;").unwrap())
+        .unwrap();
+    let ledger_ids: Vec<_> = ledger[0]
+        .rows
+        .iter()
+        .map(|r| r.record.id.to_string())
+        .collect();
+    assert_eq!(ledger_ids, ["note:1"], "ledger unaffected by root write");
+}

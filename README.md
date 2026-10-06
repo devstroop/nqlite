@@ -150,6 +150,17 @@ cargo run -q -p nql-mcp -- --db memory.nql   # persistent
 `nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
 `relate`, `select`, `match_path`, `forget`) with deterministic JSON results.
 
+Or speak the line protocol directly (`nql-server`, TCP or stdio) — **each line
+is its own plan starting at the root store**, so `MEMORY` must prefix every
+statement that belongs to a memory block; a bare `MEMORY core;` line does not
+carry over to the next line (an unprefixed write after it silently hits root
+and answers `OK`):
+
+```bash
+printf 'MEMORY core; CREATE TABLE note; MEMORY core; INSERT INTO note:1 { "text": "x" };\nMEMORY core; SELECT * FROM note;\n' \
+  | cargo run -q -p nql-server -- --stdio
+```
+
 Or in Rust, programmatically:
 
 ```rust
