@@ -165,6 +165,8 @@ impl Ctx {
             // snapshots are replay-only and never reach analysis.
             Statement::PruneHistory => Ok(stmt.clone()),
             Statement::Snapshot(_) => Ok(stmt.clone()),
+            // Delta read (issue #118): read-only, validates nothing.
+            Statement::HistorySince(_) => Ok(stmt.clone()),
         }
     }
 }

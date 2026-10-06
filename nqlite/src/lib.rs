@@ -155,6 +155,7 @@ fn is_mutating(stmt: &Statement) -> bool {
             | Statement::Match(_)
             | Statement::MatchCount(_)
             | Statement::Closure(_)
+            | Statement::HistorySince(_)
             | Statement::Snapshot(_)
             | Statement::ContextReset
     )

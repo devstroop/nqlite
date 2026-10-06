@@ -224,11 +224,21 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("prune") => self.parse_prune(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("history") => self.parse_history(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET, PRUNE), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET, PRUNE, HISTORY), found {}",
                 describe(other)
             ))),
         }
+    }
+
+    /// `HISTORY SINCE <ts>` — exact delta read (issue #118): every mutation
+    /// strictly after the cutoff (rows AND edges + tombstones), for sync
+    /// without two full `AS OF` replays. Read-only; never WAL'd.
+    fn parse_history(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("history", "HISTORY")?;
+        self.expect_keyword("since", "SINCE after HISTORY")?;
+        Ok(Statement::HistorySince(self.expect_int("SINCE timestamp")?))
     }
 
     /// `PRUNE HISTORY` — compact the mutation history into a snapshot at the

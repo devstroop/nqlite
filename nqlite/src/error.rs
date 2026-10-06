@@ -26,11 +26,12 @@ pub enum Error {
     #[error("`MEMORY {name}` must run inside a plan to switch context")]
     MemoryWithoutContext { name: String },
 
-    /// A temporal read (`AS OF`) asked for a timestamp earlier than the
-    /// store's history snapshot: compaction (`PRUNE HISTORY`, issue #95)
-    /// dropped the mutations that would reconstruct it.
+    /// A temporal read (`AS OF` or `HISTORY SINCE`) asked for a timestamp
+    /// earlier than the store's history snapshot: compaction
+    /// (`PRUNE HISTORY`, issue #95) dropped the mutations that would answer
+    /// it.
     #[error(
-        "history before ts {pruned_through} was compacted (PRUNE HISTORY); AS OF timestamps earlier than the snapshot are no longer available"
+        "history before ts {pruned_through} was compacted (PRUNE HISTORY); AS OF / HISTORY SINCE timestamps earlier than the snapshot are no longer available"
     )]
     HistoryPruned { pruned_through: i64 },
 

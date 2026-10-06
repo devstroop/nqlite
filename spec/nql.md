@@ -20,7 +20,7 @@ are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
 statement      = create_table | insert | relate | select | match | closure | memory | forget
-               | prune ;
+               | prune | history ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -40,6 +40,8 @@ forget         = 'FORGET' recordid ;
 memory         = 'MEMORY' ident ;
 
 prune          = 'PRUNE' 'HISTORY' ;
+
+history        = 'HISTORY' 'SINCE' int ;
 
 match          = 'MATCH' '(' recordid ')' path_step+ [ 'AS OF' int ] [ 'COUNT' ] ;
 closure        = 'CLOSURE' '(' recordid ')' path_step+ [ 'AS OF' int ] ;
@@ -99,6 +101,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; paginates (`OFFSET`/`LIMIT`); `COUNT(*)` counts instead of listing; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 | `PRUNE HISTORY` | Compacts the mutation history into a snapshot at the current clock: bounded growth, cheap `AS OF` from the snapshot onward; `AS OF` earlier than the snapshot errors (`HistoryPruned`). Applies to MEMORY blocks too (issue #95). |
+| `HISTORY SINCE <ts>` | Exact mutation delta since the cutoff — one row per CREATE/INSERT/RELATE/FORGET with its subject ids (rows AND edges + tombstones): the sync read that a two-`AS OF` diff cannot give you (issue #118). |
 | `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
 
 ### 2.3 SELECT pipeline (fixed order)
@@ -261,6 +264,18 @@ snapshot). Semantics:
   by a binary with this feature cannot be opened by older binaries (the
   snapshot entry is a new statement variant); unpruned stores decode
   unchanged.
+- **Delta reads (`HISTORY SINCE <ts>`, issue #118):** every mutation strictly
+  after the cutoff, in append (ts-ascending) order — one result row per entry:
+  `{ ts, kind, …subjects }` where `kind` ∈ `CREATE` (table + optional `dim`),
+  `INSERT` / `FORGET` (record `id`), `RELATE` (`from`, `to`, edge `name`).
+  Rows **and** edges in one read: a state-diff of two `AS OF` reads is blind
+  to edge-only mutations (a `RELATE` between existing records changes no
+  rows) — exactly what a sync consumer must not miss. Exclusive cutoff
+  (`ts > since`); an empty result means nothing changed; read-only (never
+  WAL'd); runs inside a `MEMORY` block against that block's own history;
+  honors the `PRUNE HISTORY` retention horizon (`HistoryPruned` below the
+  snapshot, and snapshot entries themselves are never reported as
+  mutations).
 
 ### 2.8 Memory blocks (`MEMORY <name>`)
 

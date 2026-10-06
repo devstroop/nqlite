@@ -44,6 +44,9 @@ pub enum QueryKind {
     Match(MatchPath),
     /// A `CLOSURE` transitive traversal (with the path that was walked).
     Closure(MatchPath),
+    /// A `HISTORY SINCE <ts>` delta read (issue #118) — one row per mutation
+    /// after the cutoff (rows AND edges), labeled with the cutoff.
+    History { since: i64 },
 }
 
 /// The result of one read statement (`SELECT` or `MATCH`) inside a plan.
@@ -147,6 +150,16 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
         Statement::Snapshot(state) => {
             *store = state.as_ref().clone().into_store();
             Ok(None)
+        }
+        // Exact delta read (issue #118): every mutation strictly after the
+        // cutoff, as one row per entry — the sync consumer's alternative to
+        // two full `AS OF` replays (and blind to nothing: edges included).
+        Statement::HistorySince(since) => {
+            let rows = history_since(store, *since)?;
+            Ok(Some(QueryResult {
+                kind: QueryKind::History { since: *since },
+                rows,
+            }))
         }
         Statement::CreateTable { table, vector_dim } => {
             // Declaring a table with a dim sets `vector_dims[table]`;
@@ -444,15 +457,20 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
 /// executed the same way it originally was — so the view is a pure function
 /// of `(store.history, cutoff)` (or an [`Error::HistoryPruned`] when a
 /// compaction snapshot postdates the cutoff, issue #95).
+/// The timestamp of the history-compaction snapshot, when one exists
+/// (issues #95/#118): temporal reads below this horizon are unavailable —/// the pruned prefix cannot be reconstructed.
+fn compaction_horizon(store: &Store) -> Option<i64> {
+    store
+        .history
+        .iter()
+        .find_map(|(ts, stmt)| matches!(stmt, Statement::Snapshot(_)).then_some(*ts))
+}
+
 fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
     // Compacted history (issue #95): a cutoff before the snapshot cannot be
     // reconstructed — the pruned prefix is gone. Fail loudly rather than
     // returning a partial (declarations-only) view.
-    if let Some(snap_ts) = store
-        .history
-        .iter()
-        .find_map(|(ts, stmt)| matches!(stmt, Statement::Snapshot(_)).then_some(*ts))
-    {
+    if let Some(snap_ts) = compaction_horizon(store) {
         if cutoff < snap_ts {
             return Err(Error::HistoryPruned {
                 pruned_through: snap_ts,
@@ -503,6 +521,89 @@ fn prune_history(store: &mut Store) {
     let mut history = decls;
     history.push((store.clock, Statement::Snapshot(Box::new(state))));
     store.history = history;
+}
+
+/// `HISTORY SINCE <ts>` (issue #118): every mutation strictly after the
+/// cutoff, in append (ts-ascending) order — one row per entry carrying the
+/// mutation kind and its subject ids, so a sync consumer sees changed rows
+/// **and** changed edges (plus tombstones) in one read instead of diffing
+/// two full `AS OF` replays — a row-diff is blind to edge-only mutations.
+///
+/// Pure function of `(history, since)`: append-only order, deterministic
+/// kinds/subjects. The `PRUNE HISTORY` retention horizon applies (a cutoff
+/// below the snapshot cannot be answered — same `HistoryPruned` contract as
+/// `AS OF`), and snapshot entries themselves are compaction bookkeeping,
+/// never reported as mutations. Scoped stores (MEMORY blocks) return their
+/// own deltas via the usual context routing.
+fn history_since(store: &Store, since: i64) -> Result<Vec<ScoredRecord>> {
+    if let Some(snap_ts) = compaction_horizon(store) {
+        if since < snap_ts {
+            return Err(Error::HistoryPruned {
+                pruned_through: snap_ts,
+            });
+        }
+    }
+    let mut rows = Vec::new();
+    for (ts, stmt) in &store.history {
+        if *ts <= since {
+            continue;
+        }
+        let mut body = BTreeMap::new();
+        body.insert("ts".into(), Value::Int(*ts));
+        let kind = match stmt {
+            Statement::CreateTable { table, vector_dim } => {
+                body.insert("table".into(), Value::Str(table.clone()));
+                if let Some(dim) = vector_dim {
+                    body.insert("dim".into(), Value::Int(*dim as i64));
+                }
+                "CREATE"
+            }
+            Statement::Insert(rec) => {
+                body.insert("id".into(), Value::Str(rec.id.to_string()));
+                "INSERT"
+            }
+            Statement::Relate(edge) => {
+                body.insert("from".into(), Value::Str(edge.from.to_string()));
+                body.insert("to".into(), Value::Str(edge.to.to_string()));
+                body.insert("name".into(), Value::Str(edge.name.clone()));
+                "RELATE"
+            }
+            Statement::Forget { id } => {
+                body.insert("id".into(), Value::Str(id.to_string()));
+                "FORGET"
+            }
+            // Compaction bookkeeping (issue #95): not a mutation — the
+            // horizon guard above already covered its region.
+            Statement::Snapshot(_) => continue,
+            // Unreachable in a well-formed history (only the four mutations
+            // above are ever `log_mutation`d) — labeled deterministically
+            // instead of dropped, should that ever change.
+            Statement::Memory { name } => {
+                body.insert("name".into(), Value::Str(name.clone()));
+                "MEMORY"
+            }
+            Statement::PruneHistory => "PRUNE",
+            Statement::HistorySince(since) => {
+                body.insert("since".into(), Value::Int(*since));
+                "HISTORY_SINCE"
+            }
+            Statement::ContextReset => "CONTEXT_RESET",
+            Statement::Select(_) => "SELECT",
+            Statement::Match(_) | Statement::MatchCount(_) => "MATCH",
+            Statement::Closure(_) => "CLOSURE",
+        };
+        body.insert("kind".into(), Value::Str(kind.into()));
+        rows.push(ScoredRecord {
+            record: Record {
+                id: RecordId::new("history", Id::Str(ts.to_string())),
+                body,
+                embedding: None,
+                created_at: *ts,
+            },
+            score: *ts as f32,
+        });
+    }
+    Ok(rows)
 }
 
 /// Execute a [`MatchPath`] against `store`.
@@ -2555,6 +2656,147 @@ mod tests {
             .collect();
         // t:1 is the nearest neighbor but t:2 has the smaller seq.
         assert_eq!(ids, ["t:2", "t:1"]);
+    }
+
+    #[test]
+    fn history_since_reports_exact_deltas_including_edges() {
+        // Timeline: create=1 (with dim), t:1=2, t:2=3, RELATE=4 (edge-only!),
+        // FORGET t:2=5 (removes a row AND t:1's incident edge). A row-state
+        // diff of two AS OF reads would see NOTHING at ts4 — this must.
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record("t:1", BTreeMap::new(), Some(vec![1.0, 0.0]))),
+            Statement::Insert(record("t:2", BTreeMap::new(), Some(vec![0.0, 1.0]))),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("t:1").unwrap(),
+                name: "refs".into(),
+                to: RecordId::parse("t:2").unwrap(),
+                created_at: 0,
+                weight: None,
+                props: BTreeMap::new(),
+            }),
+            Statement::Forget {
+                id: RecordId::parse("t:2").unwrap(),
+            },
+        ])
+        .unwrap();
+
+        let res = db.execute(&[Statement::HistorySince(0)]).unwrap();
+        assert!(matches!(res[0].kind, QueryKind::History { since: 0 }));
+        let kinds: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.record.id.to_string(),
+                    format!("history:{}", {
+                        match r.record.body.get("ts") {
+                            Some(Value::Int(t)) => *t,
+                            other => panic!("ts field, got {other:?}"),
+                        }
+                    })
+                );
+                match r.record.body.get("kind") {
+                    Some(Value::Str(k)) => k.clone(),
+                    other => panic!("kind field, got {other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(kinds, ["CREATE", "INSERT", "INSERT", "RELATE", "FORGET"]);
+        // CREATE carries its declaration (table + dim) …
+        assert_eq!(
+            res[0].rows[0].record.body.get("table"),
+            Some(&Value::Str("t".into()))
+        );
+        assert_eq!(res[0].rows[0].record.body.get("dim"), Some(&Value::Int(2)));
+        // … and the edge-only RELATE carries both endpoints (issue #118's
+        // correctness gap — a row diff would have missed this entry) …
+        let rel = &res[0].rows[3].record.body;
+        assert_eq!(rel.get("from"), Some(&Value::Str("t:1".into())));
+        assert_eq!(rel.get("to"), Some(&Value::Str("t:2".into())));
+        assert_eq!(rel.get("name"), Some(&Value::Str("refs".into())));
+        // … and FORGET is a tombstone for the removed record.
+        assert_eq!(
+            res[0].rows[4].record.body.get("id"),
+            Some(&Value::Str("t:2".into()))
+        );
+        // The score mirrors the mutation ts (display only; body.ts is i64).
+        assert_eq!(res[0].rows[3].score, 4.0);
+
+        // Exclusive cutoff: strictly-after semantics.
+        let since3 = db.execute(&[Statement::HistorySince(3)]).unwrap();
+        assert_eq!(since3[0].rows.len(), 2, "RELATE + FORGET only");
+        // At/after the last mutation: an empty delta, not an error.
+        let tail = db.execute(&[Statement::HistorySince(5)]).unwrap();
+        assert!(tail[0].rows.is_empty());
+        // The read is side-effect free.
+        let cur = db
+            .execute(&[Statement::Select(Select { ..select("t") })])
+            .unwrap();
+        assert_eq!(cur[0].rows.len(), 1, "only t:1 survives the FORGET");
+    }
+
+    #[test]
+    fn history_since_respects_compaction_horizon() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::new(), None)),
+            Statement::Insert(record("t:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        db.execute(&[Statement::PruneHistory]).unwrap(); // snapshot @3
+        db.execute(&[Statement::Insert(record("t:3", BTreeMap::new(), None))])
+            .unwrap(); // ts4
+
+        // Cutoff below the snapshot: mutations (since, 3] are gone — the
+        // same loud retention contract as AS OF, never a partial delta.
+        let err = db.execute(&[Statement::HistorySince(2)]);
+        assert!(
+            matches!(err, Err(Error::HistoryPruned { pruned_through: 3 })),
+            "got {err:?}"
+        );
+
+        // From the horizon on: the delta works, and the snapshot itself is
+        // bookkeeping — never reported as a mutation.
+        let ok = db.execute(&[Statement::HistorySince(3)]).unwrap();
+        assert!(matches!(ok[0].kind, QueryKind::History { since: 3 }));
+        assert_eq!(ok[0].rows.len(), 1, "only the post-prune INSERT: {ok:?}");
+        assert_eq!(ok[0].rows[0].record.id.to_string(), "history:4");
+    }
+
+    #[test]
+    fn history_since_scopes_to_memory_blocks() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("root_t", None), // root clock 1
+            Statement::Memory { name: "blk".into() },
+            create("inner", None), // blk clock 1 (own history)
+            Statement::Insert(record("inner:1", BTreeMap::new(), None)), // blk 2
+        ])
+        .unwrap();
+
+        // Inside the block: only the block's mutations (per-block sync).
+        let blk = db
+            .execute(&[
+                Statement::Memory { name: "blk".into() },
+                Statement::HistorySince(0),
+            ])
+            .unwrap();
+        assert_eq!(blk[0].rows.len(), 2, "block CREATE + INSERT: {blk:?}");
+        assert_eq!(
+            blk[0].rows[1].record.body.get("id"),
+            Some(&Value::Str("inner:1".into()))
+        );
+
+        // At root: only root's history — MEMORY statements never log.
+        let root = db.execute(&[Statement::HistorySince(0)]).unwrap();
+        assert_eq!(root[0].rows.len(), 1, "root CREATE only: {root:?}");
+        assert_eq!(
+            root[0].rows[0].record.body.get("table"),
+            Some(&Value::Str("root_t".into()))
+        );
     }
 
     #[test]
