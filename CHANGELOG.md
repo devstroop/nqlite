@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- nql comments per spec §1: `--` to end of line and `/* */` block comments
+  are skipped by the lexer (previously both were lex errors, so spec §6's own
+  examples failed to parse); unterminated block comments report a positioned
+  error. ([#86](https://github.com/devstroop/nqlite/issues/86))
 - Hybrid retrieval: `WHERE ::bm25(field, "q") AND vector::similarity(embedding,
   $v) AND k = N` (clauses in either order) — lexical + vector signals fused
   with deterministic reciprocal-rank fusion (RRF); `ORDER BY` ignored in
