@@ -39,15 +39,20 @@ jobs:
   determinism-msrv:
     name: determinism (pinned dev-tree MSRV)
     runs-on: ubuntu-latest
+    env:
+      # Dev-tree MSRV pin: the lowest rustc that can build the whole workspace
+      # against a FRESH dependency resolution (Cargo.lock is not committed).
+      # Bump when `cargo check` reports a transitive dep needs more — the
+      # error names the exact version required (e.g. rmcp 3.1.1 -> 1.88,
+      # uuid 1.27.0 via rmcp -> 1.89). Consumer-facing MSRV (rust-version
+      # 1.82) stays lower: library users never build rmcp.
+      MSRV_PIN: "1.89.0"
     steps:
       - uses: actions/checkout@v4
       # rustup is preinstalled on runners; the dtolnay composite action's
       # step env fails for pinned versions on the current runner, so
-      # install directly and invoke via `cargo +<toolchain>`. The pinned
-      # version is the dev-tree MSRV: rmcp 3.1.1 (nql-mcp) requires rustc
-      # 1.88. Consumer-facing MSRV (rust-version 1.82) stays lower: library
-      # users never build rmcp.
+      # install directly and invoke via `cargo +<toolchain>`.
       - name: install pinned toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal
+        run: rustup toolchain install "$MSRV_PIN" --profile minimal
       - name: check-shipped-artifacts
-        run: cargo +1.88.0 check --workspace --lib --bins
+        run: cargo +"$MSRV_PIN" check --workspace --lib --bins
