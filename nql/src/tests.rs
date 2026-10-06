@@ -583,6 +583,57 @@ fn salience_weighted_order_parses_and_validates() {
 }
 
 #[test]
+fn id_predicate_parses_and_validates() {
+    // Same predicate grammar as fields; `id` binds to the record identity
+    // (issue #128).
+    let plan = parse("SELECT * FROM t WHERE id = \"doc:7\"").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::FieldEquals {
+            field: "id".into(),
+            value: Value::Str("doc:7".into()),
+        })
+    );
+
+    let plan = parse("SELECT * FROM t WHERE id != \"doc:7\"").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        s.filter,
+        Some(Filter::FieldCmp { op: CmpOp::Ne, .. })
+    ));
+
+    let plan = parse("SELECT * FROM t WHERE id IN [\"a:1\", \"b:2\"] AND seq > 5").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        s.filter,
+        Some(Filter::And(ref terms))
+            if terms.len() == 2
+                && matches!(terms[0], Filter::FieldIn { .. })
+                && matches!(terms[1], Filter::FieldCmp { op: CmpOp::Gt, .. })
+    ));
+
+    // Positioned errors: ordered forms (ids are not an ordered value) and
+    // non-string literals (the comparison is against the `table:id` string).
+    for bad in [
+        "SELECT * FROM t WHERE id > \"doc:7\"",
+        "SELECT * FROM t WHERE id <= \"doc:7\"",
+        "SELECT * FROM t WHERE id BETWEEN \"a:1\" AND \"b:2\"",
+        "SELECT * FROM t WHERE id = 7",
+        "SELECT * FROM t WHERE id != 7",
+        "SELECT * FROM t WHERE id IN [1, 2]",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn where_and_conjunction_parses() {
     // N-ary all-of over the combinable subset (issue #125).
     let plan = parse("SELECT * FROM t WHERE a = 1 AND b > 2").unwrap();

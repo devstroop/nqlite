@@ -917,7 +917,44 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
         // All-of over terms (issue #125): recursion keeps each term's own
         // semantics (missing-field rules, IS NOT NULL on embeddings).
         Some(Filter::And(terms)) => terms.iter().all(|t| matches_filter(rec, Some(t))),
+        // `id` pseudo-field (issue #128): bound to the record's own identity
+        // — a body key named `id` never shadows it.
+        Some(f) if predicate_field(f) == Some("id") => record_id_matches(rec, f),
         Some(f) => matches_field_pred(&rec.body, f),
+    }
+}
+
+/// The body field a field-level predicate reads (`None` for the non-field
+/// filters: embedding presence, BM25, conjunctions).
+fn predicate_field(filter: &Filter) -> Option<&str> {
+    match filter {
+        Filter::FieldEquals { field, .. }
+        | Filter::FieldCmp { field, .. }
+        | Filter::FieldIn { field, .. }
+        | Filter::FieldBetween { field, .. } => Some(field),
+        _ => None,
+    }
+}
+
+/// The `id` pseudo-field (issue #128): field predicates on `id` compare
+/// against the record's own identity in display form (`table:id`) — the
+/// rerank-pool predicate (`WHERE id IN [...]`). `!=` is the exact complement
+/// of `=` (the #93 rule). Ordered forms are parse-rejected for `id`; an
+/// IR-injected one gets a non-match rather than an invented order. Only
+/// reached for RECORD filters — edge filters have no record identity, so
+/// `id` there falls through to an ordinary prop lookup.
+fn record_id_matches(rec: &Record, filter: &Filter) -> bool {
+    let me = rec.id.to_string();
+    let is_me = |v: &Value| matches!(v, Value::Str(s) if *s == me);
+    match filter {
+        Filter::FieldEquals { value, .. } => is_me(value),
+        Filter::FieldCmp {
+            op: CmpOp::Ne,
+            value,
+            ..
+        } => !is_me(value),
+        Filter::FieldIn { values, .. } => values.iter().any(is_me),
+        _ => false,
     }
 }
 
@@ -3211,6 +3248,145 @@ mod tests {
         assert_eq!(reach(vec![conf_term(CmpOp::Ge, 0.5)]), ["m:1", "m:3"]);
         // Nothing satisfies both: high confidence AND kind x at > 0.9.
         assert!(reach(vec![conf_term(CmpOp::Gt, 0.9), kind_term("x")]).is_empty());
+    }
+
+    #[test]
+    fn id_predicate_binds_to_record_identity() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+            // A body key named `id` must NOT shadow the pseudo-field
+            // (issue #128's documented precedence).
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("b".into(), str_("y")), ("id".into(), str_("t:9"))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:3",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let id = |v: &str| Value::Str(v.into());
+
+        // The rerank-pool predicate: exactly the requested identities.
+        assert_eq!(
+            ids_where(Filter::FieldIn {
+                field: "id".into(),
+                values: vec![id("t:1"), id("t:3")],
+            }),
+            ["t:1", "t:3"]
+        );
+        // Exact identity …
+        assert_eq!(
+            ids_where(Filter::FieldEquals {
+                field: "id".into(),
+                value: id("t:2"),
+            }),
+            ["t:2"]
+        );
+        // … pseudo-field wins: t:2's BODY id ("t:9") is not matchable —
+        // no record's identity is t:9.
+        assert!(ids_where(Filter::FieldEquals {
+            field: "id".into(),
+            value: id("t:9"),
+        })
+        .is_empty());
+        // `!=` is the exact complement of `=`.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "id".into(),
+                op: CmpOp::Ne,
+                value: id("t:1"),
+            }),
+            ["t:2", "t:3"]
+        );
+        // Composes with #125 conjunctions.
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldIn {
+                    field: "id".into(),
+                    values: vec![id("t:1"), id("t:3")],
+                },
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: str_("x"),
+                },
+            ])),
+            ["t:1", "t:3"]
+        );
+    }
+
+    #[test]
+    fn id_on_edge_filters_is_an_ordinary_prop() {
+        // Edges have no record identity: `id` in an edge-prop filter falls
+        // through to a normal prop lookup (issue #128, documented in §2.3).
+        let mut db = Database::default();
+        let edge = |to: &str, id_prop: Option<&str>| RelationEdge {
+            from: RecordId::parse("s:1").unwrap(),
+            name: "e".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: id_prop
+                .map(|v| BTreeMap::from([("id".into(), Value::Str(v.into()))]))
+                .unwrap_or_default(),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("s:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:2", BTreeMap::new(), None)),
+            Statement::Relate(edge("m:1", Some("custom"))),
+            Statement::Relate(edge("m:2", None)),
+        ])
+        .unwrap();
+        let mut reach = |value: &str| {
+            let res = db
+                .execute(&[Statement::Match(MatchPath {
+                    start: RecordId::parse("s:1").unwrap(),
+                    steps: vec![MatchStep {
+                        direction: MatchDirection::Out,
+                        name: "e".into(),
+                        edge_props: Some(Filter::FieldEquals {
+                            field: "id".into(),
+                            value: Value::Str(value.into()),
+                        }),
+                    }],
+                    as_of: None,
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Ordinary prop lookup: only the edge carrying that prop matches.
+        assert_eq!(reach("custom"), ["m:1"]);
+        // No identity binding on edges: the start's own id matches nothing.
+        assert!(reach("s:1").is_empty());
     }
 
     #[test]
