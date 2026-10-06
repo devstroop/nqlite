@@ -101,19 +101,54 @@ impl<'a> Lexer<'a> {
         NqlError::syntax(msg.into(), self.line, self.col)
     }
 
-    fn skip_ws(&mut self) {
-        while let Some(b) = self.peek() {
-            match b {
-                b' ' | b'\t' | b'\n' | b'\r' => {
+    /// Skip whitespace and comments (spec §1: `--` to end of line, `/* */`).
+    ///
+    /// Line comments are only recognized when the `--` sequence is reached in
+    /// skip position, so `-1` (negative number) and `->` (arrow) still lex as
+    /// tokens — the `-` branch in [`Self::next_token`] runs only when the
+    /// first `-` survives here.
+    fn skip_ws(&mut self) -> Result<(), NqlError> {
+        loop {
+            match (self.peek(), self.peek2()) {
+                (Some(b' ' | b'\t' | b'\n' | b'\r'), _) => {
                     self.bump();
                 }
-                _ => break,
+                // `--` line comment: consume to end of line (or EOF).
+                (Some(b'-'), Some(b'-')) => {
+                    while let Some(b) = self.peek() {
+                        if b == b'\n' {
+                            break;
+                        }
+                        self.bump();
+                    }
+                }
+                // `/* ... */` block comment: non-nested, error when unterminated.
+                (Some(b'/'), Some(b'*')) => {
+                    self.bump(); // '/'
+                    self.bump(); // '*'
+                    loop {
+                        match self.peek() {
+                            None => {
+                                return Err(self.err("unterminated block comment (expected `*/`)"))
+                            }
+                            Some(b'*') if self.peek2() == Some(b'/') => {
+                                self.bump(); // '*'
+                                self.bump(); // '/'
+                                break;
+                            }
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                }
+                _ => return Ok(()),
             }
         }
     }
 
     fn next_token(&mut self) -> Result<Spanned, NqlError> {
-        self.skip_ws();
+        self.skip_ws()?;
         let line = self.line;
         let col = self.col;
         let tok = match self.peek() {
