@@ -109,11 +109,17 @@ fn closure_stmt() -> Statement {
     })
 }
 
-fn parse_args() -> (usize, usize, u64) {
+fn parse_args() -> (usize, usize, u64, bool, usize, usize, usize, usize, usize) {
     let args: Vec<String> = std::env::args().collect();
     let mut rows = 1000;
     let mut knn = 100;
     let mut seed = SEED;
+    let mut recall = false;
+    let mut queries = 20;
+    let mut dim = 64;
+    let mut hnsw_m = 16;
+    let mut hnsw_efc = 200;
+    let mut hnsw_ef = 64;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -129,15 +135,164 @@ fn parse_args() -> (usize, usize, u64) {
                 i += 1;
                 seed = args[i].parse().expect("--seed <n>");
             }
-            other => panic!("unknown flag `{other}` (--rows --knn --seed)"),
+            "--recall" => {
+                recall = true;
+            }
+            "--queries" => {
+                i += 1;
+                queries = args[i].parse().expect("--queries <n>");
+            }
+            "--dim" => {
+                i += 1;
+                dim = args[i].parse().expect("--dim <n>");
+            }
+            "--hnsw-m" => {
+                i += 1;
+                hnsw_m = args[i].parse().expect("--hnsw-m <n>");
+            }
+            "--hnsw-efc" => {
+                i += 1;
+                hnsw_efc = args[i].parse().expect("--hnsw-efc <n>");
+            }
+            "--hnsw-ef" => {
+                i += 1;
+                hnsw_ef = args[i].parse().expect("--hnsw-ef <n>");
+            }
+            other => panic!(
+                "unknown flag `{other}` (--rows --knn --seed --recall --queries --dim --hnsw-m --hnsw-efc --hnsw-ef)"
+            ),
         }
         i += 1;
     }
-    (rows, knn, seed)
+    (
+        rows, knn, seed, recall, queries, dim, hnsw_m, hnsw_efc, hnsw_ef,
+    )
+}
+
+/// Quality mode (issue #96): recall@K of the approximate index against the
+/// **exact** brute-force top-k — the standard ANN metric. Ground truth is the
+/// exact index itself, so this measures approximation loss, not task quality.
+///
+/// Recall uses its OWN deterministic vector set (default dim 64 — the timing
+/// corpus's dim-8 uniform vectors are trivially exact for HNSW and would
+/// report a meaningless 1.0): ids `doc:i`, vectors from the same xorshift64*
+/// family, queries from a stream seeded apart from the corpus. Seeded index +
+/// seeded data => every number reproduces run-to-run.
+// Without the `hnsw` feature the m/efc/ef parameters are unused (nothing
+// builds an ANN index), hence the cfg_attr.
+#[cfg_attr(not(feature = "hnsw"), allow(unused_variables))]
+fn run_recall(rows: usize, queries: usize, dim: usize, m: usize, efc: usize, ef: usize) {
+    let mut report = serde_json::json!({
+        "db": "nqlite",
+        "rows": rows,
+        "dim": dim,
+        "recall_mode": true,
+        "queries": queries,
+        // Sanity anchor: exact vs itself is perfect by construction.
+        "exact_recall_at_10": 1.0,
+    });
+
+    #[cfg(feature = "hnsw")]
+    {
+        use nqlite::VectorIndex;
+
+        // Deterministic recall corpus: (id, vector) only — no text needed.
+        let mut cstate = SEED;
+        let vectors: Vec<(RecordId, Vec<f32>)> = (0..rows)
+            .map(|i| {
+                let v: Vec<f32> = (0..dim)
+                    .map(|_| (xorshift(&mut cstate) % 10_000) as f32 / 10_000.0)
+                    .collect();
+                (RecordId::new("doc", Id::Num(i as u64)), v)
+            })
+            .collect();
+
+        // Deterministic query stream, seeded apart from the corpus stream.
+        let mut qstate = SEED ^ 0xA5A5_A5A5_A5A5_A5A5;
+        let qvs: Vec<Vec<f32>> = (0..queries)
+            .map(|_| {
+                (0..dim)
+                    .map(|_| (xorshift(&mut qstate) % 10_000) as f32 / 10_000.0)
+                    .collect()
+            })
+            .collect();
+
+        let ks = [10usize, 50, 100];
+        let kmax = rows.min(*ks.iter().max().unwrap());
+        let mut exact = nqlite::BruteForceVectorIndex::default();
+        for (id, v) in &vectors {
+            exact.upsert(id.clone(), v.clone());
+        }
+        let exact_top: Vec<Vec<RecordId>> = qvs
+            .iter()
+            .map(|q| {
+                exact
+                    .search(q, kmax)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .collect();
+
+        let mut hnsw = nqlite::HnswVectorIndex::new(SEED, m, efc, ef);
+        for (id, v) in &vectors {
+            hnsw.upsert(id.clone(), v.clone());
+        }
+
+        let mut sums: BTreeMap<usize, f64> = BTreeMap::new();
+        for (qi, q) in qvs.iter().enumerate() {
+            let got: Vec<RecordId> = hnsw.search(q, kmax).into_iter().map(|(id, _)| id).collect();
+            for k in ks {
+                if k > kmax {
+                    continue;
+                }
+                let truth: std::collections::HashSet<&RecordId> =
+                    exact_top[qi][..k].iter().collect();
+                let hit = got[..k.min(got.len())]
+                    .iter()
+                    .filter(|id| truth.contains(*id))
+                    .count();
+                *sums.entry(k).or_insert(0.0) += hit as f64 / k as f64;
+            }
+        }
+        report["k_max"] = serde_json::json!(kmax);
+        for k in ks {
+            if let Some(sum) = sums.get(&k) {
+                report[format!("hnsw_recall_at_{k}")] =
+                    serde_json::json!(round4(sum / queries as f64));
+            }
+        }
+        report["hnsw_params"] =
+            serde_json::json!(format!("seed={SEED} m={m} ef_construction={efc} ef={ef}"));
+        report["hnsw_live"] = serde_json::json!(hnsw.len());
+    }
+    #[cfg(not(feature = "hnsw"))]
+    {
+        report["hnsw"] = serde_json::json!(
+            "disabled — build with `cargo run -p nql-bench --features hnsw -- --recall`"
+        );
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".into())
+    );
+}
+
+#[cfg(feature = "hnsw")]
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
 }
 
 fn main() {
-    let (rows, knn, _seed) = parse_args();
+    let (rows, knn, _seed, recall, queries, dim, hnsw_m, hnsw_efc, hnsw_ef) = parse_args();
+
+    // Quality mode (issue #96): print the recall report and exit — the
+    // timing scenarios below never run in this mode.
+    if recall {
+        run_recall(rows, queries, dim, hnsw_m, hnsw_efc, hnsw_ef);
+        return;
+    }
 
     let mut db = Database::new(Store::default());
     let records = corpus(rows);
