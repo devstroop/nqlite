@@ -535,6 +535,13 @@ pub enum Filter {
     /// [`Value::cmp_total`] (`lo <= value <= hi`); a record without the
     /// field never matches (issue #93).
     FieldBetween { field: String, lo: Value, hi: Value },
+    /// `WHERE t1 AND t2 [AND …]` — n-ary conjunction over the combinable
+    /// terms (field predicates + `IS NOT NULL`; scoring clauses — bm25/kNN —
+    /// keep their own forms, issue #125). All terms must hold; evaluated
+    /// per row / per edge with the same pure predicates (scan-side). A single
+    /// operator, so there is no precedence to define. Appended variant
+    /// (postcard-tag stable).
+    And(Vec<Filter>),
 }
 
 /// Comparison operators for [`Filter::FieldCmp`] (`!=`, `<`, `<=`, `>`, `>=`).

@@ -583,6 +583,98 @@ fn salience_weighted_order_parses_and_validates() {
 }
 
 #[test]
+fn where_and_conjunction_parses() {
+    // N-ary all-of over the combinable subset (issue #125).
+    let plan = parse("SELECT * FROM t WHERE a = 1 AND b > 2").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::And(vec![
+            Filter::FieldEquals {
+                field: "a".into(),
+                value: Value::Int(1),
+            },
+            Filter::FieldCmp {
+                field: "b".into(),
+                op: CmpOp::Gt,
+                value: Value::Int(2),
+            },
+        ]))
+    );
+
+    // `IS NOT NULL` is a combinable term too.
+    let plan = parse("SELECT * FROM t WHERE embedding IS NOT NULL AND seq >= 5").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        s.filter,
+        Some(Filter::And(ref terms))
+            if terms.len() == 2
+                && matches!(terms[0], Filter::HasEmbedding)
+                && matches!(terms[1], Filter::FieldCmp { op: CmpOp::Ge, .. })
+    ));
+
+    // BETWEEN's own `AND` binds first: (ts BETWEEN 1 AND 10) AND (group = "a").
+    let plan = parse("SELECT * FROM t WHERE ts BETWEEN 1 AND 10 AND group = \"a\"").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(matches!(
+        s.filter,
+        Some(Filter::And(ref terms))
+            if terms.len() == 2
+                && matches!(terms[0], Filter::FieldBetween { .. })
+                && matches!(terms[1], Filter::FieldEquals { .. })
+    ));
+
+    // Three terms stay n-ary (flattened, not nested).
+    let plan = parse("SELECT * FROM t WHERE a = 1 AND b = 2 AND c = 3").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert!(matches!(s.filter, Some(Filter::And(ref terms)) if terms.len() == 3));
+
+    // A single term is NOT wrapped — existing IR consumers see the same
+    // variants they always did.
+    let plan = parse("SELECT * FROM t WHERE a = 1").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.filter,
+        Some(Filter::FieldEquals {
+            field: "a".into(),
+            value: Value::Int(1),
+        })
+    );
+
+    // Edge-property filters share the conjunction grammar (issues #93/#125).
+    let plan = parse("MATCH (a:1) -> :e WHERE conf >= 0.5 AND kind = \"x\"").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match");
+    };
+    assert!(matches!(
+        p.steps[0].edge_props,
+        Some(Filter::And(ref terms)) if terms.len() == 2
+    ));
+
+    // Scoring clauses do not join conjunctions — pointed errors, not silent
+    // mis-parses; a dangling AND fails loudly.
+    for bad in [
+        "SELECT * FROM t WHERE ::bm25(text, \"q\") AND seq = 1",
+        "SELECT * FROM t WHERE seq = 1 AND ::bm25(text, \"q\")",
+        "SELECT * FROM t WHERE seq = 1 AND vector::similarity(embedding, [1.0, 0.0])",
+        "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0]) AND k = 5 AND seq = 1",
+        "SELECT * FROM t WHERE a = 1 AND",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn comparison_in_between_filters_parse() {
     let cases: &[(&str, Filter)] = &[
         (

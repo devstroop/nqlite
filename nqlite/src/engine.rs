@@ -821,6 +821,9 @@ fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
         // Embedding presence and BM25 scoring are not edge-props predicates;
         // the parser never produces them here. Defensive, not a panic.
         Some(Filter::HasEmbedding | Filter::Bm25 { .. }) => false,
+        // All-of over terms (issue #125): each term re-enters this fn, so a
+        // HasEmbedding term inside an And is still a non-match on an edge.
+        Some(Filter::And(terms)) => terms.iter().all(|t| matches_edge_props(edge, Some(t))),
         Some(f) => matches_field_pred(&edge.props, f),
     }
 }
@@ -911,6 +914,9 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
         None => true,
         Some(Filter::HasEmbedding) => rec.embedding.is_some(),
         Some(Filter::Bm25 { .. }) => true,
+        // All-of over terms (issue #125): recursion keeps each term's own
+        // semantics (missing-field rules, IS NOT NULL on embeddings).
+        Some(Filter::And(terms)) => terms.iter().all(|t| matches_filter(rec, Some(t))),
         Some(f) => matches_field_pred(&rec.body, f),
     }
 }
@@ -949,6 +955,9 @@ fn matches_field_pred(props: &BTreeMap<String, Value>, filter: &Filter) -> bool 
         }
         // Handled by the callers above — not body-value predicates.
         Filter::HasEmbedding | Filter::Bm25 { .. } => true,
+        // Reached only by direct calls (both wrappers intercept And first);
+        // recursion preserves all-of semantics on the props-only subset.
+        Filter::And(terms) => terms.iter().all(|t| matches_field_pred(props, t)),
     }
 }
 
@@ -3032,6 +3041,176 @@ mod tests {
         );
         assert!((by_id("doc:y") - 1.0).abs() < 1e-4, "{voted:?}");
         assert!((by_id("doc:z") - -1.0).abs() < 1e-4, "{voted:?}");
+    }
+
+    #[test]
+    fn where_and_requires_every_term() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("a".into(), num(1)), ("b".into(), str_("x"))]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("a".into(), num(1)), ("b".into(), str_("y"))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:3",
+                BTreeMap::from([("a".into(), num(0)), ("b".into(), str_("x"))]),
+                None,
+            )),
+            // No `a` at all: the missing-field rule applies per term.
+            Statement::Insert(record(
+                "t:4",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // All-of: only rows satisfying BOTH terms (t:2 fails b, t:3 fails a,
+        // t:4 lacks a — its term fails independently).
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldEquals {
+                    field: "a".into(),
+                    value: Value::Int(1),
+                },
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+            ])),
+            ["t:1"]
+        );
+        // Term order does not matter; `a >= 0` admits 0 (t:3) but excludes
+        // the field-less t:4.
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+                Filter::FieldCmp {
+                    field: "a".into(),
+                    op: CmpOp::Ge,
+                    value: Value::Int(0),
+                },
+            ])),
+            ["t:1", "t:3"]
+        );
+        // A term no record can satisfy (missing field) empties the AND.
+        assert!(ids_where(Filter::And(vec![
+            Filter::FieldEquals {
+                field: "missing".into(),
+                value: Value::Int(1),
+            },
+            Filter::FieldEquals {
+                field: "a".into(),
+                value: Value::Int(1),
+            },
+        ]))
+        .is_empty());
+        // IS NOT NULL composes with a predicate (only t:1 is embedded).
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::HasEmbedding,
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+            ])),
+            ["t:1"]
+        );
+    }
+
+    #[test]
+    fn where_and_filters_edge_props_all_of() {
+        // MATCH edge-prop filters accept the same conjunction (issues
+        // #93/#125): all-of against the edge's props.
+        let mut db = Database::default();
+        let edge = |to: &str, conf: f64, kind: &str| RelationEdge {
+            from: RecordId::parse("s:1").unwrap(),
+            name: "e".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: BTreeMap::from([
+                ("conf".into(), Value::Float(conf)),
+                ("kind".into(), Value::Str(kind.into())),
+            ]),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("s:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:2", BTreeMap::new(), None)),
+            Statement::Insert(record("m:3", BTreeMap::new(), None)),
+            Statement::Relate(edge("m:1", 0.9, "x")),
+            Statement::Relate(edge("m:2", 0.2, "x")),
+            Statement::Relate(edge("m:3", 0.9, "y")),
+        ])
+        .unwrap();
+        let mut reach = |terms: Vec<Filter>| {
+            let props = if terms.len() == 1 {
+                Some(terms.into_iter().next().unwrap())
+            } else {
+                Some(Filter::And(terms))
+            };
+            let res = db
+                .execute(&[Statement::Match(MatchPath {
+                    start: RecordId::parse("s:1").unwrap(),
+                    steps: vec![MatchStep {
+                        direction: MatchDirection::Out,
+                        name: "e".into(),
+                        edge_props: props,
+                    }],
+                    as_of: None,
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let conf_term = |op: CmpOp, v: f64| Filter::FieldCmp {
+            field: "conf".into(),
+            op,
+            value: Value::Float(v),
+        };
+        let kind_term = |k: &str| Filter::FieldEquals {
+            field: "kind".into(),
+            value: Value::Str(k.into()),
+        };
+
+        // All-of: high confidence AND kind x → only m:1 (m:2 fails conf,
+        // m:3 fails kind).
+        assert_eq!(
+            reach(vec![conf_term(CmpOp::Ge, 0.5), kind_term("x")]),
+            ["m:1"]
+        );
+        // Single term unchanged: high confidence → m:1 and m:3.
+        assert_eq!(reach(vec![conf_term(CmpOp::Ge, 0.5)]), ["m:1", "m:3"]);
+        // Nothing satisfies both: high confidence AND kind x at > 0.9.
+        assert!(reach(vec![conf_term(CmpOp::Gt, 0.9), kind_term("x")]).is_empty());
     }
 
     #[test]

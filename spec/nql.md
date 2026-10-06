@@ -46,10 +46,12 @@ history        = 'HISTORY' 'SINCE' int ;
 match          = 'MATCH' '(' recordid ')' path_step+ [ 'AS OF' int ] [ 'COUNT' ] ;
 closure        = 'CLOSURE' '(' recordid ')' path_step+ [ 'AS OF' int ] ;
 path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
-edge_props     = 'WHERE' predicate ;
+edge_props     = 'WHERE' conjunction ;
 
 select_list    = '*' | 'COUNT' '(' '*' ')' | ident (',' ident)* ;
-where_clause   = predicate | vector_knn | has_embedding | bm25 | hybrid ;
+where_clause   = conjunction | vector_knn | bm25 | hybrid ;
+conjunction    = term ( 'AND' term )* ;
+term           = predicate | has_embedding ;
 predicate      = field_equals | field_cmp | field_in | field_between ;
 field_equals   = ident '=' value ;
 field_cmp      = ident ('!=' | '<' | '<=' | '>' | '>=') value ;
@@ -122,6 +124,15 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
      `null` participates and ranks lowest. The order is proptest-pinned
      (reflexive, antisymmetric, transitive, never panics).
    - `embedding IS NOT NULL`: only records with vectors.
+   - **Conjunction** (issue #125): combinable terms compose with `AND` —
+     `field-predicates… AND embedding IS NOT NULL AND …`, n-ary, evaluated
+     all-of per row (each term keeps its own missing-field rule; a term that
+     fails excludes the row). Single operator, so no precedence exists.
+     Scoring clauses do **not** join conjunctions: `::bm25`/`vector::similarity`
+     keep their own forms (`::bm25(...) AND vector::similarity(...)` is the
+     hybrid, §2.6) — mixing them into an `AND` chain is a positioned error.
+     The same conjunction grammar drives MATCH/CLOSURE edge-property filters
+     (§2.5), evaluated all-of against the edge's `props`.
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
    - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
      ranked by BM25 relevance over the field; `k` caps the returned rows.
