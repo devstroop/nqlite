@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Engine now stamps `created_at` on every mutation when it arrives unset —
+  records get the statement's logical timestamp on INSERT, edges on RELATE —
+  the contract `nql`'s parser has always documented ("Engine clocks
+  created_at"). Before this, every timestamp was 0: `ORDER BY ::recency`
+  degenerated to ascending record id (the *oldest* first) and `::feedback`'s
+  decay was inert (every vote age 0). Explicit IR-provided values pass
+  through unchanged; stamps are re-derived from statement order on WAL/AS OF
+  replay, preserving the determinism contract; nql `SET created_at = ...`
+  still lands in edge props (the field is engine-clocked).
+  ([#107](https://github.com/devstroop/nqlite/issues/107))
 - Field projection: `SELECT a, b FROM t` now returns only the listed fields
   (previously parsed and silently discarded — every row came back full, and
   typos in the field list succeeded unnoticed). Presentation-only: ranking
