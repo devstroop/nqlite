@@ -265,13 +265,17 @@ pub struct MatchParams {
     /// Path steps as JSON: `[{ "direction": "out"|"in", "name": "mentions" }, ...]`.
     #[schemars(schema_with = "arbitrary_json")]
     pub steps: serde_json::Value,
+    /// Temporal read: traverse the store as of this logical timestamp
+    /// (`AS OF <int>` — history replayed to that point, spec §2.7; issue
+    /// #92). Absent = current state.
+    pub as_of: Option<i64>,
 }
 
 #[tool_router(server_handler)]
 impl NqlMcp {
     /// Run an arbitrary nql program and return every result as JSON.
     #[tool(
-        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET/MEMORY, ';'-separated) and return all result rows as JSON. Carries the complete grammar: AS OF time travel, comparison/range filters (< <= > >= !=, IN, BETWEEN), COUNT(*) and OFFSET pagination, MATCH ... COUNT walk counts, MEMORY blocks (prefix EVERY statement that belongs to a block — each program starts at root), edge-property filters, hybrid retrieval. Typed tools cover the root store (select additionally supports as_of/memory); use this tool for scoped writes and anything the typed tools don't expose."
+        description = "Run a full nql program (CREATE/INSERT/RELATE/SELECT/MATCH/CLOSURE/FORGET/MEMORY, ';'-separated) and return all result rows as JSON. Carries the complete grammar: AS OF time travel (SELECT, MATCH, CLOSURE), comparison/range filters (< <= > >= !=, IN, BETWEEN), COUNT(*) and OFFSET pagination, MATCH ... COUNT walk counts, MEMORY blocks (prefix EVERY statement that belongs to a block — each program starts at root), edge-property filters, hybrid retrieval. Typed tools cover the root store (select and match/closure additionally support as_of; select also memory); use this tool for scoped writes and anything the typed tools don't expose."
     )]
     async fn execute_nql(
         &self,
@@ -495,11 +499,15 @@ impl NqlMcp {
 
     /// MATCH: walk a graph path from a start record.
     #[tool(
-        description = "Walk a named-edge path from a start record (1+ hops, out/in, optional per-step edge-property filter) and return the reached records."
+        description = "Walk a named-edge path from a start record (1+ hops, out/in, optional per-step edge-property filter, optional as_of = AS OF snapshot) and return the reached records."
     )]
     async fn match_path(
         &self,
-        Parameters(MatchParams { start, steps }): Parameters<MatchParams>,
+        Parameters(MatchParams {
+            start,
+            steps,
+            as_of,
+        }): Parameters<MatchParams>,
     ) -> String {
         let rid = match parse_rid(&start) {
             Ok(r) => r,
@@ -509,7 +517,11 @@ impl NqlMcp {
             Ok(s) => s,
             Err(e) => return format!("ERR {e}"),
         };
-        let stmt = nql_ir::Statement::Match(nql_ir::MatchPath { start: rid, steps });
+        let stmt = nql_ir::Statement::Match(nql_ir::MatchPath {
+            start: rid,
+            steps,
+            as_of,
+        });
         let mut db = self.db.lock().unwrap();
         match db.execute(&[stmt]) {
             Ok(results) => {
@@ -533,11 +545,15 @@ impl NqlMcp {
 
     /// CLOSURE: transitive traversal from a start record.
     #[tool(
-        description = "Transitive closure: every record reachable from a start record via the named edges (any number of hops, BFS to fixpoint). Scored by BFS depth (0 = start)."
+        description = "Transitive closure: every record reachable from a start record via the named edges (any number of hops, BFS to fixpoint), optional as_of = AS OF snapshot. Scored by BFS depth (0 = start)."
     )]
     async fn closure(
         &self,
-        Parameters(MatchParams { start, steps }): Parameters<MatchParams>,
+        Parameters(MatchParams {
+            start,
+            steps,
+            as_of,
+        }): Parameters<MatchParams>,
     ) -> String {
         let rid = match parse_rid(&start) {
             Ok(r) => r,
@@ -547,7 +563,11 @@ impl NqlMcp {
             Ok(s) => s,
             Err(e) => return format!("ERR {e}"),
         };
-        let stmt = nql_ir::Statement::Closure(nql_ir::MatchPath { start: rid, steps });
+        let stmt = nql_ir::Statement::Closure(nql_ir::MatchPath {
+            start: rid,
+            steps,
+            as_of,
+        });
         let mut db = self.db.lock().unwrap();
         match db.execute(&[stmt]) {
             Ok(results) => {
@@ -707,6 +727,97 @@ mod tests {
     }
 
     #[test]
+    fn match_schema_advertises_as_of() {
+        // Issue #92: temporal graph traversal must be discoverable in the
+        // typed-tool schema agents read (MatchParams serves match + closure).
+        let schema = schemars::schema_for!(MatchParams);
+        let json = serde_json::to_value(&schema).unwrap();
+        let props = json["properties"].as_object().expect("object schema");
+        assert!(props.contains_key("as_of"), "as_of in schema: {props:?}");
+    }
+
+    #[test]
+    fn match_tool_time_travels_with_as_of() {
+        // Issue #92: typed MATCH with as_of traverses the reconstructed
+        // snapshot. Mutations: create=1, note:1=2, note:2=3, edge→note:2=4,
+        // note:3=5, edge→note:3=6 — AS OF 4 sees only the first edge.
+        let s = NqlMcp::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            s.create_table(Parameters(CreateTableParams {
+                table: "note".into(),
+                vector_dim: None,
+            }))
+            .await;
+            // Mutations: create=1, note:1=2, note:2=3, edge→note:2=4,
+            // note:3=5, edge→note:3=6.
+            s.insert_record(Parameters(InsertParams {
+                id: "note:1".into(),
+                body: serde_json::json!({ "body": "root" }),
+                embedding: None,
+            }))
+            .await;
+            s.insert_record(Parameters(InsertParams {
+                id: "note:2".into(),
+                body: serde_json::json!({ "body": "early" }),
+                embedding: None,
+            }))
+            .await;
+            s.relate(Parameters(RelateParams {
+                from: "note:1".into(),
+                name: "references".into(),
+                to: "note:2".into(),
+                weight: None,
+                props: None,
+            }))
+            .await;
+            s.insert_record(Parameters(InsertParams {
+                id: "note:3".into(),
+                body: serde_json::json!({ "body": "late" }),
+                embedding: None,
+            }))
+            .await;
+            s.relate(Parameters(RelateParams {
+                from: "note:1".into(),
+                name: "references".into(),
+                to: "note:3".into(),
+                weight: None,
+                props: None,
+            }))
+            .await;
+        });
+        let past = rt.block_on(async {
+            s.match_path(Parameters(MatchParams {
+                start: "note:1".into(),
+                steps: serde_json::json!([{ "direction": "out", "name": "references" }]),
+                as_of: Some(4),
+            }))
+            .await
+        });
+        assert!(
+            past.contains("\"note:2\""),
+            "AS OF 4 sees early edge: {past}"
+        );
+        assert!(
+            !past.contains("\"note:3\""),
+            "AS OF 4 predates note:3: {past}"
+        );
+        let now = rt.block_on(async {
+            s.match_path(Parameters(MatchParams {
+                start: "note:1".into(),
+                steps: serde_json::json!([{ "direction": "out", "name": "references" }]),
+                as_of: None,
+            }))
+            .await
+        });
+        assert!(now.contains("\"note:3\""), "current state sees both: {now}");
+        assert!(!now.contains("ERR"), "no error: {now}");
+    }
+
+    #[test]
     fn select_tool_time_travels_with_as_of() {
         // Issue #90: typed select can now reconstruct history. Setup does
         // create=ts1, insert turn:1=ts2, insert turn:2=ts3; overwriting
@@ -852,6 +963,7 @@ mod tests {
             s.match_path(Parameters(MatchParams {
                 start: "note:1".into(),
                 steps: serde_json::json!([{ "direction": "out", "name": "references" }]),
+                as_of: None,
             }))
             .await
         });
@@ -917,6 +1029,7 @@ mod tests {
             s.closure(Parameters(MatchParams {
                 start: "person:1".into(),
                 steps: serde_json::json!([{ "direction": "out", "name": "knows" }]),
+                as_of: None,
             }))
             .await
         });

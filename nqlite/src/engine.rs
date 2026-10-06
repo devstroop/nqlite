@@ -19,6 +19,7 @@ use nql_ir::{
     Aggregate, CmpOp, Filter, Id, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge,
     Select, Statement, Store, Value, VoteCounts,
 };
+use std::borrow::Cow;
 
 use crate::bm25::{tokenize, Bm25Index};
 use crate::error::{Error, Result};
@@ -195,7 +196,8 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             }))
         }
         Statement::Match(path) => {
-            let rows = run_match(store, path);
+            let target = temporal_target(store, path.as_of);
+            let rows = run_match(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
                 rows,
@@ -204,20 +206,34 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
         Statement::MatchCount(path) => {
             // Walk-count mode (issue #94): one `{"count": n}` row; the query
             // kind stays `Match` so transports label the result unchanged.
-            let n = run_match_count(store, path);
             let table = path.start.table.clone();
+            let target = temporal_target(store, path.as_of);
+            let n = run_match_count(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
                 rows: vec![count_row(&table, n)],
             }))
         }
         Statement::Closure(path) => {
-            let rows = run_closure(store, path);
+            let target = temporal_target(store, path.as_of);
+            let rows = run_closure(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Closure(path.clone()),
                 rows,
             }))
         }
+    }
+}
+
+/// The store a temporal graph read runs against (spec §2.7, issue #92):
+/// replayed to `as_of` when present — the exact machinery
+/// `SELECT ... AS OF` uses — or the current store otherwise. `MATCH`,
+/// `MATCH ... COUNT`, and `CLOSURE` all go through here, so a historical
+/// traversal sees exactly the records and edges that existed at the cutoff.
+fn temporal_target(store: &Store, as_of: Option<i64>) -> Cow<'_, Store> {
+    match as_of {
+        Some(cutoff) => Cow::Owned(replay_as_of(store, cutoff)),
+        None => Cow::Borrowed(store),
     }
 }
 
@@ -2012,6 +2028,7 @@ mod tests {
                     edge_props: filter.clone(),
                 })
                 .collect(),
+            as_of: None,
         };
         // Row-returning MATCH still dedups endpoints (the gap COUNT closes):
         // asserted BEFORE the count closure takes `db` mutably.
@@ -2051,6 +2068,97 @@ mod tests {
         assert_eq!(count_walks("a:1", 2, None), 7);
         // Missing start → count 0 (spec §2.5: empty result, never an error).
         assert_eq!(count_walks("a:404", 1, None), 0);
+    }
+
+    #[test]
+    fn match_and_closure_traverse_as_of_snapshots() {
+        // Timeline (one mutation per statement): create=1, g:a=2, g:b=3,
+        // edge g:a→g:b=4, g:c=5, edge g:a→g:c=6. Traversals at a cutoff
+        // must see exactly the records and edges that existed then (issue
+        // #92) — the same replay `SELECT ... AS OF` uses.
+        let mut db = Database::default();
+        let edge = |to: &str| RelationEdge {
+            from: RecordId::parse("g:a").unwrap(),
+            name: "edge".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: BTreeMap::new(),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("g:a", BTreeMap::new(), None)),
+            Statement::Insert(record("g:b", BTreeMap::new(), None)),
+            Statement::Relate(edge("g:b")),
+            Statement::Insert(record("g:c", BTreeMap::new(), None)),
+            Statement::Relate(edge("g:c")),
+        ])
+        .unwrap();
+
+        let mut traverse = |as_of: Option<i64>, count: bool| {
+            let path = MatchPath {
+                start: RecordId::parse("g:a").unwrap(),
+                steps: vec![MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: None,
+                }],
+                as_of,
+            };
+            let stmt = if count {
+                Statement::MatchCount(path)
+            } else {
+                Statement::Match(path)
+            };
+            let res = db.execute(&[stmt]).unwrap();
+            if count {
+                return match res[0].rows[0].record.body.get("count") {
+                    Some(Value::Int(n)) => vec![format!("count={n}")],
+                    other => panic!("expected count row, got {other:?}"),
+                };
+            }
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Before any edge: empty (start exists, no traversable edges yet).
+        assert_eq!(traverse(Some(3), false), Vec::<String>::new());
+        // After the first edge only: g:b — g:c doesn't exist until ts5.
+        assert_eq!(traverse(Some(4), false), ["g:b"]);
+        // After both edges.
+        assert_eq!(traverse(Some(6), false), ["g:b", "g:c"]);
+        // No AS OF = current state (regression).
+        assert_eq!(traverse(None, false), ["g:b", "g:c"]);
+        // COUNT over historical edge sets: 0 → 1 → 2.
+        assert_eq!(traverse(Some(3), true), ["count=0"]);
+        assert_eq!(traverse(Some(4), true), ["count=1"]);
+        assert_eq!(traverse(None, true), ["count=2"]);
+
+        let mut closure_ids = |as_of: Option<i64>| {
+            let path = MatchPath {
+                start: RecordId::parse("g:a").unwrap(),
+                steps: vec![MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: None,
+                }],
+                as_of,
+            };
+            let res = db.execute(&[Statement::Closure(path)]).unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        // CLOSURE composes with AS OF: reachability at ts4 = {g:a, g:b}.
+        assert_eq!(closure_ids(Some(4)), ["g:a", "g:b"]);
+        assert_eq!(closure_ids(None), ["g:a", "g:b", "g:c"]);
+        // Cutoff before the start record exists → empty, never an error.
+        assert_eq!(closure_ids(Some(1)), Vec::<String>::new());
     }
 
     #[test]
@@ -2190,6 +2298,7 @@ mod tests {
                     edge_props: None,
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -2370,6 +2479,7 @@ mod tests {
                     edge_props: None,
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -2403,6 +2513,7 @@ mod tests {
                     edge_props: edge_props.clone(),
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -2541,6 +2652,7 @@ mod tests {
                 name: "knows".into(),
                 edge_props: Some(filter),
             }],
+            as_of: None,
         });
         let res = db.execute(&[path]).unwrap();
         let ids: Vec<String> = res[0]

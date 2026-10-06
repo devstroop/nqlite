@@ -346,6 +346,10 @@ pub struct MatchPath {
     pub start: RecordId,
     /// Ordered edge steps; every step must be taken (path semantics).
     pub steps: Vec<MatchStep>,
+    /// Temporal read (`AS OF <int>`): traverse the store as of this logical
+    /// timestamp — the mutation history replayed to that point, exactly like
+    /// `SELECT ... AS OF` (spec §2.7; issue #92). `None` = current state.
+    pub as_of: Option<i64>,
 }
 
 /// One hop of a [`MatchPath`]: follow edges named `name` leaving/entering the

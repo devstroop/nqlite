@@ -700,6 +700,44 @@ fn match_count_and_edge_prop_predicates_parse() {
 }
 
 #[test]
+fn match_and_closure_accept_as_of() {
+    // `... AS OF <ts>` precedes a trailing MATCH `COUNT` (issue #92).
+    let plan = parse("MATCH (a:1) -> :x AS OF 5").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match");
+    };
+    assert_eq!(p.as_of, Some(5));
+
+    let plan = parse("MATCH (a:1) -> :x AS OF 5 COUNT").unwrap();
+    let Statement::MatchCount(p) = &plan[0] else {
+        panic!("expected MatchCount");
+    };
+    assert_eq!(p.as_of, Some(5));
+
+    let plan = parse("CLOSURE (a:1) -> :x AS OF 3").unwrap();
+    let Statement::Closure(p) = &plan[0] else {
+        panic!("expected Closure");
+    };
+    assert_eq!(p.as_of, Some(3));
+
+    // Bare traversals keep `None` (current state) — regression.
+    let plan = parse("MATCH (a:1) -> :x").unwrap();
+    let Statement::Match(p) = &plan[0] else {
+        panic!("expected Match");
+    };
+    assert_eq!(p.as_of, None);
+
+    for bad in [
+        "MATCH (a:1) -> :x AS OF",
+        "MATCH (a:1) -> :x AS OF five",
+        "CLOSURE (a:1) -> :x AS 5",
+        "MATCH (a:1) -> :x COUNT AS OF 5",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn count_star_and_offset_parse() {
     let plan = parse("SELECT COUNT(*) FROM ledger WHERE seq >= 10").unwrap();
     let Statement::Select(s) = &plan[0] else {

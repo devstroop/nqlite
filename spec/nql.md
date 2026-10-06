@@ -38,8 +38,8 @@ forget         = 'FORGET' recordid ;
 
 memory         = 'MEMORY' ident ;
 
-match          = 'MATCH' '(' recordid ')' path_step+ [ 'COUNT' ] ;
-closure        = 'CLOSURE' '(' recordid ')' path_step+ ;
+match          = 'MATCH' '(' recordid ')' path_step+ [ 'AS OF' int ] [ 'COUNT' ] ;
+closure        = 'CLOSURE' '(' recordid ')' path_step+ [ 'AS OF' int ] ;
 path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
 edge_props     = 'WHERE' predicate ;
 
@@ -90,8 +90,8 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CREATE TABLE t [VECTOR<f32,N>]` | Declares table `t`; optional fixed embedding dim `N`. Re-declaring with a dim enforces it on future INSERTs. |
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
-| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <predicate>` (equality, comparisons, `IN`, `BETWEEN`) to only traverse edges whose props match. `MATCH ... COUNT` returns the number of matching edge-path instances instead of records (multiplicity). Deterministic (see §2.5). |
-| `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
+| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <predicate>` (equality, comparisons, `IN`, `BETWEEN`) to only traverse edges whose props match. `MATCH ... COUNT` returns the number of matching edge-path instances instead of records (multiplicity). `AS OF <ts>` traverses a historical snapshot. Deterministic (see §2.5). |
+| `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH; accepts `AS OF <ts>` like MATCH (see §2.5). |
 | `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; paginates (`OFFSET`/`LIMIT`); `COUNT(*)` counts instead of listing; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
 | `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
@@ -186,6 +186,11 @@ before a SELECT apply first, so a plan may create/insert/relate/query in one pas
   step as saturating `u64`s (order-independent, hence deterministic). The same
   edge/prop filters and dangling-edge rules apply; a missing start yields
   `{"count": 0}`.
+- `AS OF <ts>` on `MATCH` and `CLOSURE` (issue #92): the traversal runs
+  against the reconstructed snapshot — mutation history replayed to `ts`
+  (§2.7) — so the start record, frontier, and edges are exactly what existed
+  at that cutoff. Composes with `COUNT`. A cutoff before the start record
+  exists yields the empty result (same rule as a missing start).
 - `CLOSURE` (transitive closure): each step is expanded to a fixpoint (BFS,
   any number of hops) before the next step begins; every record ever reached —
   including the start — is returned once in first-visit order, scored by BFS
@@ -208,8 +213,11 @@ and fuses them with reciprocal-rank fusion (RRF):
 
 ### 2.7 Temporal reads (`AS OF`)
 
-`SELECT ... AS OF <int>` executes against the store **as of logical timestamp
-`<int>`**, not the current state. Semantics:
+`SELECT ... AS OF <int>`, `MATCH ... AS OF <int>`, and
+`CLOSURE ... AS OF <int>` execute against the store **as of logical timestamp
+`<int>`**, not the current state (graph traversals joined `SELECT` here in
+issue #92 — they replay the same history and walk the reconstructed
+snapshot). Semantics:
 
 - Every mutating statement executed through the engine is appended to the
   store's mutation history under the next logical timestamp (a deterministic

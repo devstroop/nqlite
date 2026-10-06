@@ -81,7 +81,9 @@ This gives you:
   - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
   - `ORDER BY ::recency` — creation-time ordering
 - **Graph traversal** — `MATCH` (1+ hops, both directions, per-step edge
-  property filters) and `CLOSURE` (transitive closure, BFS-depth scores).
+  property filters) and `CLOSURE` (transitive closure, BFS-depth scores);
+  both accept `AS OF <ts>` (historical snapshots) and `MATCH ... COUNT`
+  (edge multiplicity).
 - **Embedded & serverless** — a single file; open a path, start recall.
   Network server mode (line protocol, TCP or stdio) and an MCP server
   (`nql-mcp`) are built in.
