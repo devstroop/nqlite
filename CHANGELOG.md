@@ -70,3 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second opener fails fast with a `Locked` storage error. Spec
   `file-format.md` §4 documents the enforcement.
   ([#84](https://github.com/devstroop/nqlite/issues/84))
+- Fixed: IR-built edges that keep the leading `:` (`:voted`, as the
+  chat_memory example constructs them) are now honored by every reader —
+  `::score`/`::votes`/`::feedback` and MATCH/CLOSURE step matching — instead
+  of silently matching nothing (the example's importance knob was dead and
+  its printed claim false). The example now asserts its own output.
+  ([#98](https://github.com/devstroop/nqlite/issues/98))

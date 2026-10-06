@@ -378,7 +378,7 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
                 MatchDirection::Out => (&edge.from, &edge.to),
                 MatchDirection::In => (&edge.to, &edge.from),
             };
-            if edge.name != step.name || !frontier.contains(from_side) {
+            if !edge_name_matches(&edge.name, &step.name) || !frontier.contains(from_side) {
                 continue;
             }
             if !matches_edge_props(edge, step.edge_props.as_ref()) {
@@ -470,7 +470,7 @@ fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
                         MatchDirection::Out => &edge.to,
                         MatchDirection::In => &edge.from,
                     };
-                    if edge.name != step.name {
+                    if !edge_name_matches(&edge.name, &step.name) {
                         continue;
                     }
                     if !matches_edge_props(edge, step.edge_props.as_ref()) {
@@ -656,6 +656,17 @@ fn compute_score(
     }
 }
 
+/// Does a stored edge name satisfy a requested name, tolerant of a leading
+/// `:` on either side? The nql parser strips it (`-> :voted` stores
+/// `"voted"`), but edges built directly through the IR may keep it — the
+/// chat_memory example deliberately does (issue #98), and before this check
+/// those edges matched nothing, silently collapsing `::salience`'s feedback
+/// term to the no-vote baseline.
+#[inline]
+fn edge_name_matches(stored: &str, want: &str) -> bool {
+    stored.trim_start_matches(':') == want.trim_start_matches(':')
+}
+
 /// Laplace-smoothed mean of `:voted` edge weights on the record.
 ///
 /// A vote edge is any edge with `name == "voted"` pointing **to** the record.
@@ -666,12 +677,13 @@ fn compute_score(
 /// zero votes and moves toward the observed mean as votes accumulate.
 /// The edge name is stored **without** the `:` prefix — the parser strips it
 /// (`RELATE (a) -> :voted -> (b)` stores `"voted"`), and `::votes`/`::feedback`
-/// use the same convention.
+/// use the same convention. IR-built edges may keep the colon (`:voted`);
+/// readers accept both spellings via [`edge_name_matches`] (issue #98).
 fn score_of(store: &Store, rec: &Record) -> f32 {
     let mut sum = 0.0f32;
     let mut n = 0usize;
     for edge in &store.edges {
-        if edge.name == "voted" && edge.to == rec.id {
+        if edge_name_matches(&edge.name, "voted") && edge.to == rec.id {
             sum += vote_weight(edge);
             n += 1;
         }
@@ -701,14 +713,15 @@ fn vote_weight(edge: &RelationEdge) -> f32 {
 /// The `:voted` edges pointing **at** `id`, in store (append) order.
 ///
 /// A vote is a directed edge `(voter)->:voted {value:+1|-1, weight:0..1}->(record)`
-/// (see docs/decisions.md D9); only edges whose `name == "voted"` and whose
-/// `to` is the record count. Iteration order is the store's append order,
-/// which is deterministic for a given store.
+/// (see docs/decisions.md D9); only edges whose name matches `voted` (either
+/// spelling — see [`edge_name_matches`]) and whose `to` is the record count.
+/// Iteration order is the store's append order, which is deterministic for a
+/// given store.
 fn votes_toward<'a>(store: &'a Store, id: &RecordId) -> Vec<&'a RelationEdge> {
     store
         .edges
         .iter()
-        .filter(|e| e.name == "voted" && e.to == *id)
+        .filter(|e| edge_name_matches(&e.name, "voted") && e.to == *id)
         .collect()
 }
 
@@ -766,7 +779,7 @@ pub fn feedback_score(store: &Store, id: &RecordId) -> f32 {
     let lambda = 1.0f32;
     let mut now: Option<i64> = None;
     for edge in &store.edges {
-        if edge.name == "voted" {
+        if edge_name_matches(&edge.name, "voted") {
             now = Some(now.map_or(edge.created_at, |n| n.max(edge.created_at)));
         }
     }
@@ -1230,6 +1243,53 @@ mod tests {
             pos("post:a") > pos("post:b"),
             "::score and ::votes must agree on sign ordering"
         );
+    }
+
+    #[test]
+    fn colon_prefixed_voted_edges_count_like_no_colon() {
+        // Issue #98: IR-built ":voted" edges (the chat_memory importance
+        // knob builds them with the colon kept) must count under ::score —
+        // before edge_name_matches they matched nothing and the salience
+        // feedback term silently collapsed to the no-vote baseline.
+        let mut db = Database::default();
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:a", BTreeMap::new(), None)),
+            Statement::Insert(record("post:b", BTreeMap::new(), None)),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("agent:main").unwrap(),
+                name: ":voted".into(),
+                to: RecordId::parse("post:a").unwrap(),
+                created_at: 1,
+                weight: Some(1.0),
+                props: BTreeMap::new(),
+            }),
+        ])
+        .unwrap();
+
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Score),
+                ..select("post")
+            })])
+            .unwrap();
+        let score_of_id = |id: &str| -> f32 {
+            res[0]
+                .rows
+                .iter()
+                .find(|r| r.record.id.to_string() == id)
+                .unwrap()
+                .score
+        };
+        // a: colon-named vote with weight 1.0 -> (1 + 1)/(1 + 2) = 2/3.
+        assert!((score_of_id("post:a") - 2.0 / 3.0).abs() < 1e-6);
+        assert!((score_of_id("post:b") - 0.5).abs() < 1e-6, "b: no votes");
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["post:a", "post:b"]);
     }
 
     #[test]
