@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Cross-DB recall column wired (bench-compare): the sqlite-vec driver now
+  computes `rec@10` — mean over 30 queries vs exact cosine top-10 on the
+  shared corpus (vec0 is L2-only, so vectors are unit-normalized at insert to
+  make its ranking cosine-equivalent) — closing the "quality column missing"
+  gap from the R6 review. The driver's vec0 query also moves to the working
+  `AND k = 10` form (its previous literal-`LIMIT` query had never actually run
+  — the driver was always skipped for missing installs). New report:
+  `scripts/bench-compare/report-2026-10-06.md` (nqlite 1.0000 @1k / 0.96 @5k
+  vs sqlite-vec 1.0000, Xeon box, all bindings stated); benchmarks.md updated.
 - decisions §6 reconciled with measurements (issue #115): "reopen cold and
   query a 100K-record store in **milliseconds**" retired in favor of the
   profiled numbers (release, reference box: reopen ~0.7 s decode-bound,

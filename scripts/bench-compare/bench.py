@@ -128,33 +128,71 @@ def bench_sqlite_vec(docs, knn):
     except ImportError:
         return {"db": "sqlite-vec", "skipped": "driver not installed (pip install sqlite-vec)"}
 
+    def unit(v):
+        n = math.sqrt(sum(x * x for x in v))
+        return [x / n for x in v] if n else list(v)
+
+    def cos(a, b):
+        num = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        return num / (na * nb) if na and nb else 0.0
+
     con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     sqlite_vec.load(con)
     con.execute("CREATE VIRTUAL TABLE vec_docs USING vec0(embedding float[8]);")
     con.execute("CREATE TABLE docs(id TEXT PRIMARY KEY, text TEXT);")
 
+    # vec0 (sqlite-vec 0.1.9) is L2-only: unit-normalize every vector so its
+    # L2 ranking is identical to the cosine ranking the other systems use.
+    unit_embs = [unit(d["embedding"]) for d in docs]
+
     t0 = time.perf_counter()
-    for d in docs:
+    for d, v in zip(docs, unit_embs):
         con.execute("INSERT INTO docs(id, text) VALUES (?, ?)", (d["id"], d["text"]))
         con.execute(
             "INSERT INTO vec_docs(rowid, embedding) VALUES (?, ?)",
-            (int(d["id"].split(":")[1]), json.dumps(d["embedding"])),
+            (int(d["id"].split(":")[1]), json.dumps(v)),
         )
     con.commit()
     ingest_ms = (time.perf_counter() - t0) * 1000.0
 
-    q = docs[0]["embedding"]
+    q = unit(docs[0]["embedding"])
     t0 = time.perf_counter()
     for _ in range(knn):
+        # vec0 knn form: `AND k = N` (its LIMIT handling rejects literal LIMIT)
         con.execute(
-            "SELECT rowid, distance FROM vec_docs WHERE embedding MATCH ? ORDER BY distance LIMIT 10",
+            "SELECT rowid, distance FROM vec_docs WHERE embedding MATCH ? AND k = 10",
             (json.dumps(q),),
         ).fetchall()
     knn_ms = (time.perf_counter() - t0) * 1000.0
+
+    # recall@10: mean over 30 seeded queries against EXACT cosine top-10 on
+    # this same corpus (the #96 gate's method, dim-8 set) — the cross-DB
+    # quality column. vec0 is exact at this size, so this pins 1.0 honestly.
+    qn = min(30, len(docs))
+    recalls = []
+    for i in range(qn):
+        qi = unit(docs[i]["embedding"])
+        got = {
+            r[0]
+            for r in con.execute(
+                "SELECT rowid FROM vec_docs WHERE embedding MATCH ? AND k = 10",
+                (json.dumps(qi),),
+            ).fetchall()
+        }
+        truth = {
+            idx
+            for idx in sorted(range(len(docs)), key=lambda j: -cos(qi, docs[j]["embedding"]))[:10]
+        }
+        recalls.append(len(got & truth) / 10.0)
     con.close()
+    recall = sum(recalls) / len(recalls) if recalls else 0.0
+
     return {"db": "sqlite-vec", "rows": len(docs), "ingest_ms": r2(ingest_ms), "knn_ms": r2(knn_ms),
-            "bm25_ms": "n/a (FTS5 not wired)", "hybrid_ms": "n/a"}
+            "bm25_ms": "n/a (FTS5 not wired)", "hybrid_ms": "n/a",
+            "recall_at_10": r2(recall)}
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +274,13 @@ def fmt_cell(x):
 
 
 def fmt_recall(r):
-    """rec@10 column: HNSW recall@10 vs exact (issue #96); 'off'/'n/a' else."""
-    v = r.get("hnsw_recall_at_10")
-    if isinstance(v, (int, float)):
-        return f"{v:>10.4f}"
+    """rec@10: nqlite's own HNSW-vs-exact (issue #96) or the competitor's
+    recall vs exact cosine top-10 on this shared corpus (#119-follow-up cross-DB
+    quality column); 'off'/'n/a' else."""
+    for key in ("hnsw_recall_at_10", "recall_at_10"):
+        v = r.get(key)
+        if isinstance(v, (int, float)):
+            return f"{v:>10.4f}"
     if "hnsw" in r:
         return f"{'off':>10}"
     return f"{'n/a':>10}"
@@ -292,8 +333,10 @@ def main():
         )
     print("-" * 78)
     print("note: 'n/a' = competitor lacks that operator; compare only same-shape cells.")
-    print("rec@10 = HNSW recall@10 vs exact brute-force on a dim-64 set (issue #96);")
-    print("         'off' = nql-bench built without --features hnsw; competitors: n/a.")
+    print("rec@10: nqlite = HNSW recall@10 vs exact on its dim-64 set, 30-query mean (issue #96);")
+    print("        sqlite-vec = mean over 30 queries vs EXACT cosine top-10 on THIS shared dim-8")
+    print("        corpus (vec0 unit-normalized: its L2 ranking ≡ cosine at this size);")
+    print("        'off' = nql-bench built without --features hnsw.")
 
 
 if __name__ == "__main__":
