@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI tests.
 
 ### Added
+- `WHERE` conjunctions (issue #125): field predicates and `IS NOT NULL` now
+  compose n-ary with `AND` (`Filter::And`, appended) — all-of per row, one
+  operator so no precedence exists; scoring clauses keep their own forms
+  (mixing `::bm25`/`vector::similarity` into a conjunction is a positioned
+  error pointing at the hybrid shape). The same conjunction grammar drives
+  MATCH/CLOSURE edge-property filters (evaluated all-of against edge props).
+  Spec §1 (`conjunction`/`term` rules) + §2.3 + §2.5.
 - `HISTORY SINCE <ts>` (issue #118): exact mutation deltas for sync — one
   result row per CREATE/INSERT/RELATE/FORGET after the cutoff, with subject
   ids (rows AND edges + tombstones), so consumers no longer diff two full

@@ -386,10 +386,9 @@ impl Parser {
             let mut edge_props = None;
             if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("where")) {
                 self.bump();
-                let field = self.expect_ident("edge-property field after WHERE")?;
-                // Same predicate grammar as a WHERE clause (issue #93): =,
-                // comparisons, IN, BETWEEN — evaluated against edge props.
-                edge_props = Some(self.parse_field_predicate(field)?);
+                // Same term grammar as a WHERE clause (issues #93/#125):
+                // predicates composed with AND — evaluated against edge props.
+                edge_props = Some(self.parse_where_conjunction()?);
             }
             steps.push(MatchStep {
                 direction,
@@ -611,6 +610,14 @@ impl Parser {
             let filter = self.parse_bm25_filter()?;
             let mut knn = None;
             if self.eat_keyword("and") {
+                if !matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("vector"))
+                {
+                    return Err(self.err_here(
+                        "`::bm25(...)` may only be ANDed with `vector::similarity(...)` \
+                         (the hybrid form); field predicates belong to a plain WHERE \
+                         conjunction (issue #125)",
+                    ));
+                }
                 knn = Some(self.parse_knn()?);
             }
             return Ok((knn, Some(filter)));
@@ -622,19 +629,65 @@ impl Parser {
                 let knn = self.parse_knn()?;
                 let mut filter = None;
                 if self.eat_keyword("and") {
+                    if !matches!(self.peek_tok(), Token::DoubleColon) {
+                        return Err(self.err_here(
+                            "after a kNN clause, `AND` may only introduce `::bm25(...)` \
+                             (hybrid form) — field predicates belong to a plain WHERE \
+                             conjunction (issue #125)",
+                        ));
+                    }
                     filter = Some(self.parse_bm25_filter()?);
                 }
                 return Ok((Some(knn), filter));
             }
         }
+        // Field-level terms compose with `AND` (issue #125): n-ary, all-of,
+        // no precedence — one combinable subset, shared with edge props.
+        let filter = self.parse_where_conjunction()?;
+        Ok((None, Some(filter)))
+    }
+
+    /// A conjunction of combinable terms: `term (AND term)*` — n-ary all-of
+    /// (issue #125). Shared by `WHERE` clauses and MATCH/CLOSURE
+    /// edge-property filters; a single term stays unwrapped (the existing
+    /// `Filter` variants, unchanged for consumers).
+    fn parse_where_conjunction(&mut self) -> Result<Filter, NqlError> {
+        let mut terms = vec![self.parse_where_term()?];
+        while self.eat_keyword("and") {
+            if matches!(self.peek_tok(), Token::DoubleColon) {
+                return Err(self.err_here(
+                    "`::bm25` does not take part in `AND` conjunctions — the hybrid \
+                     form is `::bm25(...) AND vector::similarity(...)` (issue #125)",
+                ));
+            }
+            if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("vector")) {
+                return Err(self.err_here(
+                    "`vector::similarity` does not take part in field-predicate `AND` \
+                     conjunctions — put the kNN clause first: `WHERE \
+                     vector::similarity(...) AND k = N [AND ::bm25(...)]` (issue #125)",
+                ));
+            }
+            terms.push(self.parse_where_term()?);
+        }
+        Ok(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            Filter::And(terms)
+        })
+    }
+
+    /// One combinable WHERE term: a field predicate or `IS NOT NULL` — the
+    /// subset `AND` composes (scoring clauses keep their own forms,
+    /// issue #125).
+    fn parse_where_term(&mut self) -> Result<Filter, NqlError> {
         let field = self.expect_ident("WHERE field name")?;
         if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("is")) {
             self.bump();
             self.expect_keyword("not", "NOT in `IS NOT NULL`")?;
             self.expect_keyword("null", "NULL in `IS NOT NULL`")?;
-            return Ok((None, Some(Filter::HasEmbedding)));
+            return Ok(Filter::HasEmbedding);
         }
-        Ok((None, Some(self.parse_field_predicate(field)?)))
+        self.parse_field_predicate(field)
     }
 
     /// A field predicate once its name is consumed: `= <value>`,
