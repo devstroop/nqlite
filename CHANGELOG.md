@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `ORDER BY <field> [DESC]` (issue #117): sort by a body field under the same
+  proptest-pinned total order the filters use (`Value::cmp_total`); absent
+  fields rank as `null`, `DESC` reverses the key only (ties keep ascending
+  RecordId), and a field that exists on no record of the table errors loudly
+  (`UnknownSortField`) instead of silently sorting all-equal. Like `::recency`,
+  the explicit structural sort applies in kNN/BM25 modes (overall ORDER BY
+  precedence tracked in #119).
 - History compaction (issue #95): `PRUNE HISTORY` replaces the mutation
   history with a deterministic snapshot at the current clock (retaining the
   `CreateTable` declarations so re-seeding keeps working), bounding memory

@@ -33,6 +33,15 @@ pub enum Error {
         "history before ts {pruned_through} was compacted (PRUNE HISTORY); AS OF timestamps earlier than the snapshot are no longer available"
     )]
     HistoryPruned { pruned_through: i64 },
+
+    /// `ORDER BY <field>` where no record of the queried table carries the
+    /// field (issue #117): every row would sort as equal and fall back to
+    /// RecordId order — almost certainly a typo, so the query fails loudly
+    /// instead of returning a plausible-looking wrong ordering.
+    #[error(
+        "ORDER BY field `{field}` exists on no record of table `{table}` (typo? rows would sort as all-equal)"
+    )]
+    UnknownSortField { field: String, table: String },
 }
 
 /// Convenience alias used across the crate.

@@ -395,6 +395,24 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
         })
         .collect();
 
+    // `ORDER BY <field>` typo guard (issue #117): if this query returns rows
+    // but NO record of the table carries the key, the sort would be silently
+    // all-equal (id order) — fail loudly instead. Empty results skip the
+    // check: there is nothing to mis-sort.
+    if let Some(Order::Field { key, .. }) = sel.order.as_ref() {
+        if !rows.is_empty()
+            && !target
+                .records
+                .values()
+                .any(|r| r.id.table == sel.table && r.body.contains_key(key))
+        {
+            return Err(Error::UnknownSortField {
+                field: key.clone(),
+                table: sel.table.clone(),
+            });
+        }
+    }
+
     order_rows(&mut rows, sel);
 
     // `OFFSET n` (spec §2.3, issue #94): skip the first n rows after
@@ -726,6 +744,22 @@ fn build_default_index(records: &[Record]) -> Box<dyn VectorIndex> {
 /// keys keep their (BTree) input order; we additionally tie-break by
 /// ascending [`RecordId`] so the final order is total and reproducible.
 fn order_rows(rows: &mut [ScoredRecord], sel: &Select) {
+    // `ORDER BY <field> [DESC]` (issue #117): explicit structural sort, same
+    // precedence as `::recency` — it wins over the score-based modes below.
+    // Absent/explicit-null fields rank as `null` (lowest) under
+    // `Value::cmp_total`; `desc` reverses the key ONLY — ties always keep
+    // ascending RecordId (the §2.1 total order holds in both directions).
+    if let Some(Order::Field { key, desc }) = sel.order.as_ref() {
+        let null = Value::Null;
+        rows.sort_by(|a, b| {
+            let ka = a.record.body.get(key).unwrap_or(&null);
+            let kb = b.record.body.get(key).unwrap_or(&null);
+            let ord = ka.cmp_total(kb);
+            let ord = if *desc { ord.reverse() } else { ord };
+            ord.then_with(|| a.record.id.cmp(&b.record.id))
+        });
+        return;
+    }
     if matches!(sel.order.as_ref(), Some(Order::Recency)) {
         rows.sort_by(|a, b| {
             b.record
@@ -2377,6 +2411,150 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(now[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn order_by_field_sorts_with_direction_and_id_tiebreak() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record(
+                "t:b",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:a",
+                BTreeMap::from([("seq".into(), num(10))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:c",
+                BTreeMap::from([("seq".into(), num(30))]),
+                None,
+            )),
+            // Absent field = `null` = lowest rank (spec §2.3 / cmp_total).
+            Statement::Insert(record("t:d", BTreeMap::new(), None)),
+            // Tie with t:a — the RecordId tie-break must show in BOTH
+            // directions (DESC reverses the key only).
+            Statement::Insert(record(
+                "t:e",
+                BTreeMap::from([("seq".into(), num(10))]),
+                None,
+            )),
+            // Cross-type value: strings rank above every number; cmp_total
+            // must order it without panicking.
+            Statement::Insert(record(
+                "t:f",
+                BTreeMap::from([("seq".into(), str_("abc"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids = |desc: bool| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    order: Some(Order::Field {
+                        key: "seq".into(),
+                        desc,
+                    }),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // ASC: null first, ties id-asc (t:a before t:e), then 30, 50, string.
+        assert_eq!(ids(false), ["t:d", "t:a", "t:e", "t:c", "t:b", "t:f"]);
+        // DESC: key reversed — but ties STAY id-asc and nulls end up last.
+        assert_eq!(ids(true), ["t:f", "t:b", "t:c", "t:a", "t:e", "t:d"]);
+    }
+
+    #[test]
+    fn order_by_unknown_field_errors_loudly() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::from([("a".into(), num(1))]), None)),
+        ])
+        .unwrap();
+
+        // Rows exist but no record of the table carries the key → almost
+        // certainly a typo: fail loudly, never return id-ordered rows as a
+        // plausible-looking answer.
+        let err = db.execute(&[Statement::Select(Select {
+            order: Some(Order::Field {
+                key: "nope".into(),
+                desc: false,
+            }),
+            ..select("t")
+        })]);
+        assert!(
+            matches!(err, Err(Error::UnknownSortField { .. })),
+            "typo field errors, got {err:?}"
+        );
+
+        // No rows at all → nothing to mis-sort → no error.
+        let empty = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Field {
+                    key: "nope".into(),
+                    desc: false,
+                }),
+                filter: Some(Filter::FieldEquals {
+                    field: "a".into(),
+                    value: Value::Int(999),
+                }),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(empty[0].rows.len(), 0);
+    }
+
+    #[test]
+    fn order_by_field_wins_over_knn_ranking() {
+        // Explicit structural sorts apply in kNN mode — same precedence as
+        // `::recency` (score-based orders defer; see #119 for the full
+        // precedence table).
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("seq".into(), num(1))]),
+                Some(vec![0.0, 1.0]),
+            )),
+        ])
+        .unwrap();
+        let res = db
+            .execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(Order::Field {
+                    key: "seq".into(),
+                    desc: false,
+                }),
+                ..select("t")
+            })])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        // t:1 is the nearest neighbor but t:2 has the smaller seq.
+        assert_eq!(ids, ["t:2", "t:1"]);
     }
 
     #[test]

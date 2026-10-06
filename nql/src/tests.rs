@@ -738,6 +738,55 @@ fn match_and_closure_accept_as_of() {
 }
 
 #[test]
+fn order_by_field_and_desc_parse() {
+    // A bare non-operator key is a body-field sort (issue #117) …
+    let plan = parse("SELECT * FROM t ORDER BY seq").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.order,
+        Some(Order::Field {
+            key: "seq".into(),
+            desc: false,
+        })
+    );
+
+    // … with an optional DESC that does not swallow later clauses …
+    let plan = parse("SELECT * FROM t ORDER BY seq DESC LIMIT 3").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(
+        s.order,
+        Some(Order::Field {
+            key: "seq".into(),
+            desc: true,
+        })
+    );
+    assert_eq!(s.limit, Some(3));
+
+    // … and bare operator keys keep working (the `::` is optional, as before).
+    let plan = parse("SELECT * FROM t ORDER BY recency").unwrap();
+    let Statement::Select(s) = &plan[0] else {
+        panic!("expected Select");
+    };
+    assert_eq!(s.order, Some(Order::Recency));
+
+    // `::` commits to the operator list — a field never hides behind it.
+    for bad in [
+        "SELECT * FROM t ORDER BY ::seq",
+        // operators have fixed directions: DESC after one is an error …
+        "SELECT * FROM t ORDER BY ::recency DESC",
+        "SELECT * FROM t ORDER BY salience DESC",
+        // … and a second DESC is statement junk.
+        "SELECT * FROM t ORDER BY seq DESC DESC",
+    ] {
+        assert!(parse(bad).is_err(), "expected parse error: {bad}");
+    }
+}
+
+#[test]
 fn prune_history_parses() {
     let plan = parse("PRUNE HISTORY").unwrap();
     assert!(matches!(plan[0], Statement::PruneHistory));
