@@ -32,6 +32,8 @@ fn select(table: &str, knn: Option<Knn>, order: Option<Order>) -> Statement {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     })
 }
 

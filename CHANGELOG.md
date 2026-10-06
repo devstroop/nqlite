@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Comparison and range filters (issue #93): `WHERE` accepts `!=`, `<`, `<=`,
+  `>`, `>=`, `IN [..]`, and `BETWEEN a AND b` — evaluated over a documented,
+  proptest-pinned total order of values (`null < bool < number < string <
+  array < doc < vector < ref`, exact numeric comparison). `=`/`!=`/`IN` keep
+  exact equality (complementary), records without the field never match, and
+  the same predicates now work in `MATCH`/`CLOSURE` edge-property filters.
+- Counting and pagination (issue #94): `SELECT COUNT(*)` returns one
+  `{"count": n}` row (filtered total — ordering/offset/limit never affect
+  it); `LIMIT n OFFSET m` (or `OFFSET` alone) paginates after ordering;
+  `MATCH ... COUNT` reports edge-path instances so parallel-edge
+  multiplicity is observable. Spec §1/§2.3/§2.5 and README updated.
 - Per-query salience weights (issue #88): `ORDER BY ::salience(α, β, γ, δ)`
   tunes all four spec §2.3 terms — `α·similarity + β·strength(recency,freq)
   + γ·importance + δ·score` — with exactly four comma-separated numbers.
@@ -66,7 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (previously parsed and silently discarded — every row came back full, and
   typos in the field list succeeded unnoticed). Presentation-only: ranking
   and limits still run on full records; `SELECT *` unchanged; missing keys
-  are absent from the row (spec §2.3 step 7).
+  are absent from the row (spec §2.3 step 8).
   ([#91](https://github.com/devstroop/nqlite/issues/91))
 - nql comments per spec §1: `--` to end of line and `/* */` block comments
   are skipped by the lexer (previously both were lex errors, so spec §6's own

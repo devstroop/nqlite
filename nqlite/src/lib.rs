@@ -140,8 +140,8 @@ impl Database {
 }
 
 /// True for statements that change the store (or its context) and therefore
-/// belong in the WAL. Read-only statements (`SELECT`, `MATCH`, `CLOSURE`) are
-/// never logged. `MEMORY` is logged: it carries the context switch that WAL
+/// belong in the WAL. Read-only statements (`SELECT`, `MATCH`, `MATCH ... COUNT`,
+/// `CLOSURE`) are never logged. `MEMORY` is logged: it carries the context switch that WAL
 /// replay needs to reconstruct memory scoping. `ContextReset` is a WAL-only
 /// sequencing marker appended by [`Database::execute`] itself — it is not a
 /// plan statement and never enters `Store::history`.
@@ -150,6 +150,7 @@ fn is_mutating(stmt: &Statement) -> bool {
         stmt,
         Statement::Select(_)
             | Statement::Match(_)
+            | Statement::MatchCount(_)
             | Statement::Closure(_)
             | Statement::ContextReset
     )

@@ -12,9 +12,10 @@
 //! fast in CI.
 
 use crate::parser::{parse, parse_statement, NqlError};
-use nql_ir::Statement;
+use nql_ir::{RecordId, Statement, Value};
 use proptest::collection::vec;
 use proptest::prelude::*;
+use std::cmp::Ordering;
 
 /// Keywords the parser treats specially. Generated idents avoid these entirely
 /// so every synthetic program is unambiguous and well-formed by construction.
@@ -318,6 +319,7 @@ fn kind_of(stmt: &Statement) -> StmtKind {
         Statement::Insert(_) => StmtKind::Insert,
         Statement::Relate(_) => StmtKind::Relate,
         Statement::Match(_) => StmtKind::Match,
+        Statement::MatchCount(_) => StmtKind::Match,
         Statement::Closure(_) => StmtKind::Closure,
         Statement::Memory { .. } => StmtKind::Memory,
         Statement::Select(_) => StmtKind::Select,
@@ -387,6 +389,64 @@ proptest! {
             prop_assert!(!err_message(&err).is_empty(), "error message must not be empty");
             prop_assert!(err.line() >= 1, "line must be >= 1, got {}", err.line());
             prop_assert!(err.col() >= 1, "col must be >= 1, got {}", err.col());
+        }
+    }
+}
+
+/// Arbitrary [`Value`] — leaf scalars (incl. NaN, ±inf, `-0.0`, extreme
+/// ints, and the 2^53 boundary where f64 loses integer precision) with
+/// shallow recursion into arrays/docs/vectors/refs.
+fn arb_value() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(Value::Int),
+        any::<f64>().prop_map(Value::Float),
+        Just(f64::NAN).prop_map(Value::Float),
+        Just(f64::INFINITY).prop_map(Value::Float),
+        Just(f64::NEG_INFINITY).prop_map(Value::Float),
+        Just(-0.0f64).prop_map(Value::Float),
+        Just(9_007_199_254_740_993i64).prop_map(Value::Int), // 2^53 + 1
+        Just(9_007_199_254_740_992.0f64).prop_map(Value::Float), // 2^53
+        ".{0,4}".prop_map(Value::Str),
+        Just(Value::Ref(RecordId::parse("t:x").unwrap())),
+        Just(Value::Ref(RecordId::parse("t:y").unwrap())),
+        Just(Value::Ref(RecordId::parse("u:x").unwrap())),
+    ];
+    leaf.prop_recursive(2, 24, 4, |inner| {
+        prop_oneof![
+            vec(inner.clone(), 0..4).prop_map(Value::Arr),
+            proptest::collection::btree_map("[a-c]", inner.clone(), 0..4).prop_map(Value::Doc),
+            vec(any::<f32>(), 0..4).prop_map(Value::Vector),
+        ]
+    })
+}
+
+proptest! {
+    /// `Value::cmp_total` is a **total order** over arbitrary mixed-type
+    /// values: reflexive, antisymmetric, and transitive — the never-panic +
+    /// determinism contract behind `<`, `<=`, `>`, `>=`, and `BETWEEN`
+    /// (issue #93). Any panic or axiom violation fails the run.
+    #[test]
+    fn value_cmp_total_is_a_total_order(a in arb_value(), b in arb_value(), c in arb_value()) {
+        prop_assert_eq!(a.cmp_total(&a), Ordering::Equal, "reflexive");
+        prop_assert_eq!(
+            a.cmp_total(&b),
+            b.cmp_total(&a).reverse(),
+            "antisymmetric: {:?} vs {:?}",
+            a,
+            b
+        );
+        if a.cmp_total(&b) != Ordering::Greater && b.cmp_total(&c) != Ordering::Greater {
+            prop_assert!(
+                a.cmp_total(&c) != Ordering::Greater,
+                "transitive: {:?} <= {:?} <= {:?} but {:?} > {:?}",
+                a,
+                b,
+                c,
+                a,
+                c
+            );
         }
     }
 }
