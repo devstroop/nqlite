@@ -103,6 +103,11 @@ container specified as tables rather than "whatever postcard derives from
 Rust structs", and payload bytes identical to v3 (§5.6) so conversion is a
 container remap, not a re-encode.
 
+**Fixed vs varint.** Everything in §5.1–§5.5 that is *not* a payload —
+counts, offsets, entry fields, `CLOCK` — is fixed-width little-endian.
+§5.7's uleb128/zigzag rules govern payload bytes only: record bodies,
+edge payloads, and (verbatim) the `HISTORY` tail.
+
 ### 5.1 Header and section table
 
 ```
@@ -130,12 +135,23 @@ Section-table entry (32 bytes, little-endian):
   class as v3, never a partial load).
 - Alignment: `STRINGS`, `EMBEDS`, and `HISTORY` start at 4096-byte
   boundaries (independent page-fault domains under `mmap`); all other
-  sections at 8-byte boundaries.
-- A missing tag means an absent section (no `HISTORY` ⇒ no temporal reads —
-  the error semantics of §1/§2.7 apply unchanged).
-- CRC32 is verified when a section is claimed (history at first temporal
-  read, as today); a mismatch is an integrity error, never a partial decode.
-  Whole-file integrity stays §9's verify-if-present manifest.
+  sections at 8-byte boundaries. Alignment gaps — and every `reserved`,
+  `pad`, and header field not otherwise specified — are `0x00`. The file
+  ends at the end of the last section (no trailing bytes).
+- **Required sections:** `TABLES`, `RECORDS`, and `CLOCK` are always
+  present (even when empty: `count` = 0, `CLOCK` = 8 bytes). `STRINGS`,
+  `EMBEDS`, `EDGES`, `MEMORIES`, and `HISTORY` are present **iff
+  non-empty** — a writer never emits a zero-payload section, so identical
+  store contents always produce identical bytes.
+- A missing optional tag means an absent section: absent `HISTORY` ⇒ the
+  persisted history is empty — temporal reads behave exactly as on a v3
+  file with an empty tail (claim-once succeeds with nothing to decode);
+  §2.7's `HistoryPruned` horizon is a different rule and applies as
+  always.
+- CRC32 is the CRC-32 of §2's WAL frame (IEEE polynomial); it is verified
+  when a section is claimed (history at first temporal read, as today),
+  and a mismatch is an integrity error, never a partial decode. Whole-file
+  integrity stays §9's verify-if-present manifest.
 
 ### 5.2 Section tags (fixed)
 
@@ -149,6 +165,14 @@ Section-table entry (32 bytes, little-endian):
 | 6 | `MEMORIES` | nested stores — a complete §5 layout, recursively (its own version field) |
 | 7 | `CLOCK` | `i64` LE, exactly 8 bytes |
 | 8 | `HISTORY` | statement log (§5.6) |
+
+`MEMORIES` body: `u64 count`, then `count × { name: string (§5.7 rule),
+len: u64, bytes: complete §5 layout of the nested store }` — names
+sorted byte-wise, blobs tightly packed in that order, no padding. A nested
+blob carries its own magic, version, and section table, and its section
+offsets are absolute *within the blob* (a nested `RECORDS` `body_off`
+points inside its blob); alignment inside the blob is computed from the
+blob's start, as if it were a standalone file.
 
 ### 5.3 `TABLES` (declared-table catalog)
 
@@ -183,6 +207,15 @@ u64 count, then count × 48-byte entries:
   therefore keeps cross-implementation transcript digests comparable.
 - `body` is the record's document only (`BTreeMap<String, Value>`, §5.7);
   the id is *not* repeated inside the body.
+- **Section layout:** `[u64 count][count × 48-byte entries][bodies]` —
+  bodies follow the directory in entry order, tightly packed;
+  `body_off` is each body's absolute offset (`body_len` bytes).
+- **Heaps:** string ids live in `STRINGS`, packed in entry order, tightly,
+  byte-to-byte — no padding, no dedup (`id_val` = absolute offset,
+  `id_len` = byte length). `EMBEDS` packs one `vector_dim × 4`-byte f32-LE
+  embedding per record that has one, in entry order, tightly, no dedup
+  (`embed_off`, absolute); an embedding under a table with no declared
+  `vector_dim` is an integrity error (the engine forbids writing one).
 
 ### 5.5 `EDGES`
 
@@ -193,8 +226,11 @@ u64 count, then count × { off: u64, len: u32, pad: u32 }  → postcard(Relation
 - Entries sorted by `(from RecordId, name bytes, to RecordId, created_at)` —
   matching the engine's append-order guarantees after keying (spec §2.5
   dedup rules read edges in this order).
-- The payload is the §5.7 encoding of `RelationEdge`
-  (`from`, `name`, `to`, `created_at`, `weight`, `props`).
+- **Section layout:** `[u64 count][count × 16-byte entries][payloads]` —
+  payloads follow the directory in entry order, tightly packed (`off`
+  absolute, `len` = payload byte length, 16-byte entries = `off` u64 LE +
+  `len` u32 LE + `pad` u32 = 0). The payload is the §5.7 encoding of
+  `RelationEdge` (`from`, `name`, `to`, `created_at`, `weight`, `props`).
 
 ### 5.6 `HISTORY`
 
