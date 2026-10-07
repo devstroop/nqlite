@@ -92,6 +92,24 @@ impl Database {
         Ok(())
     }
 
+    /// Decode the history tail on first use (issue #133): temporal
+    /// statements pay the decode once per session; everything else never
+    /// touches it. File entries all predate anything WAL replay appended
+    /// (load runs before replay), so prepending keeps timestamps ascending.
+    /// In-memory databases and legacy (v2) files have no pending tail.
+    fn ensure_history(&mut self) -> Result<()> {
+        let Some(file) = self.file.as_ref() else {
+            return Ok(());
+        };
+        let Some((offset, len)) = file.take_history_range() else {
+            return Ok(());
+        };
+        let mut merged = file.read_history(offset, len)?;
+        merged.append(&mut self.store.history);
+        self.store.history = merged;
+        Ok(())
+    }
+
     /// Immutable access to the current store snapshot.
     pub fn store(&self) -> &Store {
         &self.store
@@ -114,6 +132,11 @@ impl Database {
     /// WAL (fsync'd) before this returns, and an automatic checkpoint happens
     /// once the WAL crosses `CHECKPOINT_THRESHOLD`.
     pub fn execute(&mut self, plan: &[Statement]) -> Result<Vec<QueryResult>> {
+        // Lazy history (issue #133): temporal statements claim the history
+        // tail's decode once per session; current-state queries skip it.
+        if plan.iter().any(needs_history) {
+            self.ensure_history()?;
+        }
         let results = execute_plan(&mut self.store, plan)?;
         if let Some(file) = &mut self.file {
             let mut logged = false;
@@ -159,4 +182,16 @@ fn is_mutating(stmt: &Statement) -> bool {
             | Statement::Snapshot(_)
             | Statement::ContextReset
     )
+}
+
+/// True when a statement reads the mutation history — the only triggers for
+/// decoding the lazily-loaded history frame (issue #133). A `PruneHistory`
+/// needs it too: compaction must retain declarations from the *full* log.
+fn needs_history(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(s) => s.as_of.is_some(),
+        Statement::Match(p) | Statement::MatchCount(p) | Statement::Closure(p) => p.as_of.is_some(),
+        Statement::HistorySince(_) | Statement::PruneHistory => true,
+        _ => false,
+    }
 }
