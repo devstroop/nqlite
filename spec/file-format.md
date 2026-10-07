@@ -161,7 +161,7 @@ Section-table entry (32 bytes, little-endian):
 | 2 | `RECORDS` | record directory (§5.4), sorted by canonical `RecordId` order |
 | 3 | `STRINGS` | UTF-8 heap; entries reference it by offset+length |
 | 4 | `EMBEDS` | `f32`-LE embedding heap; entries reference it by offset |
-| 5 | `EDGES` | edge directory + payloads (§5.5), sorted (from, name, to, created_at) |
+| 5 | `EDGES` | edge directory + payloads (§5.5), in append order (spec §2.5) |
 | 6 | `MEMORIES` | nested stores — a complete §5 layout, recursively (its own version field) |
 | 7 | `CLOCK` | `i64` LE, exactly 8 bytes |
 | 8 | `HISTORY` | statement log (§5.6) |
@@ -223,9 +223,12 @@ u64 count, then count × 48-byte entries:
 u64 count, then count × { off: u64, len: u32, pad: u32 }  → postcard(RelationEdge) at off
 ```
 
-- Entries sorted by `(from RecordId, name bytes, to RecordId, created_at)` —
-  matching the engine's append-order guarantees after keying (spec §2.5
-  dedup rules read edges in this order).
+- Entries are in the store's **append order** — byte-equivalent to v3's
+  core-frame `Vec<RelationEdge>` (the engine appends; spec §2.5 scans
+  "in append order", deduping by first appearance). Any other order would
+  reorder observable `MATCH` traversal results across a checkpoint and
+  break transcript-digest determinism, so v3→v4 edge conversion is a pure
+  remap.
 - **Section layout:** `[u64 count][count × 16-byte entries][payloads]` —
   payloads follow the directory in entry order, tightly packed (`off`
   absolute, `len` = payload byte length, 16-byte entries = `off` u64 LE +
