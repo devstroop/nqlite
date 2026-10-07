@@ -1,0 +1,14 @@
+[package]
+name = "nql-migrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "nqlite store migrator — bulk v2/v3 → format v4 (spec/file-format.md §5)."
+keywords = ["nql", "nqlite", "migration", "database"]
+categories = ["database", "command-line-utilities"]
+
+[dependencies]
+nqlite = { path = "../nqlite" }
+thiserror.workspace = true

@@ -31,6 +31,7 @@ pub mod error;
 pub mod harness;
 pub mod index;
 pub mod storage;
+pub mod v4;
 
 pub use bm25::{tokenize, Bm25Index, B, K1};
 pub use engine::{
