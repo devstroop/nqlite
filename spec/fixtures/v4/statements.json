@@ -1,0 +1,492 @@
+[
+  {
+    "hex": "0005616c7068610104",
+    "json": {
+      "CreateTable": {
+        "table": "alpha",
+        "vector_dim": 4
+      }
+    },
+    "name": "CreateTable",
+    "tag": 0
+  },
+  {
+    "hex": "00046e6f746500",
+    "json": {
+      "CreateTable": {
+        "table": "note",
+        "vector_dim": null
+      }
+    },
+    "name": "CreateTable",
+    "tag": 0
+  },
+  {
+    "hex": "0105616c706861000102016b020501720805616c7068610105616c696365000e",
+    "json": {
+      "Insert": {
+        "body": {
+          "k": {
+            "Int": -3
+          },
+          "r": {
+            "Ref": {
+              "id": {
+                "Str": "alice"
+              },
+              "table": "alpha"
+            }
+          }
+        },
+        "created_at": 7,
+        "embedding": null,
+        "id": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        }
+      }
+    },
+    "name": "Insert",
+    "tag": 1
+  },
+  {
+    "hex": "0205616c7068610001056b6e6f777305616c7068610105616c69636504010000003f0101770101",
+    "json": {
+      "Relate": {
+        "created_at": 2,
+        "from": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        },
+        "name": "knows",
+        "props": {
+          "w": {
+            "Bool": true
+          }
+        },
+        "to": {
+          "id": {
+            "Str": "alice"
+          },
+          "table": "alpha"
+        },
+        "weight": 0.5
+      }
+    },
+    "name": "Relate",
+    "tag": 2
+  },
+  {
+    "hex": "0305616c70686101040000803e0000003f0000803f0000003e05010608010201740b68656c6c6f20776f726c6401030403746167020401780005016e0202021203016e01020003016e02020203016e03020403016e04020601063333333f00000000000000009a99993e010a01060101016b01020100",
+    "json": {
+      "Select": {
+        "aggregate": "CountStar",
+        "as_of": 3,
+        "fields": [
+          "k"
+        ],
+        "filter": {
+          "And": [
+            "HasEmbedding",
+            {
+              "Bm25": {
+                "field": "t",
+                "k": 3,
+                "query": "hello world"
+              }
+            },
+            {
+              "FieldIn": {
+                "field": "tag",
+                "values": [
+                  {
+                    "Str": "x"
+                  },
+                  "Null"
+                ]
+              }
+            },
+            {
+              "FieldBetween": {
+                "field": "n",
+                "hi": {
+                  "Int": 9
+                },
+                "lo": {
+                  "Int": 1
+                }
+              }
+            },
+            {
+              "FieldCmp": {
+                "field": "n",
+                "op": "Lt",
+                "value": {
+                  "Int": 0
+                }
+              }
+            },
+            {
+              "FieldCmp": {
+                "field": "n",
+                "op": "Le",
+                "value": {
+                  "Int": 1
+                }
+              }
+            },
+            {
+              "FieldCmp": {
+                "field": "n",
+                "op": "Gt",
+                "value": {
+                  "Int": 2
+                }
+              }
+            },
+            {
+              "FieldCmp": {
+                "field": "n",
+                "op": "Ge",
+                "value": {
+                  "Int": 3
+                }
+              }
+            }
+          ]
+        },
+        "knn": {
+          "k": 5,
+          "query": [
+            0.25,
+            0.5,
+            1.0,
+            0.125
+          ]
+        },
+        "limit": 10,
+        "offset": 2,
+        "order": {
+          "SalienceWeighted": [
+            0.699999988079071,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ]
+        },
+        "table": "alpha"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000100017303000000000000008001030000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": {
+          "FieldEquals": {
+            "field": "s",
+            "value": {
+              "Float": -0.0
+            }
+          }
+        },
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Votes",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000103016e00010001050000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": {
+          "FieldCmp": {
+            "field": "n",
+            "op": "Ne",
+            "value": {
+              "Bool": false
+            }
+          }
+        },
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Recency",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f746500000107016e010000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": null,
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": {
+          "Field": {
+            "desc": true,
+            "key": "n"
+          }
+        },
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000001000000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": null,
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Similarity",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000001010000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": null,
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Salience",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000001020000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": null,
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Score",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "03046e6f7465000001040000000000",
+    "json": {
+      "Select": {
+        "aggregate": null,
+        "as_of": null,
+        "fields": null,
+        "filter": null,
+        "knn": null,
+        "limit": null,
+        "offset": null,
+        "order": "Feedback",
+        "table": "note"
+      }
+    },
+    "name": "Select",
+    "tag": 3
+  },
+  {
+    "hex": "0405616c70686100010200056b6e6f77730103017704020201056c696b65730000",
+    "json": {
+      "Match": {
+        "as_of": null,
+        "start": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        },
+        "steps": [
+          {
+            "direction": "Out",
+            "edge_props": {
+              "FieldCmp": {
+                "field": "w",
+                "op": "Ge",
+                "value": {
+                  "Int": 1
+                }
+              }
+            },
+            "name": "knows"
+          },
+          {
+            "direction": "In",
+            "edge_props": null,
+            "name": "likes"
+          }
+        ]
+      }
+    },
+    "name": "Match",
+    "tag": 4
+  },
+  {
+    "hex": "0505616c70686100010200056b6e6f77730103017704020201056c696b6573000102",
+    "json": {
+      "Closure": {
+        "as_of": 1,
+        "start": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        },
+        "steps": [
+          {
+            "direction": "Out",
+            "edge_props": {
+              "FieldCmp": {
+                "field": "w",
+                "op": "Ge",
+                "value": {
+                  "Int": 1
+                }
+              }
+            },
+            "name": "knows"
+          },
+          {
+            "direction": "In",
+            "edge_props": null,
+            "name": "likes"
+          }
+        ]
+      }
+    },
+    "name": "Closure",
+    "tag": 5
+  },
+  {
+    "hex": "0605616c7068610001",
+    "json": {
+      "Forget": {
+        "id": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        }
+      }
+    },
+    "name": "Forget",
+    "tag": 6
+  },
+  {
+    "hex": "0706647265616d73",
+    "json": {
+      "Memory": {
+        "name": "dreams"
+      }
+    },
+    "name": "Memory",
+    "tag": 7
+  },
+  {
+    "hex": "08",
+    "json": "ContextReset",
+    "name": "ContextReset",
+    "tag": 8
+  },
+  {
+    "hex": "0905616c70686100010200056b6e6f77730103017704020201056c696b65730000",
+    "json": {
+      "MatchCount": {
+        "as_of": null,
+        "start": {
+          "id": {
+            "Num": 1
+          },
+          "table": "alpha"
+        },
+        "steps": [
+          {
+            "direction": "Out",
+            "edge_props": {
+              "FieldCmp": {
+                "field": "w",
+                "op": "Ge",
+                "value": {
+                  "Int": 1
+                }
+              }
+            },
+            "name": "knows"
+          },
+          {
+            "direction": "In",
+            "edge_props": null,
+            "name": "likes"
+          }
+        ]
+      }
+    },
+    "name": "MatchCount",
+    "tag": 9
+  },
+  {
+    "hex": "0a",
+    "json": "PruneHistory",
+    "name": "PruneHistory",
+    "tag": 10
+  },
+  {
+    "hex": "0b0105616c706861000105616c706861000102016b020501720805616c7068610105616c696365000e0105616c7068610001056b6e6f777305616c7068610105616c69636504010000003f01017701010105616c706861041201016d0000000000000105616c7068610104",
+    "json": null,
+    "name": "Snapshot",
+    "tag": 11
+  },
+  {
+    "hex": "0c54",
+    "json": {
+      "HistorySince": 42
+    },
+    "name": "HistorySince",
+    "tag": 12
+  }
+]

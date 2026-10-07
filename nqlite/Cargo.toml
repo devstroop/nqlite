@@ -34,6 +34,9 @@ fast-hnsw = { version = "1.0.1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+# Fixture manifests + statement oracle JSON (tests/v4_fixtures.rs — the M1
+# golden-fixture generator for nqlite-zig, spec/file-format.md §5).
+serde_json = "1"
 # Benchmark harness (see benches/). Benches are gated by the same CI checks as
 # the rest of the workspace (`cargo clippy --workspace --all-targets`).
 criterion = { version = "0.5", features = ["html_reports"] }
