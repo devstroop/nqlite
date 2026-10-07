@@ -1,0 +1,973 @@
+{
+  "cases": [
+    {
+      "analyzed_hex": [
+        "00046e6f746500"
+      ],
+      "hex": [
+        "00046e6f746500"
+      ],
+      "mode": "plan",
+      "name": "create-basic",
+      "ok": true,
+      "source": "CREATE TABLE note"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f63018003"
+      ],
+      "hex": [
+        "0003646f63018003"
+      ],
+      "mode": "plan",
+      "name": "create-vector",
+      "ok": true,
+      "source": "CREATE TABLE doc VECTOR<f32, 384>"
+    },
+    {
+      "analyzed_hex": [
+        "0001740108"
+      ],
+      "hex": [
+        "0001740108"
+      ],
+      "mode": "plan",
+      "name": "create-lowercase",
+      "ok": true,
+      "source": "create table t vector<f32, 8>"
+    },
+    {
+      "error": {
+        "col": 29,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "create-dim-zero",
+      "ok": false,
+      "source": "CREATE TABLE t VECTOR<f32, 0>"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "01046e6f7465002a05016603000000000000f83f016e0202026f6b0101057469746c65040568656c6c6f017a000000"
+      ],
+      "mode": "plan",
+      "name": "insert-value-kinds",
+      "ok": false,
+      "source": "INSERT INTO note:42 { title: 'hello', n: 1, ok: true, f: 1.5, z: null }"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "0106706572736f6e0105616c69636503046e616d650403416461066e6573746564050201780201017907020000c03f000020c0047461677306020401610401620000"
+      ],
+      "mode": "plan",
+      "name": "insert-nested",
+      "ok": false,
+      "source": "INSERT INTO person:alice { name: \"Ada\", tags: ['a', 'b'], nested: { x: -1, y: [1.5, -2.5] } }"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "0101740001000000"
+      ],
+      "mode": "plan",
+      "name": "insert-empty-body",
+      "ok": false,
+      "source": "INSERT INTO t:1 {}"
+    },
+    {
+      "analyzed_hex": [
+        "00017400",
+        "010174000101016102020000"
+      ],
+      "hex": [
+        "00017400",
+        "010174000101016102020000"
+      ],
+      "mode": "plan",
+      "name": "create-then-insert",
+      "ok": true,
+      "source": "CREATE TABLE t\nINSERT INTO t:1 { a: 1 }"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "01017400010001040000803e0000003f000080bf0000000000"
+      ],
+      "mode": "plan",
+      "name": "insert-embed",
+      "ok": false,
+      "source": "INSERT INTO t:1 { } EMBED [0.25, 0.5, -1.0, 0.0]"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "010174000701016b02020000"
+      ],
+      "mode": "plan",
+      "name": "trap-digit-first-id",
+      "ok": false,
+      "source": "INSERT INTO t:007 { k: 1 }"
+    },
+    {
+      "error": {
+        "col": 19,
+        "kind": "lex",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "trap-dash-splits-name",
+      "ok": false,
+      "source": "INSERT INTO t:abc-def { k: 1 }"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "0101740001010161020e0000"
+      ],
+      "mode": "plan",
+      "name": "trap-leading-zero-body",
+      "ok": false,
+      "source": "INSERT INTO t:1 { a: 007 }"
+    },
+    {
+      "error": {
+        "col": 15,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "trap-id-overflow",
+      "ok": false,
+      "source": "INSERT INTO t:999999999999999999999999 { k: 1 }"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "01017400010301640408736179202268692201650403615c6201730404697427730000"
+      ],
+      "mode": "plan",
+      "name": "insert-escapes",
+      "ok": false,
+      "source": "INSERT INTO t:1 { s: 'it\\'s', d: \"say \\\"hi\\\"\", e: 'a\\\\b' }"
+    },
+    {
+      "error": {
+        "col": 23,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "insert-unclosed-body",
+      "ok": false,
+      "source": "INSERT INTO t:1 { a: 1"
+    },
+    {
+      "analyzed_hex": [
+        "0201610001086d656e74696f6e7301620002000000"
+      ],
+      "hex": [
+        "0201610001086d656e74696f6e7301620002000000"
+      ],
+      "mode": "plan",
+      "name": "relate-basic",
+      "ok": true,
+      "source": "RELATE (a:1) -> :mentions -> (b:2)"
+    },
+    {
+      "analyzed_hex": [
+        "0206706572736f6e0001056c696b6573046e6f7465002a00016666663f020a636f6e666964656e636503000000000000e03f046e6f7465040178"
+      ],
+      "hex": [
+        "0206706572736f6e0001056c696b6573046e6f7465002a00016666663f020a636f6e666964656e636503000000000000e03f046e6f7465040178"
+      ],
+      "mode": "plan",
+      "name": "relate-set-props",
+      "ok": true,
+      "source": "RELATE (person:1) -> :likes -> (note:42) SET weight = 0.9, confidence = 0.5, note = 'x'"
+    },
+    {
+      "analyzed_hex": [
+        "020161000101650162000200010000803f0304666c61670101037375620501016e020404746167730602040178040179"
+      ],
+      "hex": [
+        "020161000101650162000200010000803f0304666c61670101037375620501016e020404746167730602040178040179"
+      ],
+      "mode": "plan",
+      "name": "relate-set-value-kinds",
+      "ok": true,
+      "source": "RELATE (a:1) -> :e -> (b:2) SET weight = 1, flag = true, tags = ['x', 'y'], sub = { n: 2 }"
+    },
+    {
+      "error": {
+        "col": 32,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "relate-set-dangling",
+      "ok": false,
+      "source": "RELATE (a:1) -> :e -> (b:2) SET"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f630000000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f630000000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-star",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300000000000102057469746c6504626f64790000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300000000000102057469746c6504626f64790000"
+      ],
+      "mode": "plan",
+      "name": "select-fields",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT title, body FROM doc"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000000000000000100"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000000000000000100"
+      ],
+      "mode": "plan",
+      "name": "select-count-star",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT COUNT(*) FROM doc"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000100057469746c65040178000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000100057469746c65040178000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-eq",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE title = 'x'"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000103016e000202000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000103016e000202000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-ne",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE n != 1"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f630001060203016e01020a03016e040204000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f630001060203016e01020a03016e040204000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-cmp-and",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE n < 5 AND n >= 2"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f630001040374616702040161040162000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f630001040374616702040161040162000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-in",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE tag IN ['a', 'b']"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000105016e02020214000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000105016e02020214000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-between",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE n BETWEEN 1 AND 10"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000101000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000101000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-where-has-embedding",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE embedding IS NOT NULL"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f630102cdcccc3dcdcc4c3e0a0001000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f630102cdcccc3dcdcc4c3e0a00000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-knn-enriches-order",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE vector::similarity(embedding, [0.1, 0.2]) AND k = 10"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300010204746578740d6e657572616c207365617263680105000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300010204746578740d6e657572616c207365617263680105000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-bm25",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE ::bm25(text, \"neural search\") AND k = 5"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6301010000803f030102047465787401710001000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6301010000803f0301020474657874017100000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-hybrid",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc WHERE ::bm25(text, 'q') AND vector::similarity(embedding, [1.0]) AND k = 3"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300000105010300000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300000105010300000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-recency-limit",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY ::recency LIMIT 3"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000001063333333fcdcccc3dcdcccc3dcdcccc3d0000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000001063333333fcdcccc3dcdcccc3dcdcccc3d0000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-salience-weights",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY ::salience(0.7, 0.1, 0.1, 0.1)"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300000107057469746c65010000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300000107057469746c65010000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-field-desc",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY title DESC"
+    },
+    {
+      "error": {
+        "col": 38,
+        "kind": "parse",
+        "line": 2
+      },
+      "mode": "plan",
+      "name": "select-order-op-desc-fails",
+      "ok": false,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY score DESC"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300000107057469746c65000000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300000107057469746c65000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-field",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY title"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000001030000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000001030000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-votes",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY ::votes"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000001040000000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000001040000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-feedback",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY ::feedback"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000000000154000000"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000000000154000000"
+      ],
+      "mode": "plan",
+      "name": "select-as-of",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc AS OF 42"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f6300000001030000010100"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f6300000001030000010100"
+      ],
+      "mode": "plan",
+      "name": "select-limit-offset",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc LIMIT 3 OFFSET 1"
+    },
+    {
+      "analyzed_hex": [
+        "0003646f6300",
+        "0303646f63000000010a0000010100"
+      ],
+      "hex": [
+        "0003646f6300",
+        "0303646f63000000010a0000010100"
+      ],
+      "mode": "plan",
+      "name": "select-offset-before-limit",
+      "ok": true,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc OFFSET 2 LIMIT 10 OFFSET 1"
+    },
+    {
+      "analyzed_hex": [
+        "03046d6574610000000000000000"
+      ],
+      "hex": [
+        "03046d6574610000000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-builtin-table",
+      "ok": true,
+      "source": "SELECT * FROM meta"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForSelect"
+      },
+      "hex": [
+        "030a756e6465636c617265640000000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-undeclared-table",
+      "ok": false,
+      "source": "SELECT * FROM undeclared"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "SimilarityWithoutKnn"
+      },
+      "hex": [
+        "0003646f6300",
+        "0303646f63000001000000000000"
+      ],
+      "mode": "plan",
+      "name": "select-order-similarity-no-knn",
+      "ok": false,
+      "source": "CREATE TABLE doc\nSELECT * FROM doc ORDER BY similarity"
+    },
+    {
+      "error": {
+        "col": 14,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "select-missing-from-table",
+      "ok": false,
+      "source": "SELECT * FROM"
+    },
+    {
+      "error": {
+        "col": 32,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "select-bogus-filter",
+      "ok": false,
+      "source": "SELECT * FROM doc WHERE ::bogus(x, 'y')"
+    },
+    {
+      "error": {
+        "col": 40,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "select-bm25-non-string",
+      "ok": false,
+      "source": "SELECT * FROM doc WHERE ::bm25(text, 42)"
+    },
+    {
+      "analyzed_hex": [
+        "04016100010100086d656e74696f6e730000"
+      ],
+      "hex": [
+        "04016100010100086d656e74696f6e730000"
+      ],
+      "mode": "plan",
+      "name": "match-out",
+      "ok": true,
+      "source": "MATCH (a:1) -> :mentions"
+    },
+    {
+      "analyzed_hex": [
+        "04046e6f7465002a0101086d656e74696f6e730000"
+      ],
+      "hex": [
+        "04046e6f7465002a0101086d656e74696f6e730000"
+      ],
+      "mode": "plan",
+      "name": "match-in",
+      "ok": true,
+      "source": "MATCH (note:42) <- :mentions"
+    },
+    {
+      "analyzed_hex": [
+        "04016100010300056b6e6f777300000a776f726b735f776974680001056b6e6f77730000"
+      ],
+      "hex": [
+        "04016100010300056b6e6f777300000a776f726b735f776974680001056b6e6f77730000"
+      ],
+      "mode": "plan",
+      "name": "match-mixed-steps",
+      "ok": true,
+      "source": "MATCH (a:1) -> :knows -> :works_with <- :knows"
+    },
+    {
+      "analyzed_hex": [
+        "04016100010100086d656e74696f6e7301030a636f6e666964656e63650403000000000000e03f00"
+      ],
+      "hex": [
+        "04016100010100086d656e74696f6e7301030a636f6e666964656e63650403000000000000e03f00"
+      ],
+      "mode": "plan",
+      "name": "match-step-props",
+      "ok": true,
+      "source": "MATCH (a:1) -> :mentions WHERE confidence >= 0.5"
+    },
+    {
+      "analyzed_hex": [
+        "0401610001010001650106020304636f6e660403000000000000e03f00046b696e6404017800"
+      ],
+      "hex": [
+        "0401610001010001650106020304636f6e660403000000000000e03f00046b696e6404017800"
+      ],
+      "mode": "plan",
+      "name": "match-step-props-and",
+      "ok": true,
+      "source": "MATCH (a:1) -> :e WHERE conf >= 0.5 AND kind = 'x'"
+    },
+    {
+      "analyzed_hex": [
+        "09016100010100017800010a"
+      ],
+      "hex": [
+        "09016100010100017800010a"
+      ],
+      "mode": "plan",
+      "name": "match-as-of-count",
+      "ok": true,
+      "source": "MATCH (a:1) -> :x AS OF 5 COUNT"
+    },
+    {
+      "analyzed_hex": [
+        "0901610001010001780000"
+      ],
+      "hex": [
+        "0901610001010001780000"
+      ],
+      "mode": "plan",
+      "name": "match-count",
+      "ok": true,
+      "source": "MATCH (a:1) -> :x COUNT"
+    },
+    {
+      "analyzed_hex": [
+        "04016100010100017800010a"
+      ],
+      "hex": [
+        "04016100010100017800010a"
+      ],
+      "mode": "plan",
+      "name": "match-as-of",
+      "ok": true,
+      "source": "MATCH (a:1) -> :x AS OF 5"
+    },
+    {
+      "error": {
+        "col": 12,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "match-no-steps",
+      "ok": false,
+      "source": "MATCH (a:1)"
+    },
+    {
+      "error": {
+        "col": 25,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "match-as-of-non-int",
+      "ok": false,
+      "source": "MATCH (a:1) -> :x AS OF five"
+    },
+    {
+      "analyzed_hex": [
+        "0501610001010001780000"
+      ],
+      "hex": [
+        "0501610001010001780000"
+      ],
+      "mode": "plan",
+      "name": "closure-basic",
+      "ok": true,
+      "source": "CLOSURE (a:1) -> :x"
+    },
+    {
+      "analyzed_hex": [
+        "050161000101000178000106"
+      ],
+      "hex": [
+        "050161000101000178000106"
+      ],
+      "mode": "plan",
+      "name": "closure-as-of",
+      "ok": true,
+      "source": "CLOSURE (a:1) -> :x AS OF 3"
+    },
+    {
+      "analyzed_hex": [
+        "0606706572736f6e002a"
+      ],
+      "hex": [
+        "0606706572736f6e002a"
+      ],
+      "mode": "plan",
+      "name": "forget",
+      "ok": true,
+      "source": "FORGET person:42"
+    },
+    {
+      "analyzed_hex": [
+        "0704636f7265"
+      ],
+      "hex": [
+        "0704636f7265"
+      ],
+      "mode": "plan",
+      "name": "memory",
+      "ok": true,
+      "source": "MEMORY core"
+    },
+    {
+      "analyzed_hex": [
+        "0a"
+      ],
+      "hex": [
+        "0a"
+      ],
+      "mode": "plan",
+      "name": "prune-history",
+      "ok": true,
+      "source": "PRUNE HISTORY"
+    },
+    {
+      "analyzed_hex": [
+        "0c0a"
+      ],
+      "hex": [
+        "0c0a"
+      ],
+      "mode": "plan",
+      "name": "history-since",
+      "ok": true,
+      "source": "HISTORY SINCE 5"
+    },
+    {
+      "analyzed_hex": [
+        "0c00"
+      ],
+      "hex": [
+        "0c00"
+      ],
+      "mode": "plan",
+      "name": "history-since-zero",
+      "ok": true,
+      "source": "HISTORY SINCE 0"
+    },
+    {
+      "analyzed_hex": [
+        "00017400",
+        "0101740001000000",
+        "0301740000000000000000",
+        "0601740001"
+      ],
+      "hex": [
+        "00017400",
+        "0101740001000000",
+        "0301740000000000000000",
+        "0601740001"
+      ],
+      "mode": "plan",
+      "name": "multi-statement",
+      "ok": true,
+      "source": "CREATE TABLE t\nINSERT INTO t:1 {}\nSELECT * FROM t\nFORGET t:1"
+    },
+    {
+      "analyzed_hex": [
+        "00046e6f746500",
+        "01046e6f74650001000000"
+      ],
+      "hex": [
+        "00046e6f746500",
+        "01046e6f74650001000000"
+      ],
+      "mode": "plan",
+      "name": "comments-mixed",
+      "ok": true,
+      "source": "CREATE TABLE note; -- dangling comment\n-- another line\n/* block */ INSERT INTO note:1 {}"
+    },
+    {
+      "error": {
+        "col": 35,
+        "kind": "lex",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "comment-unterminated-block",
+      "ok": false,
+      "source": "CREATE TABLE note; /* never closed"
+    },
+    {
+      "analyzed_hex": [],
+      "hex": [],
+      "mode": "plan",
+      "name": "empty-input",
+      "ok": true,
+      "source": ""
+    },
+    {
+      "analyzed_hex": [],
+      "hex": [],
+      "mode": "plan",
+      "name": "separators-only",
+      "ok": true,
+      "source": ";;; -- only separators\n;;"
+    },
+    {
+      "analyzed_hex": [
+        "0606706572736f6e002a"
+      ],
+      "hex": [
+        "0606706572736f6e002a"
+      ],
+      "mode": "statement",
+      "name": "stmt-mode-forget",
+      "ok": true,
+      "source": "FORGET person:42"
+    },
+    {
+      "error": {
+        "col": 15,
+        "kind": "parse",
+        "line": 1
+      },
+      "mode": "statement",
+      "name": "stmt-mode-trailing",
+      "ok": false,
+      "source": "CREATE TABLE t; INSERT INTO t:1 {}"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "UnknownTableForInsert"
+      },
+      "hex": [
+        "0101740001000000"
+      ],
+      "mode": "plan",
+      "name": "analysis-insert-undeclared",
+      "ok": false,
+      "source": "INSERT INTO t:1 {}"
+    },
+    {
+      "error": {
+        "kind": "analysis",
+        "variant": "EmbeddingDimMismatch"
+      },
+      "hex": [
+        "0001740104",
+        "0101740001000102cdcccc3dcdcc4c3e00"
+      ],
+      "mode": "plan",
+      "name": "analysis-embedding-dim-mismatch",
+      "ok": false,
+      "source": "CREATE TABLE t VECTOR<f32, 4>\nINSERT INTO t:1 {} EMBED [0.1, 0.2]"
+    },
+    {
+      "analyzed_hex": [
+        "0001740104",
+        "0101740001000104cdcccc3dcdcc4c3e9a99993ecdcccc3e00"
+      ],
+      "hex": [
+        "0001740104",
+        "0101740001000104cdcccc3dcdcc4c3e9a99993ecdcccc3e00"
+      ],
+      "mode": "plan",
+      "name": "analysis-embedding-dim-ok",
+      "ok": true,
+      "source": "CREATE TABLE t VECTOR<f32, 4>\nINSERT INTO t:1 {} EMBED [0.1, 0.2, 0.3, 0.4]"
+    },
+    {
+      "analyzed_hex": [
+        "01046d6574610001000000"
+      ],
+      "hex": [
+        "01046d6574610001000000"
+      ],
+      "mode": "plan",
+      "name": "analysis-builtin-insert",
+      "ok": true,
+      "source": "INSERT INTO meta:1 {}"
+    },
+    {
+      "error": {
+        "col": 22,
+        "kind": "lex",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "lex-unterminated-string",
+      "ok": false,
+      "source": "INSERT INTO t:1 { a: 'oops }"
+    },
+    {
+      "error": {
+        "col": 16,
+        "kind": "lex",
+        "line": 1
+      },
+      "mode": "plan",
+      "name": "lex-bad-char",
+      "ok": false,
+      "source": "CREATE TABLE t @"
+    }
+  ],
+  "note": "generated by nql/tests/parser_corpus.rs (UPDATE_FIXTURES=1); spec/nql.md §1 grammar; never hand-edit"
+}
