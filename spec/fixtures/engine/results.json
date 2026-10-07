@@ -1,0 +1,1804 @@
+{
+  "cases": [
+    {
+      "name": "select-star-btree-order",
+      "query": "SELECT * FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "apple"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "banana"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "zebra"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "03017401056170706c6501016e02040006000000000174010662616e616e6101016e0206000800000000017401057a6562726101016e0202000400000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:zebra { n: 1 }",
+        "INSERT INTO t:apple { n: 2 }",
+        "INSERT INTO t:banana { n: 3 }"
+      ]
+    },
+    {
+      "name": "select-empty-table",
+      "query": "SELECT * FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [],
+          "rows_hex": "00"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t"
+      ]
+    },
+    {
+      "name": "select-empty-after-filter",
+      "query": "SELECT * FROM t WHERE n = 99",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [],
+          "rows_hex": "00"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }"
+      ]
+    },
+    {
+      "name": "where-eq-mixed-types",
+      "query": "SELECT * FROM t WHERE v = 1",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "v": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "01017400010101760202000400000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { v: 1 }",
+        "INSERT INTO t:2 { v: 1.0 }",
+        "INSERT INTO t:3 { v: \"1\" }",
+        "INSERT INTO t:4 { v: null }",
+        "INSERT INTO t:5 { other: 1 }"
+      ]
+    },
+    {
+      "name": "where-ne-missing-never-matches",
+      "query": "SELECT * FROM t WHERE v != 1",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [],
+          "rows_hex": "00"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { v: 1 }",
+        "INSERT INTO t:2 { w: 1 }"
+      ]
+    },
+    {
+      "name": "where-cmp-total-cross-type",
+      "query": "SELECT * FROM t WHERE v < \"abc\"",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "v": "Null"
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "v": {
+                    "Bool": false
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "v": {
+                    "Int": 5
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "03017400010101760000040000000001740002010176010000060000000001740003010176020a000800000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { v: null }",
+        "INSERT INTO t:2 { v: false }",
+        "INSERT INTO t:3 { v: 5 }",
+        "INSERT INTO t:4 { v: \"abc\" }",
+        "INSERT INTO t:5 { v: [1, 2] }",
+        "INSERT INTO t:6 { v: { k: 1 } }"
+      ]
+    },
+    {
+      "name": "where-in",
+      "query": "SELECT * FROM t WHERE g IN [\"a\", \"c\"]",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "g": {
+                    "Str": "a"
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "g": {
+                    "Str": "c"
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "020174000101016704016100040000000001740003010167040163000800000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { g: \"a\" }",
+        "INSERT INTO t:2 { g: \"b\" }",
+        "INSERT INTO t:3 { g: \"c\" }"
+      ]
+    },
+    {
+      "name": "where-between",
+      "query": "SELECT * FROM t WHERE n BETWEEN 2 AND 9",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 5
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "010174000201016e020a000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }",
+        "INSERT INTO t:2 { n: 5 }",
+        "INSERT INTO t:3 { n: 10 }"
+      ]
+    },
+    {
+      "name": "where-and-conjunction",
+      "query": "SELECT * FROM t WHERE a = 1 AND b >= 2",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "a": {
+                    "Int": 1
+                  },
+                  "b": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "a": {
+                    "Int": 1
+                  },
+                  "b": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "020174000102016102020162020400040000000001740002020161020201620206000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { a: 1, b: 2 }",
+        "INSERT INTO t:2 { a: 1, b: 3 }",
+        "INSERT INTO t:3 { a: 2, b: 2 }"
+      ]
+    },
+    {
+      "name": "where-id-pseudo-field",
+      "query": "SELECT * FROM t WHERE id IN [\"t:1\", \"t:alice\"]",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "x": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "x": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "alice"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "0201740001010178020200040000000001740105616c6963650101780204000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { x: 1 }",
+        "INSERT INTO t:alice { x: 2 }"
+      ]
+    },
+    {
+      "name": "where-has-embedding",
+      "query": "SELECT * FROM t WHERE embedding IS NOT NULL",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "01017400010001020000803f000000000400000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "INSERT INTO t:1 {} EMBED [1.0, 0.0]",
+        "INSERT INTO t:2 {}"
+      ]
+    },
+    {
+      "name": "knn-topk-order-and-tiebreak",
+      "query": "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0, 0.0]) AND k = 3",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Str": "c"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 5,
+                "embedding": [
+                  0.6000000238418579,
+                  0.800000011920929,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Str": "d"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.6000000238418579
+            }
+          ],
+          "rows_hex": "0301740101610001030000803f0000000000000000040000803f01740101630001030000803f0000000000000000080000803f01740101640001039a99193fcdcc4c3f000000000a9a99193f"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 3>",
+        "INSERT INTO t:a {} EMBED [1.0, 0.0, 0.0]",
+        "INSERT INTO t:b {} EMBED [0.0, 1.0, 0.0]",
+        "INSERT INTO t:c {} EMBED [1.0, 0.0, 0.0]",
+        "INSERT INTO t:d {} EMBED [0.6, 0.8, 0.0]"
+      ]
+    },
+    {
+      "name": "knn-missing-embedding-scores-zero",
+      "query": "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0]) AND k = 5",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "02017400010001020000803f00000000040000803f0174000200000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "INSERT INTO t:1 {} EMBED [1.0, 0.0]",
+        "INSERT INTO t:2 {}"
+      ]
+    },
+    {
+      "name": "knn-k-vs-limit-cap",
+      "query": "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0]) AND k = 3 LIMIT 1",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            }
+          ],
+          "rows_hex": "01017400010001020000803f00000000040000803f"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "INSERT INTO t:1 {} EMBED [1.0, 0.0]",
+        "INSERT INTO t:2 {} EMBED [0.9, 0.1]",
+        "INSERT INTO t:3 {} EMBED [0.0, 1.0]"
+      ]
+    },
+    {
+      "name": "count-star",
+      "query": "SELECT COUNT(*) FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "count": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 0,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "count"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "0101740105636f756e740105636f756e740204000000000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }",
+        "INSERT INTO t:2 { n: 2 }"
+      ]
+    },
+    {
+      "name": "count-star-filtered-and-empty",
+      "query": "SELECT COUNT(*) FROM t WHERE n = 1",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "count": {
+                    "Int": 0
+                  }
+                },
+                "created_at": 0,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "count"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "0101740105636f756e740105636f756e740200000000000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t"
+      ]
+    },
+    {
+      "name": "projection-fields",
+      "query": "SELECT keep FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "keep": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "keep": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "020174000101046b65657002020004000000000174000201046b6565700206000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { keep: 1, drop: 2 }",
+        "INSERT INTO t:2 { keep: 3 }"
+      ]
+    },
+    {
+      "name": "offset-limit",
+      "query": "SELECT * FROM t ORDER BY n DESC LIMIT 2 OFFSET 1",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "020174000301016e02060008000000000174000201016e0204000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }",
+        "INSERT INTO t:2 { n: 2 }",
+        "INSERT INTO t:3 { n: 3 }",
+        "INSERT INTO t:4 { n: 4 }"
+      ]
+    },
+    {
+      "name": "order-field-absent-ranks-null",
+      "query": "SELECT * FROM t ORDER BY s",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "other": {
+                    "Int": 0
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "s": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "s": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "030174000301056f746865720200000800000000017400010101730202000400000000017400020101730206000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { s: 1 }",
+        "INSERT INTO t:2 { s: 3 }",
+        "INSERT INTO t:3 { other: 0 }"
+      ]
+    },
+    {
+      "name": "order-field-desc-ties-by-id",
+      "query": "SELECT * FROM t ORDER BY s DESC",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "s": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "c"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "s": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "s": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "03017401016301017302040008000000000174010161010173020200060000000001740101620101730202000400000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:b { s: 1 }",
+        "INSERT INTO t:a { s: 1 }",
+        "INSERT INTO t:c { s: 2 }"
+      ]
+    },
+    {
+      "name": "order-recency-stamped",
+      "query": "SELECT * FROM t ORDER BY ::recency",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 3
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 2
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "030174000301016e02060008000000000174000201016e02040006000000000174000101016e0202000400000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }",
+        "INSERT INTO t:2 { n: 2 }",
+        "INSERT INTO t:3 { n: 3 }"
+      ]
+    },
+    {
+      "error": "UnknownSortField",
+      "name": "order-unknown-field-errors",
+      "query": "SELECT * FROM t ORDER BY missing_key",
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }"
+      ]
+    },
+    {
+      "name": "order-score-laplace-votes",
+      "query": "SELECT * FROM t ORDER BY ::score",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.6666666865348816
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 5,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "c"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.3333333432674408
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "030174010161000006abaa2a3f017401016300000aabaaaa3e017401016200000800000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "CREATE TABLE v",
+        "INSERT INTO t:a { }",
+        "INSERT INTO t:b { }",
+        "INSERT INTO t:c { }",
+        "INSERT INTO v:1 { }",
+        "RELATE (v:1) -> :voted -> (t:a) SET weight = 1.0, value = 1",
+        "RELATE (v:1) -> :voted -> (t:b) SET value = -1",
+        "RELATE (v:1) -> :voted -> (t:c) SET weight = 0.0"
+      ]
+    },
+    {
+      "name": "order-votes-net",
+      "query": "SELECT * FROM t ORDER BY ::votes",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 2.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": -1.0
+            }
+          ],
+          "rows_hex": "020174010161000006000000400174010162000008000080bf"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "CREATE TABLE v",
+        "INSERT INTO t:a { }",
+        "INSERT INTO t:b { }",
+        "INSERT INTO v:1 { }",
+        "INSERT INTO v:2 { }",
+        "RELATE (v:1) -> :voted -> (t:a) SET value = 1",
+        "RELATE (v:2) -> :voted -> (t:a) SET value = 1",
+        "RELATE (v:1) -> :voted -> (t:b) SET value = -1"
+      ]
+    },
+    {
+      "name": "order-feedback-decay",
+      "query": "SELECT * FROM t ORDER BY ::feedback",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.5
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": -1.0
+            }
+          ],
+          "rows_hex": "0201740101610000060000003f0174010162000008000080bf"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "CREATE TABLE v",
+        "INSERT INTO t:a { }",
+        "INSERT INTO t:b { }",
+        "INSERT INTO v:1 { }",
+        "RELATE (v:1) -> :voted -> (t:a) SET value = 1",
+        "RELATE (v:1) -> :voted -> (t:b) SET value = -1"
+      ]
+    },
+    {
+      "name": "order-salience-blend-with-knn",
+      "query": "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0]) AND k = 5 ORDER BY ::salience",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.8999999761581421
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": [
+                  0.5,
+                  0.5
+                ],
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.6449747085571289
+            }
+          ],
+          "rows_hex": "0201740101610001020000803f00000000066666663f01740101620001020000003f0000003f08101d253f"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "CREATE TABLE v",
+        "INSERT INTO t:a {} EMBED [1.0, 0.0]",
+        "INSERT INTO t:b {} EMBED [0.5, 0.5]",
+        "INSERT INTO v:1 { }",
+        "RELATE (v:1) -> :voted -> (t:a) SET value = 1"
+      ]
+    },
+    {
+      "name": "order-salience-gamma-importance",
+      "query": "SELECT * FROM t ORDER BY ::salience(0, 0, 1, 0)",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "importance": {
+                    "Int": 5
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            },
+            {
+              "record": {
+                "body": {
+                  "importance": {
+                    "Float": 0.9
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.8999999761581421
+            },
+            {
+              "record": {
+                "body": {
+                  "importance": {
+                    "Int": -1
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "c"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 5,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "d"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "040174010162010a696d706f7274616e6365020a00060000803f0174010161010a696d706f7274616e636503cdccccccccccec3f00046666663f0174010163010a696d706f7274616e63650201000800000000017401016400000a00000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:a { importance: 0.9 }",
+        "INSERT INTO t:b { importance: 5 }",
+        "INSERT INTO t:c { importance: -1 }",
+        "INSERT INTO t:d { }"
+      ]
+    },
+    {
+      "name": "order-salience-beta-strength",
+      "query": "SELECT * FROM t ORDER BY ::salience(0, 1, 0, 0)",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.375
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "a"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.3499999940395355
+            }
+          ],
+          "rows_hex": "0201740101620000080000c03e01740101610000063333b33e"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "CREATE TABLE v",
+        "INSERT INTO t:a { }",
+        "INSERT INTO t:b { }",
+        "INSERT INTO v:1 { }",
+        "RELATE (v:1) -> :x -> (t:a)",
+        "RELATE (v:1) -> :x -> (t:b)"
+      ]
+    },
+    {
+      "name": "order-similarity-explicit-with-knn",
+      "query": "SELECT * FROM t WHERE vector::similarity(embedding, [1.0, 0.0]) AND k = 5 ORDER BY similarity",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 1.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": [
+                  0.0,
+                  1.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "02017400010001020000803f00000000040000803f01740002000102000000000000803f0600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "INSERT INTO t:1 {} EMBED [1.0, 0.0]",
+        "INSERT INTO t:2 {} EMBED [0.0, 1.0]"
+      ]
+    },
+    {
+      "name": "bm25-orders-by-relevance",
+      "query": "SELECT * FROM doc WHERE ::bm25(text, \"neural search\")",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "neural search engine"
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.9801023602485657
+            },
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "search for the neural path"
+                  }
+                },
+                "created_at": 4,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.7803834080696106
+            },
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "cooking recipes"
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {
+                  "other": {
+                    "Str": "neural"
+                  }
+                },
+                "created_at": 5,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 4
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "0403646f63000101047465787404146e657572616c2073656172636820656e67696e650004fde77a3f03646f630003010474657874041a73656172636820666f7220746865206e657572616c2070617468000835c7473f03646f630002010474657874040f636f6f6b696e67207265636970657300060000000003646f63000401056f7468657204066e657572616c000a00000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE doc",
+        "INSERT INTO doc:1 { text: \"neural search engine\" }",
+        "INSERT INTO doc:2 { text: \"cooking recipes\" }",
+        "INSERT INTO doc:3 { text: \"search for the neural path\" }",
+        "INSERT INTO doc:4 { other: \"neural\" }"
+      ]
+    },
+    {
+      "name": "bm25-k-caps-rows",
+      "query": "SELECT * FROM doc WHERE ::bm25(text, \"alpha\") AND k = 2",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "alpha beta"
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.13353143632411957
+            },
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "alpha gamma"
+                  }
+                },
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "doc"
+                }
+              },
+              "score": 0.13353143632411957
+            }
+          ],
+          "rows_hex": "0203646f630001010474657874040a616c7068612062657461000477bc083e03646f630002010474657874040b616c7068612067616d6d61000677bc083e"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE doc",
+        "INSERT INTO doc:1 { text: \"alpha beta\" }",
+        "INSERT INTO doc:2 { text: \"alpha gamma\" }",
+        "INSERT INTO doc:3 { text: \"alpha delta\" }"
+      ]
+    },
+    {
+      "name": "hybrid-rrf-fusion",
+      "query": "SELECT * FROM t WHERE ::bm25(text, \"alpha\") AND vector::similarity(embedding, [1.0, 0.0]) AND k = 3",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "alpha"
+                  }
+                },
+                "created_at": 2,
+                "embedding": [
+                  1.0,
+                  0.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.032786883413791656
+            },
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "alpha beta"
+                  }
+                },
+                "created_at": 4,
+                "embedding": [
+                  0.699999988079071,
+                  0.699999988079071
+                ],
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.032258063554763794
+            },
+            {
+              "record": {
+                "body": {
+                  "text": {
+                    "Str": "beta"
+                  }
+                },
+                "created_at": 3,
+                "embedding": [
+                  0.0,
+                  1.0
+                ],
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0317460335791111
+            }
+          ],
+          "rows_hex": "03017400010104746578740405616c70686101020000803f00000000048a4b063d01740003010474657874040a616c706861206265746101023333333f3333333f080821043d017400020104746578740404626574610102000000000000803f062108023d"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>",
+        "INSERT INTO t:1 { text: \"alpha\" } EMBED [1.0, 0.0]",
+        "INSERT INTO t:2 { text: \"beta\" } EMBED [0.0, 1.0]",
+        "INSERT INTO t:3 { text: \"alpha beta\" } EMBED [0.7, 0.7]"
+      ]
+    },
+    {
+      "name": "forget-removes-record-and-edges",
+      "query": "FORGET t:a; SELECT * FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "b"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "01017401016200000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:a { }",
+        "INSERT INTO t:b { }",
+        "RELATE (t:a) -> :link -> (t:b)"
+      ]
+    },
+    {
+      "name": "insert-stamps-created-at",
+      "query": "SELECT * FROM t ORDER BY ::recency",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {},
+                "created_at": 5,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 3
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            },
+            {
+              "record": {
+                "body": {},
+                "created_at": 3,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 2
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "020174000300000a000000000174000200000600000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { }",
+        "INSERT INTO t:2 { }",
+        "FORGET t:1",
+        "INSERT INTO t:3 { }"
+      ]
+    },
+    {
+      "error": "EmbeddingDimMismatch",
+      "name": "error-embedding-dim-mismatch",
+      "query": "INSERT INTO t:1 {} EMBED [1.0, 0.0, 0.0]",
+      "setup": [
+        "CREATE TABLE t VECTOR<f32, 2>"
+      ]
+    },
+    {
+      "name": "two-selects-one-plan",
+      "query": "SELECT * FROM t; SELECT COUNT(*) FROM t",
+      "results": [
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "n": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 2,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Num": 1
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "010174000101016e0202000400000000"
+        },
+        {
+          "kind": "select",
+          "rows": [
+            {
+              "record": {
+                "body": {
+                  "count": {
+                    "Int": 1
+                  }
+                },
+                "created_at": 0,
+                "embedding": null,
+                "id": {
+                  "id": {
+                    "Str": "count"
+                  },
+                  "table": "t"
+                }
+              },
+              "score": 0.0
+            }
+          ],
+          "rows_hex": "0101740105636f756e740105636f756e740202000000000000"
+        }
+      ],
+      "setup": [
+        "CREATE TABLE t",
+        "INSERT INTO t:1 { n: 1 }"
+      ]
+    }
+  ],
+  "note": "generated by nqlite/tests/m3_results.rs (UPDATE_FIXTURES=1); rows_hex = uleb128(len) + [postcard(Record) + f32 LE score] per row; never hand-edit"
+}
