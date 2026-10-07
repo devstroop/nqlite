@@ -5,6 +5,11 @@ byte-deterministic: identical store contents always serialize to identical
 bytes (postcard; `BTreeMap` iterates in sorted key order, `Vec` in insertion
 order — no `HashMap` anywhere in the format).
 
+**Versions.** `3` is the current shipped layout (§1–§4 below); `2` is the
+legacy inline layout, readable through the compatibility arm; **`4` is the
+adopted target layout** (§5, issue #143) — no writer ships it yet, and the
+migration switches when the nqlite-zig cutover criteria are met.
+
 ## 1. Main file (`<name>.nql`)
 
 ```
@@ -84,3 +89,172 @@ then fsync of file + parent dir) and the WAL is truncated to zero length.
   crash. Concurrent readers see a consistent snapshot per `execute` (the
   store is swapped atomically at checkpoint; in-memory reads are served from
   the current `Store`).
+
+## 5. Version 4 main file (adopted target)
+
+Status: **adopted as the target layout** (issue #143; Track A of the
+nqlite-zig migration). No shipped writer produces v4 — §1 remains the current
+layout — and the migration flips at the nqlite-zig cutover criteria. The
+write-ahead log (§2) and its framing are **unchanged** by v4; only the main
+file's container changes.
+
+Goals: open cost ≈ header + directory reads (zero-copy over `mmap`), a
+container specified as tables rather than "whatever postcard derives from
+Rust structs", and payload bytes identical to v3 (§5.6) so conversion is a
+container remap, not a re-encode.
+
+### 5.1 Header and section table
+
+```
+offset 0    : magic   = 8 bytes: "NQLITE01"  (same magic as v2/v3)
+offset 8    : version = u32 LE = 4
+offset 12   : flags   = u32 LE = 0   (reserved; writers must write 0)
+offset 16   : section_count = u32 LE
+offset 20   : reserved = u32 LE = 0
+offset 24   : section table = section_count × 32 bytes
+```
+
+Section-table entry (32 bytes, little-endian):
+
+| bytes | field | meaning |
+|---|---|---|
+| 0..4 | `tag` u32 | section kind (§5.2) |
+| 4..8 | `reserved` u32 | = 0 |
+| 8..16 | `offset` u64 | absolute file offset |
+| 16..24 | `len` u64 | payload length in bytes |
+| 24..28 | `crc32` u32 | CRC32 of the payload |
+| 28..32 | `pad` u32 | = 0 |
+
+- Entries appear in **ascending tag order**; section ranges are strictly
+  ascending, non-overlapping, and in-bounds (else `Truncated` — same error
+  class as v3, never a partial load).
+- Alignment: `STRINGS`, `EMBEDS`, and `HISTORY` start at 4096-byte
+  boundaries (independent page-fault domains under `mmap`); all other
+  sections at 8-byte boundaries.
+- A missing tag means an absent section (no `HISTORY` ⇒ no temporal reads —
+  the error semantics of §1/§2.7 apply unchanged).
+- CRC32 is verified when a section is claimed (history at first temporal
+  read, as today); a mismatch is an integrity error, never a partial decode.
+  Whole-file integrity stays §9's verify-if-present manifest.
+
+### 5.2 Section tags (fixed)
+
+| tag | section | content |
+|---|---|---|
+| 1 | `TABLES` | declared-table catalog (§5.3) |
+| 2 | `RECORDS` | record directory (§5.4), sorted by canonical `RecordId` order |
+| 3 | `STRINGS` | UTF-8 heap; entries reference it by offset+length |
+| 4 | `EMBEDS` | `f32`-LE embedding heap; entries reference it by offset |
+| 5 | `EDGES` | edge directory + payloads (§5.5), sorted (from, name, to, created_at) |
+| 6 | `MEMORIES` | nested stores — a complete §5 layout, recursively (its own version field) |
+| 7 | `CLOCK` | `i64` LE, exactly 8 bytes |
+| 8 | `HISTORY` | statement log (§5.6) |
+
+### 5.3 `TABLES` (declared-table catalog)
+
+```
+u64 count, then count × { name: string (§5.7 string rule), vector_dim: u64 }  — vector_dim = u64::MAX means none
+```
+
+Table names are sorted byte-wise (canonical — this catalog is a
+`BTreeMap<String, Option<usize>>` on the Rust side). `table_idx` values
+elsewhere in the format index this sorted order.
+
+### 5.4 `RECORDS` (record directory)
+
+```
+u64 count, then count × 48-byte entries:
+  u32 table_idx            → TABLES
+  u8  id_kind              (0 = numeric, 1 = string)
+  u8  reserved = 0
+  u16 pad = 0
+  u64 id_val               (numeric id, or STRINGS offset when id_kind = 1)
+  u32 id_len               (string byte length; 0 when numeric)
+  u32 body_len             (bytes at body_off)
+  u64 body_off             (absolute file offset → §5.7 `Record.body` encoding)
+  u64 embed_off            (absolute file offset into EMBEDS; u64::MAX = none)
+  i64 created_at
+```
+
+- Entries are sorted by the **canonical `RecordId` order** — the exact total
+  order of the Rust type this replaces: compare `table` bytes, then `Id`
+  variant rank (`Num` < `Str`), then `u64` / string bytes. This is what makes
+  directory iteration byte-equivalent to today's `BTreeMap` iteration, and
+  therefore keeps cross-implementation transcript digests comparable.
+- `body` is the record's document only (`BTreeMap<String, Value>`, §5.7);
+  the id is *not* repeated inside the body.
+
+### 5.5 `EDGES`
+
+```
+u64 count, then count × { off: u64, len: u32, pad: u32 }  → postcard(RelationEdge) at off
+```
+
+- Entries sorted by `(from RecordId, name bytes, to RecordId, created_at)` —
+  matching the engine's append-order guarantees after keying (spec §2.5
+  dedup rules read edges in this order).
+- The payload is the §5.7 encoding of `RelationEdge`
+  (`from`, `name`, `to`, `created_at`, `weight`, `props`).
+
+### 5.6 `HISTORY`
+
+A plain sequence of `(i64, Statement)` entries using the §5.7 encoding —
+**byte-identical to v3's history tail**, so conversion adopts the tail
+verbatim. Section bounds replace v3's inline `core_len`; the claim-once /
+lazy-decode rules of §1 apply unchanged (current-state queries never touch
+it; first temporal read claims it; `PRUNE HISTORY` snapshot entries ride
+inside it).
+
+### 5.7 Payload encoding (normative — shared with v3)
+
+Everything *inside* bodies, edges, and history encodes exactly as today's
+reference implementation, pinned here so non-Rust readers can implement it
+without guessing. Where prose is ambiguous, **the golden fixtures are the
+oracle**.
+
+- **Unsigned lengths / counts / enum tags**: unsigned LEB128 (uleb128),
+  little-endian byte order, ≤ 10 bytes for u64.
+- **Signed integers** (`i64`, `created_at`, …): zigzag transform, then
+  uleb128.
+- **Booleans**: 1 byte (`0x00` / `0x01`).
+- **f32**: 4 bytes LE · **f64**: 8 bytes LE.
+- **Strings / byte arrays**: uleb128 byte length, then raw UTF-8 bytes.
+- **Option**: `0x00` = none, else `0x01` followed by the value.
+- **Vec / Arr**: uleb128 length, then elements.
+- **Doc (map)**: uleb128 entry count, then `(key, value)` pairs — keys are
+  strings by the string rule; map iteration is byte-wise key order.
+- **`Value` tags** (declaration order of `nql_ir::Value` — append-only):
+  `0` Null · `1` Bool · `2` Int · `3` Float (f64) · `4` Str · `5` Doc ·
+  `6` Arr · `7` Vector (uleb128 count + f32-LE each) · `8` Ref (`RecordId`:
+  table string, then `Id` tag `0`=Num (uleb128 u64) / `1`=Str (string rule)).
+- **`Statement` tags** (declaration order of `nql_ir::Statement` —
+  **append-only**: existing tags never reorder or get reused; unknown tags
+  must fail decode loudly, exactly as postcard does today):
+  `0` CreateTable · `1` Insert · `2` Relate · `3` Select · `4` Match ·
+  `5` Closure · `6` Forget · `7` Memory · `8` ContextReset · `9` MatchCount ·
+  `10` PruneHistory · `11` Snapshot · `12` HistorySince.
+
+### 5.8 Compatibility and migration
+
+| reader \ file | v2 | v3 | v4 |
+|---|---|---|---|
+| pre-v4 binaries | legacy arm | ✓ | `BadVersion` — loud, never partial |
+| v4-aware | legacy arm | legacy arm → upgrade on next checkpoint | ✓ |
+
+- A v4-aware reader opens v3 through the existing legacy arm and **writes v4
+  at the next checkpoint** — the same upgrade-on-checkpoint pattern v2→v3
+  used (§1). Conversion tooling (`nql-migrate`, Rust side) exists for bulk
+  conversion without executing the store.
+- v4-aware builds report `BadVersion (supported: 2, 3, 4)` (current builds
+  print `(supported: 2, 3)`).
+- The WAL (§2) is version-independent and replays into either layout.
+- **Downside (symmetric to §1):** every current binary rejects v4 files at
+  the version check — the migration must land as a coordinated release.
+
+### 5.9 Non-normative implementation notes
+
+- The format is identical whether read via `mmap` or into a heap; `flags`
+  is reserved rather than used to signal either.
+- Size caps are `u32` (`body_len`, `id_len`); a violation is an open-time
+  error, never truncation-without-error (§4 spirit).
+- Directory counts are `u64` — no practical record-count cap.
