@@ -418,6 +418,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// M7 golden transcript (issues #95/#118): exact wire bytes for the
+    /// `PRUNE HISTORY` / `HISTORY SINCE` / post-prune `AS OF` surface.
+    /// The nqlite-zig port asserts these same strings — this test is the
+    /// oracle; any drift here is a wire-parity break.
+    #[test]
+    fn history_surface_transcript() {
+        const PRUNED_THROUGH_6: &str = "history before ts 6 was compacted (PRUNE HISTORY); AS OF / HISTORY SINCE timestamps earlier than the snapshot are no longer available";
+        const PRUNED_THROUGH_7: &str = "history before ts 7 was compacted (PRUNE HISTORY); AS OF / HISTORY SINCE timestamps earlier than the snapshot are no longer available";
+        const PRUNED_THROUGH_2: &str = "history before ts 2 was compacted (PRUNE HISTORY); AS OF / HISTORY SINCE timestamps earlier than the snapshot are no longer available";
+
+        let mut s = Server::new();
+        assert_eq!(line(&mut s, "CREATE TABLE t VECTOR<f32, 2>"), "OK");
+        assert_eq!(line(&mut s, "CREATE TABLE scratch"), "OK"); // decl-only
+        assert_eq!(line(&mut s, r#"INSERT INTO t:1 { "a": 1 }"#), "OK");
+        assert_eq!(line(&mut s, r#"INSERT INTO t:2 { "a": 2 }"#), "OK");
+        assert_eq!(line(&mut s, "RELATE (t:1) -> :knows -> (t:2)"), "OK");
+        assert_eq!(line(&mut s, "FORGET t:2"), "OK"); // clock 6
+
+        // Rotation-equivalence anchors: the unpruned window must answer
+        // these byte-identically after compaction (t ≥ horizon).
+        let asof6_before = line(&mut s, "SELECT * FROM t AS OF 6");
+        assert_eq!(
+            asof6_before,
+            "SELECT t (1 rows): t:1 score=0.0000 {a=1}\nOK"
+        );
+
+        // Full delta before pruning: every mutation in append order with its
+        // subject ids — including the edge-only RELATE and the FORGET
+        // tombstone a row-diff would miss (#118).
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 0"),
+            "HISTORY SINCE 0 (6 rows): \
+history:1 score=1.0000 {dim=2, kind=\"CREATE\", table=\"t\", ts=1}; \
+history:2 score=2.0000 {kind=\"CREATE\", table=\"scratch\", ts=2}; \
+history:3 score=3.0000 {id=\"t:1\", kind=\"INSERT\", ts=3}; \
+history:4 score=4.0000 {id=\"t:2\", kind=\"INSERT\", ts=4}; \
+history:5 score=5.0000 {from=\"t:1\", kind=\"RELATE\", name=\"knows\", to=\"t:2\", ts=5}; \
+history:6 score=6.0000 {id=\"t:2\", kind=\"FORGET\", ts=6}\nOK"
+        );
+        // Exclusive cutoff: strictly-after semantics (ts ≤ since skipped).
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 5"),
+            "HISTORY SINCE 5 (1 rows): \
+history:6 score=6.0000 {id=\"t:2\", kind=\"FORGET\", ts=6}\nOK"
+        );
+        // At/after the last mutation: empty delta, not an error.
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 6"),
+            "HISTORY SINCE 6 (0 rows)\nOK"
+        );
+
+        // ---- Compaction (#95): snapshot at the current clock (6) ----
+        assert_eq!(line(&mut s, "PRUNE HISTORY"), "OK");
+        // The pruned prefix fails loudly — never a partial delta/view.
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 0"),
+            format!("ERR {PRUNED_THROUGH_6}")
+        );
+        assert_eq!(
+            line(&mut s, "SELECT * FROM t AS OF 2"),
+            format!("ERR {PRUNED_THROUGH_6}")
+        );
+        // From the horizon on: the snapshot is bookkeeping (never a
+        // mutation), and rotation-equivalence holds byte-for-byte.
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 6"),
+            "HISTORY SINCE 6 (0 rows)\nOK"
+        );
+        assert_eq!(line(&mut s, "SELECT * FROM t AS OF 6"), asof6_before);
+
+        // Post-prune mutations stream on from the horizon.
+        assert_eq!(line(&mut s, r#"INSERT INTO t:3 { "a": 3 }"#), "OK"); // clock 7
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 6"),
+            "HISTORY SINCE 6 (1 rows): \
+history:7 score=7.0000 {id=\"t:3\", kind=\"INSERT\", ts=7}\nOK"
+        );
+
+        // Re-prune rebuilds the snapshot in place (no stacking): the new
+        // horizon is the current clock (7).
+        assert_eq!(line(&mut s, "PRUNE HISTORY"), "OK");
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 6"),
+            format!("ERR {PRUNED_THROUGH_7}")
+        );
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 7"),
+            "HISTORY SINCE 7 (0 rows)\nOK"
+        );
+        assert_eq!(
+            line(&mut s, "SELECT * FROM t;"),
+            "SELECT t (2 rows): t:1 score=0.0000 {a=1}; t:3 score=0.0000 {a=3}\nOK"
+        );
+
+        // ---- Memory blocks: own clock, own deltas, own horizon (#95) ----
+        assert_eq!(
+            line(
+                &mut s,
+                "MEMORY m; CREATE TABLE mt; INSERT INTO mt:1 { \"v\": 1 }"
+            ),
+            "OK"
+        );
+        // Per-block sync read: only the block's mutations.
+        assert_eq!(
+            line(&mut s, "MEMORY m; HISTORY SINCE 0"),
+            "HISTORY SINCE 0 (2 rows): \
+history:1 score=1.0000 {kind=\"CREATE\", table=\"mt\", ts=1}; \
+history:2 score=2.0000 {id=\"mt:1\", kind=\"INSERT\", ts=2}\nOK"
+        );
+        // PRUNE inside the block compacts the block (root untouched).
+        assert_eq!(line(&mut s, "MEMORY m; PRUNE HISTORY"), "OK");
+        assert_eq!(
+            line(&mut s, "MEMORY m; HISTORY SINCE 0"),
+            format!("ERR {PRUNED_THROUGH_2}")
+        );
+        // Root's horizon is unaffected by the memory prune.
+        assert_eq!(
+            line(&mut s, "HISTORY SINCE 0"),
+            format!("ERR {PRUNED_THROUGH_7}")
+        );
+        // Current reads in the block survive its own compaction.
+        assert_eq!(
+            line(&mut s, "MEMORY m; SELECT * FROM mt;"),
+            "SELECT mt (1 rows): mt:1 score=0.0000 {v=1}\nOK"
+        );
+    }
+
     #[test]
     fn error_line_returns_err_and_session_survives() {
         let mut s = Server::new();
