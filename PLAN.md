@@ -13,7 +13,8 @@ zero-LLM-dependency in the engine. (Framing: see docs/positioning.md.)
 
 ## Guiding principles (from docs/decisions.md)
 
-1. Engine is 100% deterministic, zero LLM dependency, forever.
+1. Engine guarantees hold forever: deterministic, zero-LLM
+   ([README §Guarantees](README.md#guarantees), [decisions §1](docs/decisions.md)).
 2. Learning lives in the agent; the store is the durable substrate.
 3. Context is chained via records + typed graph relations + embeddings + time,
    queryable in one pass.
@@ -147,7 +148,7 @@ Every milestone ships with:
   PLAN state). ISSUE-17..19 tracked the follow-up.
 - 2026-08-07: **wave-10** merged — idempotent-memory + context-chain agent
   examples (gated fleet process, deterministic/zero-LLM at engine level),
-  release notes (`docs/release-wave-10.md`). Released via PR #66; develop→main
+  release notes (`docs/archive/release-wave-10.md`). Released via PR #66; develop→main
   via PR #67.
 - 2026-08-07: **hardening wave** — GitHub issue migration (#65), crate publish
   metadata + `publish.yml` (#72, issue #68), benchmark wave (#73),
@@ -160,7 +161,7 @@ Every milestone ships with:
 
 ## Tracker
 
-- **ISSUES.md** is the issue tracker (replaces docs/KANBAN.md — see its footer).
+- **ISSUES.md** is the issue tracker (replaces docs/archive/KANBAN.md — see its footer).
   Each issue = one feature branch; statuses open → in progress → merged (in
-  develop) → released (in main). docs/KANBAN.md is retained as an archive and
+  develop) → released (in main). docs/archive/KANBAN.md is retained as an archive and
   is no longer maintained.
