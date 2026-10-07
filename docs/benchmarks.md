@@ -120,13 +120,34 @@ Measured on this box (2026-10-06, `dim=64`, `HnswVectorIndex::new(seed=42, …)`
 | 5 000 | 20 | 16 / 200 / 64 (default) | **0.96** | 0.959 | 0.937 |
 | 50 000 | 30 | 16 / 200 / 64 (default) | **0.81** | 0.756 | 0.687 |
 
-**The honest finding: default parameters degrade with scale.** At 5k the ANN
-path clears decisions §6's `recall@10 ≥ 0.95` target; at 50k it falls to 0.81 —
-the gate (`nqlite/tests/recall.rs`, rows=5000) pins the 5k regime, and the
-`--hnsw-m/--hnsw-efc/--hnsw-ef` flags exist so the 50k regime can be swept
-(e.g. `--hnsw-m 32 --hnsw-ef 256` raises 2k-row recall to 1.0 in the smoke
-run) before any default-parameter claim at scale. Keep this table updated
-when params or the corpus change.
+**Parameter sweep (2026-10-07, R6's remaining item — same box, release build,
+`dim=64`, seed 42, default `queries=20`):** the 50k ladder at default
+`m/efc`, then the candidate profile verified down the rungs:
+
+| rows | m / efc / ef | recall@10 | recall@50 | note |
+|---:|---|---:|---:|---|
+| 50 000 | 16 / 200 / 64 (default) | 0.795 | 0.752 | baseline at 20 q (the 0.81 above is the 30-q run) |
+| 50 000 | 16 / 200 / 128 | 0.860 | 0.801 | |
+| 50 000 | 16 / 200 / 256 | 0.945 | 0.907 | just under target |
+| 50 000 | 16 / 200 / 512 | **0.960** | 0.958 | clears ≥0.95, barely |
+| 50 000 | **32 / 200 / 256** | **0.975** | 0.971 | **recommended** |
+| 50 000 | 32 / 400 / 256 | **0.990** | 0.981 | max-quality (heavier build) |
+| 1 000 | 16 / 200 / 64 → 32 / 200 / 256 | 1.000 → **1.000** | 0.997 → 1.000 | no regression |
+| 5 000 | 16 / 200 / 64 → 32 / 200 / 256 | 0.960 → **1.000** | 0.959 → 0.998 | improves the gate regime too |
+
+**Recommendation.** For stores at **≥10k rows**, build with
+`--hnsw-m 32 --hnsw-ef 256` (keep `efc=200`): recall@10 then holds
+**≥0.95 at every rung** (1.000 / 1.000 / 0.975 at 1k / 5k / 50k). The
+defaults (`16 / 200 / 64`) are unchanged — they pass the5k gate, remain the
+compact profile, and the gate must never move silently (re-run
+`cargo test -p nqlite --test recall --features hnsw` after any default
+change). Cost knobs separate cleanly: **`m`/`efc` are build-time** (m32+efc200
+≈ +26 s wall @50k in this harness; efc400 ≈ +68 s) while **`ef` is the live
+query beam** — across the ef ladder the wall stayed within noise of the ~45 s
+exact-ground-truth floor, so `ef` shows up in QPS, not in this report. Each
+sweep run took 45–115 s, dominated by the exact brute-force baseline.
+
+Keep this table updated when params or the corpus change.
 
 Notes:
 
