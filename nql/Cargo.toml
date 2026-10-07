@@ -16,3 +16,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+# Golden corpus export for the nqlite-zig M2 parser gate (spec/fixtures/nql):
+# hex = postcard(Statement), the same bytes the format-v4 codec emits.
+postcard = { version = "1", features = ["alloc"] }
+serde_json = "1"
