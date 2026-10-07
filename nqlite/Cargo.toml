@@ -43,3 +43,8 @@ name = "bench"
 # Criterion provides its own runner via criterion_main!; the default libtest
 # bench harness would conflict.
 harness = false
+
+# Track B spike: exact-scan at scale (dim 64) — see benches/spike.rs.
+[[bench]]
+name = "spike"
+harness = false
