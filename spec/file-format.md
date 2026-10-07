@@ -17,6 +17,11 @@ offset 16  : payload = postcard(Store)
 `Store` = `{ records: BTreeMap<RecordId, Record>, edges: Vec<RelationEdge>,
 vector_dims: BTreeMap<String, usize> }` (see `nql-ir`).
 
+`Store.tables` (the declared-table index used for analyzer re-seeding,
+issue #133 step 1) is deliberately **not** part of the payload — it is
+rebuilt from the history once at load, keeping the payload byte-identical to
+the pre-index format.
+
 The payload also carries `Store.history`, which after `PRUNE HISTORY`
 (issue #95) contains a `Statement::Snapshot` entry: the compacted state
 plus the retained `CreateTable` declarations. **Downside caveat:** binaries

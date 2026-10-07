@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI tests.
 
 ### Added
+- Declared-table index `Store.tables` (issue #133 step 1): every `CREATE TABLE`
+  (with or without a VECTOR dim) lands in a live-maintained registry that the
+  server's analyzer re-seeding now reads directly — the O(history) scan is gone
+  from `seed_declared` (it runs once at load instead, from the history the file
+  already carries). The field is `serde(skip)`-ed, so the on-disk payload and
+  its bytes are unchanged; `SnapshotState` carries it so compaction never loses
+  declarations.
 - `WHERE id = / != / IN [...]` (issue #128): the record-id pseudo-field —
   compares against the record's own `table:id` display string, making the
   rerank-pool recipe (`WHERE id IN [...] ORDER BY ::score`) server-side.

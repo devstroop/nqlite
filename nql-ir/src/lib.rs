@@ -362,9 +362,10 @@ pub enum Statement {
 /// Store state captured by history compaction (issue #95): everything needed
 /// to reconstruct the store at `clock` without replaying the pruned prefix.
 /// `memories` are embedded already-pruned (each block carries its own
-/// snapshot entry in its own history). Declaration statements are NOT stored
-/// here — the pruned history retains them at their original timestamps,
-/// which is what re-seeding (issue #89) reads.
+/// snapshot entry in its own history) and `tables` rides along so installing
+/// a snapshot never loses the declaration index (issue #133). Declaration
+/// statements are NOT stored here — the pruned history retains them at their
+/// original timestamps, which is what re-seeding (issue #89) reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotState {
     pub records: BTreeMap<RecordId, Record>,
@@ -372,6 +373,7 @@ pub struct SnapshotState {
     pub vector_dims: BTreeMap<String, usize>,
     pub clock: i64,
     pub memories: BTreeMap<String, Store>,
+    pub tables: BTreeMap<String, Option<usize>>,
 }
 
 impl SnapshotState {
@@ -385,6 +387,7 @@ impl SnapshotState {
             clock: self.clock,
             history: Vec::new(),
             memories: self.memories,
+            tables: self.tables,
         }
     }
 }
@@ -471,6 +474,14 @@ pub struct Store {
     /// (records, edges, dims, its own clock + history), so temporal reads
     /// compose with memory scoping. The default context is the store itself.
     pub memories: BTreeMap<String, Store>,
+    /// Declared tables → optional `VECTOR` dim: every `CREATE TABLE` of this
+    /// store, including empty/dim-less ones (issue #89's seeding source).
+    /// **Not part of the serialized payload** (`serde(skip)` — the file
+    /// format is unchanged, issue #133 step 1): maintained live by the
+    /// engine's `CreateTable` arm and rebuilt from history once at load
+    /// ([`Store::rebuild_tables`]).
+    #[serde(skip)]
+    pub tables: BTreeMap<String, Option<usize>>,
 }
 
 impl Store {
@@ -485,6 +496,22 @@ impl Store {
     pub fn log_mutation(&mut self, stmt: &Statement) {
         self.clock += 1;
         self.history.push((self.clock, stmt.clone()));
+    }
+
+    /// Rebuild the `tables` index (and every nested memory's) from the
+    /// mutation history — the load-time complement of the engine's
+    /// `CreateTable` arm (issue #133 step 1). Idempotent; O(history), once
+    /// per load. Only `CreateTable` statements matter, and pruned histories
+    /// retain them (issue #95), so compaction never loses declarations.
+    pub fn rebuild_tables(&mut self) {
+        for (_, stmt) in &self.history {
+            if let Statement::CreateTable { table, vector_dim } = stmt {
+                self.tables.insert(table.clone(), *vector_dim);
+            }
+        }
+        for memory in self.memories.values_mut() {
+            memory.rebuild_tables();
+        }
     }
 }
 

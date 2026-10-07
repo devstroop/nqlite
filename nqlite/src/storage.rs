@@ -204,7 +204,10 @@ impl StoreFile {
         if version != FORMAT_VERSION {
             return Err(StorageError::BadVersion(version));
         }
-        let store = postcard::from_bytes(&data[16..])?;
+        let mut store: Store = postcard::from_bytes(&data[16..])?;
+        // The `tables` index is serde-skipped (payload unchanged, issue #133
+        // step 1): rebuild it from the history once per load.
+        store.rebuild_tables();
         Ok(store)
     }
 

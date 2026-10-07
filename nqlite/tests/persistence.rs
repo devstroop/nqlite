@@ -33,6 +33,9 @@ fn file_backed_database_persists_across_reopen() {
     {
         let mut db = Database::open(&path).unwrap();
         assert_eq!(db.store().records.len(), 2, "both records survive reopen");
+        // The tables index is rebuilt at load (issue #133 step 1) — the
+        // declared-with-dim table is known without any history scan here.
+        assert_eq!(db.store().tables.get("t"), Some(&Some(2)));
         assert_eq!(db.store().edges.len(), 1, "edge survives reopen");
         let results = db
             .execute(&parse(
