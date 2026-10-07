@@ -1,11 +1,11 @@
 # nqlite — Research Findings
 
-Collected 2026-08 (direct, primary sources). Updates this doc when a decision
-changes (docs trend concurrency with code). Sources are dated/attributed inline.
+Collected 2026-08 from primary sources and official documentation — dated and
+attributed inline. Update this doc when a decision changes (docs move in the
+same PR as code).
 
-> Method note: the initial parallel research delegate batch (`deleg_d3bf401b`)
-> failed to return results (upstream API 500 on final synthesis). The material
-> below was instead gathered directly via primary-source fetches and official docs.
+> Method: gathered directly via primary-source fetches and official docs;
+> re-verify any claim whose source has since moved.
 
 ---
 
@@ -109,11 +109,11 @@ is *outside*).
    crash-safe, reproducible — something mem0/Letta/Lance/chroma can't claim
    because the LLM is in their write path.
 
-## Appendix A — Salvaged from the failed delegation batch (traces only, 2026-08-03)
+## Appendix A — Additional sources (gathered 2026-08-03)
 
-The parallel research batch (deleg_d3bf401b) hit HTTP 500 on final synthesis for
-all three tasks; briefs were lost. Their raw tool-traces survived and confirm/
-extend the primary research above. Notable extra sources + facts worth keeping:
+Secondary findings from a partially-failed research batch whose raw tool-traces
+survived; every fact below stays attributable to its named source. These
+confirm and extend the primary research above:
 
 1. **langmem (LangChain's memory library)** — conceptual guide is the cleanest
    modern statement of the agent-memory model:

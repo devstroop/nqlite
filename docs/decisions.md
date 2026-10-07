@@ -1,8 +1,8 @@
 # nqlite — Consolidated Design Intent & Decisions
 
-> State: design-in-progress (2026-08). This file captures the agreed philosophy and
-> open questions BEFORE the research-backed plan. It is the source of truth for WHY.
-> The PLAN.md in this repo is the action plan; this file is the reasoning.
+> State: **locked design intent — the source of truth for WHY.** D1–D9 are
+> resolved (status inline); §6 reconciles the benchmark targets against
+> measurements (last reconciled 2026-10-07). Action plan: [PLAN.md](../PLAN.md).
 
 ## 0. The one-line pitch
 A **context-first, neural database** that is serverless like SQLite — a single
