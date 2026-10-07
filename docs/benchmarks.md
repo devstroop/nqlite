@@ -75,14 +75,18 @@ range) because both are exact scans over in-memory data; hybrid ≈ kNN + BM25.
 `scripts/bench-compare/bench.py` runs the same corpus against sqlite-vec,
 LanceDB and Chroma **when their Python drivers are importable**; a missing
 driver is reported as `skipped` — the harness never fails because a competitor
-isn't installed. sqlite-vec is now wired **including the `rec@10` quality
-column** (mean over 30 queries vs exact cosine top-10 on the shared corpus;
-vec0's L2-only ranking is made cosine-equivalent by unit-normalizing vectors —
-see the driver comments); LanceDB/Chroma still report latency only.
+isn't installed. All three drivers are now wired **including the `rec@10`
+quality column** (mean over 30 queries vs exact cosine top-10 on the shared
+corpus; each store's vectors are unit-normalized at insert so its L2 ranking
+is cosine-equivalent — see the shared `unit`/`mean_recall10` helpers in the
+driver; lancedb rows carry an `id` column for index mapping).
 
 Latest run with all columns: [`scripts/bench-compare/report-2026-10-06.md`](../scripts/bench-compare/report-2026-10-06.md)
-(Xeon box: recall nqlite **1.0000 @1k / 0.96 @5k** vs sqlite-vec **1.0000** —
-different bases, stated plainly in the report). The earlier
+(**all three competitors installed** — sqlite-vec 0.1.9, lancedb 0.39.0,
+chromadb 1.5.9): recall nqlite **1.0000 @1k / 0.96 @5k** vs **1.0000 for all
+three competitors at both sizes** (competitors' rec@10 = 30-query mean vs
+exact cosine top-10 on the shared corpus, vectors unit-normalized so their
+L2 ranking ≡ cosine — bases stated in the report). The earlier
 `report-2026-08-04.md` (Raspberry Pi, all three drivers) remains the
 three-driver *latency* reference — numbers are never comparable across those
 two machines.

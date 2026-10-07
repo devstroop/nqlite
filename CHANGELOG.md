@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — the driver was always skipped for missing installs). New report:
   `scripts/bench-compare/report-2026-10-06.md` (nqlite 1.0000 @1k / 0.96 @5k
   vs sqlite-vec 1.0000, Xeon box, all bindings stated); benchmarks.md updated.
+  Follow-up same day: the column extended to **all three** competitors
+  (lancedb 0.39.0, chromadb 1.5.9 installed — shared `unit`/`mean_recall10`
+  helpers, `id` column added to the lancedb driver; every system now reports
+  rec@10, 1.0000 for the exact-at-scale competitors in the full-matrix rerun).
 - decisions §6 reconciled with measurements (issue #115): "reopen cold and
   query a 100K-record store in **milliseconds**" retired in favor of the
   profiled numbers (release, reference box: reopen ~0.7 s decode-bound,
