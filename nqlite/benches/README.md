@@ -1,6 +1,6 @@
 # nqlite benchmarks
 
-Criterion benchmark harness for the **engine** (not the nql parser). All inputs
+Criterion benchmark harness for the **engine** (not the NQL parser). All inputs
 are built programmatically as `nql_ir::Statement` values from a fixed-seed,
 deterministic PRNG (xorshift64* — no `rand` dependency), so every run sees
 byte-identical data and results are comparable across runs and machines.

@@ -136,6 +136,10 @@ impl Ctx {
                 validate_record_id(&path.start)?;
                 Ok(stmt.clone())
             }
+            Statement::MatchCount(path) => {
+                validate_record_id(&path.start)?;
+                Ok(stmt.clone())
+            }
             Statement::Closure(path) => {
                 validate_record_id(&path.start)?;
                 Ok(stmt.clone())
@@ -153,6 +157,16 @@ impl Ctx {
                 Ok(stmt.clone())
             }
             Statement::Memory { .. } => Ok(stmt.clone()),
+            // WAL-only plan-boundary marker (issue #109): the parser can
+            // never produce it and analyzed plans never contain it; pass
+            // through defensively instead of panicking.
+            Statement::ContextReset => Ok(stmt.clone()),
+            // History compaction (issue #95): PRUNE validates nothing;
+            // snapshots are replay-only and never reach analysis.
+            Statement::PruneHistory => Ok(stmt.clone()),
+            Statement::Snapshot(_) => Ok(stmt.clone()),
+            // Delta read (issue #118): read-only, validates nothing.
+            Statement::HistorySince(_) => Ok(stmt.clone()),
         }
     }
 }

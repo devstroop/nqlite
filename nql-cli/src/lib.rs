@@ -102,6 +102,7 @@ impl Session {
                     .collect();
                 format!("CLOSURE {} {}", path.start, hops.join(" "))
             }
+            nqlite::QueryKind::History { since } => format!("HISTORY SINCE {since}"),
         };
         writeln!(self.out, "{label} ({} rows)", r.rows.len())?;
         for s in &r.rows {

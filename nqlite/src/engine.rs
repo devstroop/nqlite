@@ -16,9 +16,10 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use nql_ir::{
-    Filter, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge, Select, Statement,
-    Store, Value, VoteCounts,
+    Aggregate, CmpOp, Filter, Id, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge,
+    Select, SnapshotState, Statement, Store, Value, VoteCounts,
 };
+use std::borrow::Cow;
 
 use crate::bm25::{tokenize, Bm25Index};
 use crate::error::{Error, Result};
@@ -43,6 +44,9 @@ pub enum QueryKind {
     Match(MatchPath),
     /// A `CLOSURE` transitive traversal (with the path that was walked).
     Closure(MatchPath),
+    /// A `HISTORY SINCE <ts>` delta read (issue #118) — one row per mutation
+    /// after the cutoff (rows AND edges), labeled with the cutoff.
+    History { since: i64 },
 }
 
 /// The result of one read statement (`SELECT` or `MATCH`) inside a plan.
@@ -108,6 +112,13 @@ pub fn execute_in_context(
         *current_memory = Some(name.clone());
         return Ok(None);
     }
+    // WAL plan-boundary marker (issue #109): the flat write-ahead log has no
+    // other way to say "the plan ended here" — reset the context so later
+    // frames replay at root, matching execute_plan's fresh-plan start.
+    if let Statement::ContextReset = stmt {
+        *current_memory = None;
+        return Ok(None);
+    }
     match current_memory {
         Some(name) => {
             let memory = store.memories.get_mut(name).expect("memory created above");
@@ -122,6 +133,34 @@ pub fn execute_in_context(
 pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<QueryResult>> {
     match stmt {
         Statement::Memory { name } => Err(Error::MemoryWithoutContext { name: name.clone() }),
+        // WAL-only marker: intercepted by `execute_in_context` before this
+        // point; the arm exists for exhaustive matching (and `replay_as_of`,
+        // whose per-store history never contains markers).
+        Statement::ContextReset => Ok(None),
+        // History compaction (issue #95): PRUNE snapshots the current state
+        // (memories depth-first) and keeps only declarations + the snapshot.
+        Statement::PruneHistory => {
+            prune_history(store);
+            Ok(None)
+        }
+        // History-compaction base (issue #95): only replay executes this — it
+        // installs the state the pruned prefix would have reconstructed, and
+        // the statements after it replay on top exactly as they did
+        // originally. Never in plans or the WAL.
+        Statement::Snapshot(state) => {
+            *store = state.as_ref().clone().into_store();
+            Ok(None)
+        }
+        // Exact delta read (issue #118): every mutation strictly after the
+        // cutoff, as one row per entry — the sync consumer's alternative to
+        // two full `AS OF` replays (and blind to nothing: edges included).
+        Statement::HistorySince(since) => {
+            let rows = history_since(store, *since)?;
+            Ok(Some(QueryResult {
+                kind: QueryKind::History { since: *since },
+                rows,
+            }))
+        }
         Statement::CreateTable { table, vector_dim } => {
             // Declaring a table with a dim sets `vector_dims[table]`;
             // declaring without one clears any previous declaration.
@@ -133,17 +172,43 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
                     store.vector_dims.remove(table);
                 }
             }
+            // The tables index carries EVERY declaration (with or without a
+            // dim) — the seeding source that replaces history scans (issue
+            // #133 step 1).
+            store.tables.insert(table.clone(), *vector_dim);
             store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Insert(rec) => {
             validate_embedding(store, rec)?;
-            store.insert(rec.clone());
+            // Clock created_at to the mutation timestamp this INSERT is about
+            // to receive — but only when unset (issue #107): the parser
+            // always leaves 0 ("Engine clocks created_at per-transaction"),
+            // and without a stamp `ORDER BY ::recency` degenerates to id
+            // order. Explicit IR-provided values are honored as-is.
+            // `log_mutation` below does `clock += 1`, so `clock + 1` *is*
+            // this statement's timestamp — WAL/AS OF replay re-derives the
+            // same stamps from statement order (and passes explicit values
+            // through unchanged), keeping the determinism contract.
+            let mut rec = rec.clone();
+            if rec.created_at == 0 {
+                rec.created_at = store.clock + 1;
+            }
+            store.insert(rec);
             store.log_mutation(stmt);
             Ok(None)
         }
         Statement::Relate(edge) => {
-            store.edges.push(edge.clone());
+            // Same rule as Insert (issue #107): edge.created_at drives
+            // ::feedback's decay. nql `SET created_at = ...` lands in `props`
+            // (only `weight` is special-cased), so the field arrives as 0
+            // from every nql/MCP path and gets stamped; explicit IR values
+            // pass through.
+            let mut edge = edge.clone();
+            if edge.created_at == 0 {
+                edge.created_at = store.clock + 1;
+            }
+            store.edges.push(edge);
             store.log_mutation(stmt);
             Ok(None)
         }
@@ -155,26 +220,51 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             Ok(None)
         }
         Statement::Select(sel) => {
-            let rows = run_select(store, sel);
+            let rows = run_select(store, sel)?;
             Ok(Some(QueryResult {
                 kind: QueryKind::Select(sel.clone()),
                 rows,
             }))
         }
         Statement::Match(path) => {
-            let rows = run_match(store, path);
+            let target = temporal_target(store, path.as_of)?;
+            let rows = run_match(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
                 rows,
             }))
         }
+        Statement::MatchCount(path) => {
+            // Walk-count mode (issue #94): one `{"count": n}` row; the query
+            // kind stays `Match` so transports label the result unchanged.
+            let table = path.start.table.clone();
+            let target = temporal_target(store, path.as_of)?;
+            let n = run_match_count(&target, path);
+            Ok(Some(QueryResult {
+                kind: QueryKind::Match(path.clone()),
+                rows: vec![count_row(&table, n)],
+            }))
+        }
         Statement::Closure(path) => {
-            let rows = run_closure(store, path);
+            let target = temporal_target(store, path.as_of)?;
+            let rows = run_closure(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Closure(path.clone()),
                 rows,
             }))
         }
+    }
+}
+
+/// The store a temporal graph read runs against (spec §2.7, issue #92):
+/// replayed to `as_of` when present — the exact machinery
+/// `SELECT ... AS OF` uses — or the current store otherwise. `MATCH`,
+/// `MATCH ... COUNT`, and `CLOSURE` all go through here, so a historical
+/// traversal sees exactly the records and edges that existed at the cutoff.
+fn temporal_target(store: &Store, as_of: Option<i64>) -> Result<Cow<'_, Store>> {
+    match as_of {
+        Some(cutoff) => Ok(Cow::Owned(replay_as_of(store, cutoff)?)),
+        None => Ok(Cow::Borrowed(store)),
     }
 }
 
@@ -203,15 +293,16 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 /// configured [`VectorIndex`] (default: exact [`BruteForceVectorIndex`])
 /// rather than an inline cosine scan. The index is rebuilt from the filtered
 /// candidates on every call, so the result stays a pure, deterministic
-/// function of `(store, select)`.
-fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
+/// function of `(store, select)`. A temporal read whose cutoff predates the
+/// store's history snapshot returns [`Error::HistoryPruned`] (issue #95).
+fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
     // Temporal read (`AS OF T`): replay the mutation history up to the
     // cutoff into a fresh store and query THAT — the historical view is a
     // pure function of (history, T). Everything below runs against `target`.
     let replay_store;
     let target = match sel.as_of {
         Some(cutoff) => {
-            replay_store = replay_as_of(store, cutoff);
+            replay_store = replay_as_of(store, cutoff)?;
             &replay_store
         }
         None => store,
@@ -224,6 +315,14 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         .filter(|r| matches_filter(r, sel.filter.as_ref()))
         .cloned()
         .collect();
+
+    // `SELECT COUNT(*)` (spec §2.3, issue #94): one `{"count": n}` row with
+    // the number of records that passed the WHERE filter — computed before
+    // scoring, ordering, offset/limit, and projection (those never affect the
+    // count), and no kNN/BM25 index is built for it.
+    if let Some(Aggregate::CountStar) = sel.aggregate {
+        return Ok(vec![count_row(&sel.table, candidates.len() as u64)]);
+    }
 
     // Rank every embedded candidate against the query through the index.
     // Non-embedded records are absent from the index and fall back to a
@@ -313,13 +412,38 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
         })
         .collect();
 
+    // `ORDER BY <field>` typo guard (issue #117): if this query returns rows
+    // but NO record of the table carries the key, the sort would be silently
+    // all-equal (id order) — fail loudly instead. Empty results skip the
+    // check: there is nothing to mis-sort.
+    if let Some(Order::Field { key, .. }) = sel.order.as_ref() {
+        if !rows.is_empty()
+            && !target
+                .records
+                .values()
+                .any(|r| r.id.table == sel.table && r.body.contains_key(key))
+        {
+            return Err(Error::UnknownSortField {
+                field: key.clone(),
+                table: sel.table.clone(),
+            });
+        }
+    }
+
     order_rows(&mut rows, sel);
+
+    // `OFFSET n` (spec §2.3, issue #94): skip the first n rows after
+    // ordering; the limit / kNN-k / BM25-k caps then apply to what remains.
+    if let Some(offset) = sel.offset {
+        let skip = offset.min(rows.len());
+        rows.drain(..skip);
+    }
 
     if let Some(limit) = effective_limit(sel) {
         rows.truncate(limit);
     }
 
-    // Field projection (spec §2.3 step 7, issue #91): keep only the listed
+    // Field projection (spec §2.3 step 8, issue #91): keep only the listed
     // body keys — presentation only, after all filtering/scoring/ordering, so
     // a projection can never change which rows rank. Missing keys are simply
     // absent (SQL-like); `SELECT *` (`fields == None`) is untouched.
@@ -328,15 +452,35 @@ fn run_select(store: &Store, sel: &Select) -> Vec<ScoredRecord> {
             row.record.body.retain(|k, _| fields.iter().any(|f| f == k));
         }
     }
-    rows
+    Ok(rows)
 }
 
 /// Replay the store's mutation history up to (and including) logical
 /// timestamp `cutoff` into a fresh [`Store`], then return it. Deterministic:
 /// history is append-only in execution order, and each replayed statement is
 /// executed the same way it originally was — so the view is a pure function
-/// of `(store.history, cutoff)`.
-fn replay_as_of(store: &Store, cutoff: i64) -> Store {
+/// of `(store.history, cutoff)` (or an [`Error::HistoryPruned`] when a
+/// compaction snapshot postdates the cutoff, issue #95).
+/// The timestamp of the history-compaction snapshot, when one exists
+/// (issues #95/#118): temporal reads below this horizon are unavailable —/// the pruned prefix cannot be reconstructed.
+fn compaction_horizon(store: &Store) -> Option<i64> {
+    store
+        .history
+        .iter()
+        .find_map(|(ts, stmt)| matches!(stmt, Statement::Snapshot(_)).then_some(*ts))
+}
+
+fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
+    // Compacted history (issue #95): a cutoff before the snapshot cannot be
+    // reconstructed — the pruned prefix is gone. Fail loudly rather than
+    // returning a partial (declarations-only) view.
+    if let Some(snap_ts) = compaction_horizon(store) {
+        if cutoff < snap_ts {
+            return Err(Error::HistoryPruned {
+                pruned_through: snap_ts,
+            });
+        }
+    }
     let mut view = Store::default();
     for (ts, stmt) in &store.history {
         if *ts > cutoff {
@@ -347,7 +491,124 @@ fn replay_as_of(store: &Store, cutoff: i64) -> Store {
         // corrupt history, so panic loudly rather than silently truncate.
         let _ = execute_statement(&mut view, stmt).expect("history replay is total");
     }
-    view
+    Ok(view)
+}
+
+/// History compaction (`PRUNE HISTORY`, issue #95): replace `store`'s history
+/// with the `CreateTable` declaration statements it contained (at their
+/// original timestamps — the only record of empty/dim-less table
+/// declarations, issue #89; re-executing them is idempotent) plus a single
+/// [`Statement::Snapshot`] entry at the current clock. Memories are pruned
+/// depth-first first, so the embedded stores arrive already compact.
+///
+/// Deterministic (a pure function of the store) and bounded: history stops
+/// growing by one entry per mutation forever. `AS OF` before the snapshot now
+/// fails with [`Error::HistoryPruned`]; from the snapshot onward, replay
+/// rebuilds the view without walking the pruned prefix.
+fn prune_history(store: &mut Store) {
+    for memory in store.memories.values_mut() {
+        prune_history(memory);
+    }
+    let decls: Vec<(i64, Statement)> = store
+        .history
+        .iter()
+        .filter(|(_, stmt)| matches!(stmt, Statement::CreateTable { .. }))
+        .cloned()
+        .collect();
+    let state = SnapshotState {
+        records: store.records.clone(),
+        edges: store.edges.clone(),
+        vector_dims: store.vector_dims.clone(),
+        clock: store.clock,
+        memories: store.memories.clone(),
+        tables: store.tables.clone(),
+    };
+    let mut history = decls;
+    history.push((store.clock, Statement::Snapshot(Box::new(state))));
+    store.history = history;
+}
+
+/// `HISTORY SINCE <ts>` (issue #118): every mutation strictly after the
+/// cutoff, in append (ts-ascending) order — one row per entry carrying the
+/// mutation kind and its subject ids, so a sync consumer sees changed rows
+/// **and** changed edges (plus tombstones) in one read instead of diffing
+/// two full `AS OF` replays — a row-diff is blind to edge-only mutations.
+///
+/// Pure function of `(history, since)`: append-only order, deterministic
+/// kinds/subjects. The `PRUNE HISTORY` retention horizon applies (a cutoff
+/// below the snapshot cannot be answered — same `HistoryPruned` contract as
+/// `AS OF`), and snapshot entries themselves are compaction bookkeeping,
+/// never reported as mutations. Scoped stores (MEMORY blocks) return their
+/// own deltas via the usual context routing.
+fn history_since(store: &Store, since: i64) -> Result<Vec<ScoredRecord>> {
+    if let Some(snap_ts) = compaction_horizon(store) {
+        if since < snap_ts {
+            return Err(Error::HistoryPruned {
+                pruned_through: snap_ts,
+            });
+        }
+    }
+    let mut rows = Vec::new();
+    for (ts, stmt) in &store.history {
+        if *ts <= since {
+            continue;
+        }
+        let mut body = BTreeMap::new();
+        body.insert("ts".into(), Value::Int(*ts));
+        let kind = match stmt {
+            Statement::CreateTable { table, vector_dim } => {
+                body.insert("table".into(), Value::Str(table.clone()));
+                if let Some(dim) = vector_dim {
+                    body.insert("dim".into(), Value::Int(*dim as i64));
+                }
+                "CREATE"
+            }
+            Statement::Insert(rec) => {
+                body.insert("id".into(), Value::Str(rec.id.to_string()));
+                "INSERT"
+            }
+            Statement::Relate(edge) => {
+                body.insert("from".into(), Value::Str(edge.from.to_string()));
+                body.insert("to".into(), Value::Str(edge.to.to_string()));
+                body.insert("name".into(), Value::Str(edge.name.clone()));
+                "RELATE"
+            }
+            Statement::Forget { id } => {
+                body.insert("id".into(), Value::Str(id.to_string()));
+                "FORGET"
+            }
+            // Compaction bookkeeping (issue #95): not a mutation — the
+            // horizon guard above already covered its region.
+            Statement::Snapshot(_) => continue,
+            // Unreachable in a well-formed history (only the four mutations
+            // above are ever `log_mutation`d) — labeled deterministically
+            // instead of dropped, should that ever change.
+            Statement::Memory { name } => {
+                body.insert("name".into(), Value::Str(name.clone()));
+                "MEMORY"
+            }
+            Statement::PruneHistory => "PRUNE",
+            Statement::HistorySince(since) => {
+                body.insert("since".into(), Value::Int(*since));
+                "HISTORY_SINCE"
+            }
+            Statement::ContextReset => "CONTEXT_RESET",
+            Statement::Select(_) => "SELECT",
+            Statement::Match(_) | Statement::MatchCount(_) => "MATCH",
+            Statement::Closure(_) => "CLOSURE",
+        };
+        body.insert("kind".into(), Value::Str(kind.into()));
+        rows.push(ScoredRecord {
+            record: Record {
+                id: RecordId::new("history", Id::Str(ts.to_string())),
+                body,
+                embedding: None,
+                created_at: *ts,
+            },
+            score: *ts as f32,
+        });
+    }
+    Ok(rows)
 }
 
 /// Execute a [`MatchPath`] against `store`.
@@ -410,6 +671,53 @@ fn run_match(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
             })
         })
         .collect()
+}
+
+/// `MATCH ... COUNT` (spec §2.5, issue #94): the number of edge-path
+/// INSTANCES (walks) matching the steps — parallel edges each count, so the
+/// multiplicity between two records stays observable (the endpoint dedup
+/// [`run_match`] applies for rows would hide it). At every step a node's
+/// walk count accumulates `walks(from)` once per matching edge, so for a
+/// single step the total is exactly the number of matching edges, and for
+/// multiple steps it is the number of distinct walks.
+///
+/// Deterministic (u64 accumulation is order-independent), saturating (never
+/// panics on overflow), and spec §2.5-consistent: a missing start yields 0
+/// and dangling edges are skipped.
+fn run_match_count(store: &Store, path: &MatchPath) -> u64 {
+    if !store.records.contains_key(&path.start) {
+        return 0;
+    }
+    // Frontier of node → number of walks reaching it.
+    let mut frontier: BTreeMap<RecordId, u64> = BTreeMap::from([(path.start.clone(), 1)]);
+    for step in &path.steps {
+        let mut next: BTreeMap<RecordId, u64> = BTreeMap::new();
+        for edge in &store.edges {
+            let (from_side, to_side) = match step.direction {
+                MatchDirection::Out => (&edge.from, &edge.to),
+                MatchDirection::In => (&edge.to, &edge.from),
+            };
+            if !edge_name_matches(&edge.name, &step.name) {
+                continue;
+            }
+            let Some(&walks) = frontier.get(from_side) else {
+                continue;
+            };
+            if !matches_edge_props(edge, step.edge_props.as_ref()) {
+                continue;
+            }
+            if !store.records.contains_key(to_side) {
+                continue; // dangling edge: skip
+            }
+            let slot = next.entry(to_side.clone()).or_insert(0);
+            *slot = slot.saturating_add(walks);
+        }
+        if next.is_empty() {
+            return 0;
+        }
+        frontier = next;
+    }
+    frontier.values().copied().fold(0u64, u64::saturating_add)
 }
 
 /// Execute a [`MatchPath`] as a transitive closure against `store`.
@@ -508,16 +816,20 @@ fn run_closure(store: &Store, path: &MatchPath) -> Vec<ScoredRecord> {
         .collect()
 }
 
-/// Apply a step's optional edge-property filter: `edge.props[field] == value`.
-/// `None` accepts every edge; only `Filter::FieldEquals` is a valid filter
-/// here (the parser only produces that shape).
+/// Apply a step's optional edge-property filter (spec §2.5): any *field*
+/// predicate — equality, comparison, `IN`, `BETWEEN` (issue #93) — evaluated
+/// against the edge's props via [`matches_field_pred`]. `None` accepts every
+/// edge.
 fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
     match filter {
         None => true,
-        Some(Filter::FieldEquals { field, value }) => edge.props.get(field) == Some(value),
-        // The IR contract says only FieldEquals is valid; anything else is
-        // treated as a non-match rather than a panic (defensive).
-        Some(_) => false,
+        // Embedding presence and BM25 scoring are not edge-props predicates;
+        // the parser never produces them here. Defensive, not a panic.
+        Some(Filter::HasEmbedding | Filter::Bm25 { .. }) => false,
+        // All-of over terms (issue #125): each term re-enters this fn, so a
+        // HasEmbedding term inside an And is still a non-match on an edge.
+        Some(Filter::And(terms)) => terms.iter().all(|t| matches_edge_props(edge, Some(t))),
+        Some(f) => matches_field_pred(&edge.props, f),
     }
 }
 
@@ -541,6 +853,22 @@ fn build_default_index(records: &[Record]) -> Box<dyn VectorIndex> {
 /// keys keep their (BTree) input order; we additionally tie-break by
 /// ascending [`RecordId`] so the final order is total and reproducible.
 fn order_rows(rows: &mut [ScoredRecord], sel: &Select) {
+    // `ORDER BY <field> [DESC]` (issue #117): explicit structural sort, same
+    // precedence as `::recency` — it wins over the score-based modes below.
+    // Absent/explicit-null fields rank as `null` (lowest) under
+    // `Value::cmp_total`; `desc` reverses the key ONLY — ties always keep
+    // ascending RecordId (the §2.1 total order holds in both directions).
+    if let Some(Order::Field { key, desc }) = sel.order.as_ref() {
+        let null = Value::Null;
+        rows.sort_by(|a, b| {
+            let ka = a.record.body.get(key).unwrap_or(&null);
+            let kb = b.record.body.get(key).unwrap_or(&null);
+            let ord = ka.cmp_total(kb);
+            let ord = if *desc { ord.reverse() } else { ord };
+            ord.then_with(|| a.record.id.cmp(&b.record.id))
+        });
+        return;
+    }
     if matches!(sel.order.as_ref(), Some(Order::Recency)) {
         rows.sort_by(|a, b| {
             b.record
@@ -580,16 +908,113 @@ fn effective_limit(sel: &Select) -> Option<usize> {
     caps.into_iter().min()
 }
 
-/// Apply the select's field filter. `FieldEquals` uses the derived `PartialEq`
-/// on [`Value`] (exact, deterministic equality); `HasEmbedding` requires a
-/// non-`None` embedding. `Bm25` is a *scoring* filter: it never prunes rows —
-/// every row of the table is returned and ranked by its lexical score.
+/// Apply the select's field filter. Field predicates (equality, comparison,
+/// `IN`, `BETWEEN`) use [`matches_field_pred`] — exact `PartialEq` for `=`
+/// and the total order [`Value::cmp_total`] for ranges (issue #93);
+/// `HasEmbedding` requires a non-`None` embedding. `Bm25` is a *scoring*
+/// filter: it never prunes rows — every row of the table is returned and
+/// ranked by its lexical score.
 fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
     match filter {
         None => true,
         Some(Filter::HasEmbedding) => rec.embedding.is_some(),
-        Some(Filter::FieldEquals { field, value }) => rec.body.get(field) == Some(value),
         Some(Filter::Bm25 { .. }) => true,
+        // All-of over terms (issue #125): recursion keeps each term's own
+        // semantics (missing-field rules, IS NOT NULL on embeddings).
+        Some(Filter::And(terms)) => terms.iter().all(|t| matches_filter(rec, Some(t))),
+        // `id` pseudo-field (issue #128): bound to the record's own identity
+        // — a body key named `id` never shadows it.
+        Some(f) if predicate_field(f) == Some("id") => record_id_matches(rec, f),
+        Some(f) => matches_field_pred(&rec.body, f),
+    }
+}
+
+/// The body field a field-level predicate reads (`None` for the non-field
+/// filters: embedding presence, BM25, conjunctions).
+fn predicate_field(filter: &Filter) -> Option<&str> {
+    match filter {
+        Filter::FieldEquals { field, .. }
+        | Filter::FieldCmp { field, .. }
+        | Filter::FieldIn { field, .. }
+        | Filter::FieldBetween { field, .. } => Some(field),
+        _ => None,
+    }
+}
+
+/// The `id` pseudo-field (issue #128): field predicates on `id` compare
+/// against the record's own identity in display form (`table:id`) — the
+/// rerank-pool predicate (`WHERE id IN [...]`). `!=` is the exact complement
+/// of `=` (the #93 rule). Ordered forms are parse-rejected for `id`; an
+/// IR-injected one gets a non-match rather than an invented order. Only
+/// reached for RECORD filters — edge filters have no record identity, so
+/// `id` there falls through to an ordinary prop lookup.
+fn record_id_matches(rec: &Record, filter: &Filter) -> bool {
+    let me = rec.id.to_string();
+    let is_me = |v: &Value| matches!(v, Value::Str(s) if *s == me);
+    match filter {
+        Filter::FieldEquals { value, .. } => is_me(value),
+        Filter::FieldCmp {
+            op: CmpOp::Ne,
+            value,
+            ..
+        } => !is_me(value),
+        Filter::FieldIn { values, .. } => values.iter().any(is_me),
+        _ => false,
+    }
+}
+
+/// A field-level predicate (equality / comparison / `IN` / `BETWEEN`)
+/// evaluated against a props map — record bodies and edge props share it
+/// (issue #93, spec §2.3).
+///
+/// Semantics: a record/edge that does not carry the field **never matches**
+/// (the same rule `=` has always had — so `= v` and `!= v` are complements).
+/// Values that are present compare with [`Value::cmp_total`] for the range
+/// operators (`<`, `<=`, `>`, `>=`, `BETWEEN`) — a total cross-type order in
+/// which an explicit `null` ranks below every other type — while `=`, `!=`,
+/// and `IN` use the exact derived equality on [`Value`].
+fn matches_field_pred(props: &BTreeMap<String, Value>, filter: &Filter) -> bool {
+    match filter {
+        Filter::FieldEquals { field, value } => props.get(field) == Some(value),
+        Filter::FieldCmp { field, op, value } => {
+            let Some(lhs) = props.get(field) else {
+                return false;
+            };
+            match op {
+                CmpOp::Ne => lhs != value,
+                CmpOp::Lt => lhs.cmp_total(value) == Ordering::Less,
+                CmpOp::Le => lhs.cmp_total(value) != Ordering::Greater,
+                CmpOp::Gt => lhs.cmp_total(value) == Ordering::Greater,
+                CmpOp::Ge => lhs.cmp_total(value) != Ordering::Less,
+            }
+        }
+        Filter::FieldIn { field, values } => props.get(field).is_some_and(|v| values.contains(v)),
+        Filter::FieldBetween { field, lo, hi } => {
+            let Some(lhs) = props.get(field) else {
+                return false;
+            };
+            lhs.cmp_total(lo) != Ordering::Less && lhs.cmp_total(hi) != Ordering::Greater
+        }
+        // Handled by the callers above — not body-value predicates.
+        Filter::HasEmbedding | Filter::Bm25 { .. } => true,
+        // Reached only by direct calls (both wrappers intercept And first);
+        // recursion preserves all-of semantics on the props-only subset.
+        Filter::And(terms) => terms.iter().all(|t| matches_field_pred(props, t)),
+    }
+}
+
+/// The single result row of an aggregate: `{"count": n}` as a synthetic
+/// record in the queried table (id `table:count`, no embedding, score 0), so
+/// it flows through every transport's normal row encoding unchanged.
+fn count_row(table: &str, n: u64) -> ScoredRecord {
+    ScoredRecord {
+        record: Record {
+            id: RecordId::new(table, Id::Str("count".into())),
+            body: BTreeMap::from([("count".into(), Value::Int(n as i64))]),
+            embedding: None,
+            created_at: 0,
+        },
+        score: 0.0,
     }
 }
 
@@ -608,8 +1033,13 @@ fn matches_filter(rec: &Record, filter: Option<&Filter>) -> bool {
 /// - `Order::Salience` with kNN → `0.7 * similarity + 0.3 * normalized_score`,
 ///   where `normalized_score` is the Laplace score clamped to `[0, 1]`
 ///   (weights are treated as `[0, 1]` confidence values; the clamp keeps the
-///   blend in range even for out-of-range weights).
+///   blend in range even for out-of-range weights). These are the engine
+///   defaults of the spec §2.3 four-term formula (α=0.7, β=0, γ=0, δ=0.3).
 /// - `Order::Salience` without kNN → the normalized score alone.
+/// - `Order::SalienceWeighted([α, β, γ, δ])` → the same four-term formula with
+///   agent-tuned weights (parsed from `ORDER BY ::salience(α, β, γ, δ)`):
+///   `α·similarity + β·strength + γ·importance + δ·normalized_score` — see
+///   [`strength_of`] and [`importance_of`] for the β/γ term definitions.
 /// - Anything else → cosine similarity vs the kNN query (`0.0` when there is
 ///   no kNN clause, or when the record has no embedding / zero-norm vector).
 fn compute_score(
@@ -652,6 +1082,13 @@ fn compute_score(
             0.7 * similarity + 0.3 * score_of(store, rec).clamp(0.0, 1.0)
         }
         Some(Order::Salience) => score_of(store, rec).clamp(0.0, 1.0),
+        Some(Order::SalienceWeighted(w)) => {
+            let [alpha, beta, gamma, delta] = *w;
+            alpha * similarity
+                + beta * strength_of(store, rec)
+                + gamma * importance_of(rec)
+                + delta * score_of(store, rec).clamp(0.0, 1.0)
+        }
         _ => similarity,
     }
 }
@@ -756,6 +1193,42 @@ pub fn vote_counts(store: &Store, id: &RecordId) -> VoteCounts {
         down,
         net: up as i64 - down as i64,
     }
+}
+
+/// `strength(recency, freq)` — the β term of `::salience(α, β, γ, δ)`, in
+/// `[0, 1]`. Deterministic and pure (spec §2.3):
+///
+/// ```text
+/// strength = (recency + freq) / 2
+/// recency  = 1 / (1 + age),   age = max(0, clock − created_at)
+/// freq     = n / (n + 1),      n   = incident edges (either direction)
+/// ```
+///
+/// Recency uses the same `1/(1+λ·age)` shape (λ=1) as [`feedback_score`]; freq
+/// saturates toward 1 as the record draws more edges. A record stamped this
+/// transaction is age 0 → recency 1.0. Engine defaults give this term zero
+/// weight (β=0) — agents opt in per-query.
+fn strength_of(store: &Store, rec: &Record) -> f32 {
+    let age = (store.clock - rec.created_at).max(0) as f32;
+    let recency = 1.0 / (1.0 + age);
+    let n = store
+        .edges
+        .iter()
+        .filter(|e| e.from == rec.id || e.to == rec.id)
+        .count() as f32;
+    0.5 * recency + 0.5 * (n / (n + 1.0))
+}
+
+/// The γ term of `::salience(α, β, γ, δ)`: the agent-written `importance`
+/// field clamped to `[0, 1]`. Missing or non-numeric → `0.0` (spec §5: the
+/// engine never invents importance).
+fn importance_of(rec: &Record) -> f32 {
+    let v = match rec.body.get("importance") {
+        Some(Value::Float(v)) => *v as f32,
+        Some(Value::Int(v)) => *v as f32,
+        _ => 0.0,
+    };
+    v.clamp(0.0, 1.0)
 }
 
 /// Time-decayed recent feedback over a record's `:voted` edges.
@@ -1293,6 +1766,93 @@ mod tests {
     }
 
     #[test]
+    fn created_at_stamped_per_mutation() {
+        // Issue #107: the parser leaves created_at = 0 with the comment
+        // "Engine clocks created_at per-transaction" — the clocking lives
+        // HERE. Each stamp is the statement's mutation timestamp (CREATE=1),
+        // which is also what AS OF replay re-derives from statement order.
+        let mut db = Database::default();
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:a", BTreeMap::new(), None)),
+            Statement::Insert(record("post:b", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+
+        let created_at_of = |id: &str| -> i64 {
+            db.store()
+                .records
+                .values()
+                .find(|r| r.id.to_string() == id)
+                .unwrap()
+                .created_at
+        };
+        assert_eq!(created_at_of("post:a"), 2, "first INSERT = ts2");
+        assert_eq!(created_at_of("post:b"), 3, "second INSERT = ts3");
+
+        // ::recency now orders newest-first (before the fix: all-zero
+        // timestamps tie-broke to ascending id — the *oldest* first).
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Recency),
+                ..select("post")
+            })])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["post:b", "post:a"], "newest first under ::recency");
+    }
+
+    #[test]
+    fn feedback_decay_uses_stamped_edge_created_at() {
+        // Issue #107: edges get stamped per RELATE, so ::feedback finally
+        // decays: two upvotes on one record at consecutive timestamps are
+        // 1.0 (age 0) + 0.5 (age 1) = 1.5 — not the age-0 2.0.
+        // NB ::feedback reads the `value` prop (like ::votes), and edges
+        // arrive with created_at = 0 from nql → stamped by the engine.
+        let vote = |user: &str| RelationEdge {
+            from: RecordId::parse(user).unwrap(),
+            name: "voted".into(),
+            to: RecordId::parse("post:1").unwrap(),
+            created_at: 0, // stamped by execute (issue #107)
+            weight: None,
+            props: BTreeMap::from([("value".into(), Value::Int(1))]),
+        };
+        let mut db = Database::default();
+        db.execute(&[
+            create("post", None),
+            Statement::Insert(record("post:1", BTreeMap::new(), None)),
+            Statement::Relate(vote("user:u1")),
+            Statement::Relate(vote("user:u2")),
+        ])
+        .unwrap();
+
+        // Stamps: CREATE=1, INSERT=2, votes at 3 and 4 → now=4, ages 1 and 0.
+        let edge_ages: Vec<i64> = db.store().edges.iter().map(|e| e.created_at).collect();
+        assert_eq!(edge_ages, [3, 4], "edges stamped at their mutation ts");
+
+        let res = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Feedback),
+                ..select("post")
+            })])
+            .unwrap();
+        let score = res[0]
+            .rows
+            .iter()
+            .find(|r| r.record.id.to_string() == "post:1")
+            .unwrap()
+            .score;
+        assert!(
+            (score - 1.5).abs() < 1e-6,
+            "expected 1.5 (second vote age-1 decayed), got {score}"
+        );
+    }
+
+    #[test]
     fn salience_blends_similarity_and_normalized_score() {
         let mut db = Database::default();
         db.execute(&[
@@ -1328,6 +1888,1531 @@ mod tests {
         assert!((s1 - 0.9).abs() < 1e-5);
         assert!((s2 - 0.15).abs() < 1e-5);
         assert_eq!(res[0].rows[0].record.id.to_string(), "doc:1");
+    }
+
+    #[test]
+    fn salience_weighted_gamma_tunes_importance_field() {
+        let mut db = Database::default();
+        let body = |imp: f64| BTreeMap::from([("importance".into(), Value::Float(imp))]);
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record("doc:1", body(0.1), Some(vec![1.0, 0.0]))),
+            Statement::Insert(record("doc:2", body(0.9), Some(vec![1.0, 0.0]))),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(order),
+                ..select("doc")
+            })])
+            .unwrap()
+        };
+        // γ = 1: the agent-written `importance` field drives the ranking —
+        // identical embeddings, so similarity alone could not separate them.
+        let res = run(Order::SalienceWeighted([0.0, 0.0, 1.0, 0.0]));
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:2", "doc:1"]);
+        assert!((res[0].rows[0].score - 0.9).abs() < 1e-6);
+        assert!((res[0].rows[1].score - 0.1).abs() < 1e-6);
+        // Bare ::salience (defaults, γ = 0) ignores the field: same similarity,
+        // no votes → tie → RecordId order.
+        let res = run(Order::Salience);
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["doc:1", "doc:2"]);
+    }
+
+    #[test]
+    fn salience_weighted_beta_tunes_strength_recency_freq() {
+        let mut db = Database::default();
+        let mut old = record("msg:aaa-old", BTreeMap::new(), None);
+        old.created_at = 1;
+        let mut new = record("msg:zzz-new", BTreeMap::new(), None);
+        new.created_at = 50;
+        db.execute(&[
+            create("msg", None),
+            Statement::Insert(old),
+            Statement::Insert(new),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                order: Some(order),
+                ..select("msg")
+            })])
+            .unwrap()
+        };
+        // β = 1: recency puts the newer record first even though its id sorts
+        // last — the RecordId tie-break can't mask the term.
+        let res = run(Order::SalienceWeighted([0.0, 1.0, 0.0, 0.0]));
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["msg:zzz-new", "msg:aaa-old"]);
+        // Defaults give strength zero weight: both score 0.5 → id order.
+        let res = run(Order::Salience);
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        assert_eq!(ids, ["msg:aaa-old", "msg:zzz-new"]);
+    }
+
+    #[test]
+    fn salience_weighted_default_weights_reproduce_bare_salience() {
+        // [0.7, 0, 0, 0.3] — the spec §2.3 engine defaults — must score
+        // identically to bare ORDER BY ::salience (backward compatibility).
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record("doc:1", BTreeMap::new(), Some(vec![1.0, 0.0]))),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("user:v").unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse("doc:1").unwrap(),
+                created_at: 1,
+                weight: Some(1.0),
+                props: BTreeMap::new(),
+            }),
+            // doc:2: no embedding, no votes -> sim 0, score 0.5.
+            Statement::Insert(record("doc:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut run = |order: Order| {
+            db.execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(order),
+                ..select("doc")
+            })])
+            .unwrap()
+        };
+        let bare: Vec<f32> = run(Order::Salience)[0]
+            .rows
+            .iter()
+            .map(|r| r.score)
+            .collect();
+        let weighted: Vec<f32> = run(Order::SalienceWeighted([0.7, 0.0, 0.0, 0.3]))[0]
+            .rows
+            .iter()
+            .map(|r| r.score)
+            .collect();
+        assert_eq!(bare, weighted);
+        assert!((bare[0] - 0.9).abs() < 1e-5);
+        assert!((bare[1] - 0.15).abs() < 1e-5);
+    }
+
+    #[test]
+    fn comparison_filters_prune_by_total_order() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("ledger", None),
+            Statement::Insert(record(
+                "ledger:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:2",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:3",
+                BTreeMap::from([("seq".into(), num(500))]),
+                None,
+            )),
+            // Type-mixed value: strings rank above every number.
+            Statement::Insert(record(
+                "ledger:4",
+                BTreeMap::from([("seq".into(), str_("abc"))]),
+                None,
+            )),
+            // No seq at all: never matches a field predicate (the `=` rule).
+            Statement::Insert(record("ledger:5", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("ledger")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // `< 100`: the two small seqs — the string ranks above, the absent
+        // field never matches.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Lt,
+                value: Value::Int(100),
+            }),
+            ["ledger:1", "ledger:2"]
+        );
+        // `> 100`: the big number AND the string (total order, cross-type).
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Gt,
+                value: Value::Int(100),
+            }),
+            ["ledger:3", "ledger:4"]
+        );
+        // Inclusive ends.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Le,
+                value: Value::Int(5),
+            }),
+            ["ledger:1"]
+        );
+        // `!=` is the complement of `=` among records that carry the field.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "seq".into(),
+                op: CmpOp::Ne,
+                value: Value::Int(50),
+            }),
+            ["ledger:1", "ledger:3", "ledger:4"]
+        );
+        // IN membership (exact equality, like `=`).
+        assert_eq!(
+            ids_where(Filter::FieldIn {
+                field: "seq".into(),
+                values: vec![Value::Int(5), Value::Int(500)],
+            }),
+            ["ledger:1", "ledger:3"]
+        );
+        // BETWEEN is inclusive on both ends.
+        assert_eq!(
+            ids_where(Filter::FieldBetween {
+                field: "seq".into(),
+                lo: Value::Int(5),
+                hi: Value::Int(50),
+            }),
+            ["ledger:1", "ledger:2"]
+        );
+        // Plain `=` still excludes the field-less record (regression).
+        assert_eq!(
+            ids_where(Filter::FieldEquals {
+                field: "seq".into(),
+                value: Value::Int(5),
+            }),
+            ["ledger:1"]
+        );
+    }
+
+    #[test]
+    fn count_star_returns_filtered_row_count() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("task", None),
+            Statement::Insert(record(
+                "task:1",
+                BTreeMap::from([("done".into(), Value::Bool(true))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "task:2",
+                BTreeMap::from([("done".into(), Value::Bool(false))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "task:3",
+                BTreeMap::from([("done".into(), Value::Bool(true))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut count_of = |filter: Option<Filter>, limit: Option<usize>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter,
+                    limit,
+                    aggregate: Some(Aggregate::CountStar),
+                    ..select("task")
+                })])
+                .unwrap();
+            assert_eq!(res[0].rows.len(), 1, "COUNT returns exactly one row");
+            res[0].rows[0].record.body.get("count").cloned()
+        };
+
+        // Whole table.
+        assert_eq!(count_of(None, None), Some(Value::Int(3)));
+        // Filtered.
+        assert_eq!(
+            count_of(
+                Some(Filter::FieldEquals {
+                    field: "done".into(),
+                    value: Value::Bool(true),
+                }),
+                None,
+            ),
+            Some(Value::Int(2))
+        );
+        // LIMIT never affects the aggregate (count = filtered total).
+        assert_eq!(count_of(None, Some(1)), Some(Value::Int(3)));
+        // Empty match → a count of zero, not an empty result.
+        assert_eq!(
+            count_of(
+                Some(Filter::FieldCmp {
+                    field: "done".into(),
+                    op: CmpOp::Gt,
+                    value: Value::Str("m".into()),
+                }),
+                None,
+            ),
+            Some(Value::Int(0))
+        );
+
+        // The row shape: synthetic id in the queried table.
+        let res = db
+            .execute(&[Statement::Select(Select {
+                aggregate: Some(Aggregate::CountStar),
+                ..select("task")
+            })])
+            .unwrap();
+        assert_eq!(res[0].rows[0].record.id.to_string(), "task:count");
+    }
+
+    #[test]
+    fn offset_skips_after_ordering_before_limit() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("page", None),
+            Statement::Insert(record("page:1", BTreeMap::new(), None)),
+            Statement::Insert(record("page:2", BTreeMap::new(), None)),
+            Statement::Insert(record("page:3", BTreeMap::new(), None)),
+            Statement::Insert(record("page:4", BTreeMap::new(), None)),
+            Statement::Insert(record("page:5", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        let mut window = |offset: Option<usize>, limit: Option<usize>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    offset,
+                    limit,
+                    ..select("page")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // OFFSET alone: everything after the skip (BTree order).
+        assert_eq!(window(Some(2), None), ["page:3", "page:4", "page:5"]);
+        // OFFSET + LIMIT: a pagination window.
+        assert_eq!(window(Some(2), Some(2)), ["page:3", "page:4"]);
+        // Past the end: empty, no panic.
+        assert_eq!(window(Some(9), Some(3)), Vec::<String>::new());
+        // No offset → unchanged baseline.
+        assert_eq!(window(None, Some(2)), ["page:1", "page:2"]);
+    }
+
+    #[test]
+    fn match_count_reports_edge_multiplicity() {
+        let mut db = Database::default();
+        let rel = |from: &str, to: &str, confidence: f64| {
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse(from).unwrap(),
+                name: "edge".into(),
+                to: RecordId::parse(to).unwrap(),
+                created_at: 0,
+                weight: None,
+                props: BTreeMap::from([("confidence".into(), Value::Float(confidence))]),
+            })
+        };
+        db.execute(&[
+            create("a", None),
+            create("b", None),
+            create("c", None),
+            Statement::Insert(record("a:1", BTreeMap::new(), None)),
+            Statement::Insert(record("b:1", BTreeMap::new(), None)),
+            Statement::Insert(record("b:2", BTreeMap::new(), None)),
+            Statement::Insert(record("c:1", BTreeMap::new(), None)),
+            // Parallel edges a:1 -> b:1 that row-MATCH deduplicates away.
+            rel("a:1", "b:1", 0.9),
+            rel("a:1", "b:1", 0.9),
+            rel("a:1", "b:1", 0.2),
+            rel("a:1", "b:2", 0.9),
+            // Second hop: two b:1 -> c:1 edges, one b:2 -> c:1.
+            rel("b:1", "c:1", 0.5),
+            rel("b:1", "c:1", 0.5),
+            rel("b:2", "c:1", 0.5),
+        ])
+        .unwrap();
+        let path = |start: &str, hops: usize, filter: Option<Filter>| MatchPath {
+            start: RecordId::parse(start).unwrap(),
+            steps: (0..hops)
+                .map(|_| MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: filter.clone(),
+                })
+                .collect(),
+            as_of: None,
+        };
+        // Row-returning MATCH still dedups endpoints (the gap COUNT closes):
+        // asserted BEFORE the count closure takes `db` mutably.
+        let res = db
+            .execute(&[Statement::Match(path("a:1", 1, None))])
+            .unwrap();
+        assert_eq!(res[0].rows.len(), 2);
+        let mut count_walks = |start: &str, hops: usize, filter: Option<Filter>| {
+            let res = db
+                .execute(&[Statement::MatchCount(path(start, hops, filter))])
+                .unwrap();
+            assert_eq!(res[0].rows.len(), 1, "count is a single row");
+            match res[0].rows[0].record.body.get("count") {
+                Some(Value::Int(n)) => *n as u64,
+                other => panic!("expected an integer count, got {other:?}"),
+            }
+        };
+
+        // 1 hop: four parallel edges → walks = 4 (rows would dedup to 2).
+        assert_eq!(count_walks("a:1", 1, None), 4);
+        // Edge-prop predicate filters the walks too (confidence >= 0.5).
+        assert_eq!(
+            count_walks(
+                "a:1",
+                1,
+                Some(Filter::FieldCmp {
+                    field: "confidence".into(),
+                    op: CmpOp::Ge,
+                    value: Value::Float(0.5),
+                })
+            ),
+            3
+        );
+        // 2 hops: walks multiply — 3 edges to b:1 × 2 onward + 1 × 1 = … wait,
+        // step 1 reaches b:1 via 3 edges and b:2 via 1; step 2 has b:1 -> c:1
+        // ×2 and b:2 -> c:1 ×1 → 3·2 + 1·1 = 7.
+        assert_eq!(count_walks("a:1", 2, None), 7);
+        // Missing start → count 0 (spec §2.5: empty result, never an error).
+        assert_eq!(count_walks("a:404", 1, None), 0);
+    }
+
+    #[test]
+    fn match_and_closure_traverse_as_of_snapshots() {
+        // Timeline (one mutation per statement): create=1, g:a=2, g:b=3,
+        // edge g:a→g:b=4, g:c=5, edge g:a→g:c=6. Traversals at a cutoff
+        // must see exactly the records and edges that existed then (issue
+        // #92) — the same replay `SELECT ... AS OF` uses.
+        let mut db = Database::default();
+        let edge = |to: &str| RelationEdge {
+            from: RecordId::parse("g:a").unwrap(),
+            name: "edge".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: BTreeMap::new(),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("g:a", BTreeMap::new(), None)),
+            Statement::Insert(record("g:b", BTreeMap::new(), None)),
+            Statement::Relate(edge("g:b")),
+            Statement::Insert(record("g:c", BTreeMap::new(), None)),
+            Statement::Relate(edge("g:c")),
+        ])
+        .unwrap();
+
+        let mut traverse = |as_of: Option<i64>, count: bool| {
+            let path = MatchPath {
+                start: RecordId::parse("g:a").unwrap(),
+                steps: vec![MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: None,
+                }],
+                as_of,
+            };
+            let stmt = if count {
+                Statement::MatchCount(path)
+            } else {
+                Statement::Match(path)
+            };
+            let res = db.execute(&[stmt]).unwrap();
+            if count {
+                return match res[0].rows[0].record.body.get("count") {
+                    Some(Value::Int(n)) => vec![format!("count={n}")],
+                    other => panic!("expected count row, got {other:?}"),
+                };
+            }
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Before any edge: empty (start exists, no traversable edges yet).
+        assert_eq!(traverse(Some(3), false), Vec::<String>::new());
+        // After the first edge only: g:b — g:c doesn't exist until ts5.
+        assert_eq!(traverse(Some(4), false), ["g:b"]);
+        // After both edges.
+        assert_eq!(traverse(Some(6), false), ["g:b", "g:c"]);
+        // No AS OF = current state (regression).
+        assert_eq!(traverse(None, false), ["g:b", "g:c"]);
+        // COUNT over historical edge sets: 0 → 1 → 2.
+        assert_eq!(traverse(Some(3), true), ["count=0"]);
+        assert_eq!(traverse(Some(4), true), ["count=1"]);
+        assert_eq!(traverse(None, true), ["count=2"]);
+
+        let mut closure_ids = |as_of: Option<i64>| {
+            let path = MatchPath {
+                start: RecordId::parse("g:a").unwrap(),
+                steps: vec![MatchStep {
+                    direction: MatchDirection::Out,
+                    name: "edge".into(),
+                    edge_props: None,
+                }],
+                as_of,
+            };
+            let res = db.execute(&[Statement::Closure(path)]).unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        // CLOSURE composes with AS OF: reachability at ts4 = {g:a, g:b}.
+        assert_eq!(closure_ids(Some(4)), ["g:a", "g:b"]);
+        assert_eq!(closure_ids(None), ["g:a", "g:b", "g:c"]);
+        // Cutoff before the start record exists → empty, never an error.
+        assert_eq!(closure_ids(Some(1)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prune_history_compacts_and_bounds_growth() {
+        // Timeline: create=1, i1=2, i2=3 → prune snapshots at clock 3.
+        let mut db = Database::default();
+        db.execute(&[
+            create("ledger", None),
+            Statement::Insert(record(
+                "ledger:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "ledger:2",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        assert_eq!(db.store().history.len(), 3, "one entry per mutation");
+
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        {
+            let store = db.store();
+            // Only the retained declaration (original ts) + one snapshot.
+            assert_eq!(store.history.len(), 2, "compacted: {:?}", store.history);
+            assert!(matches!(store.history[0].1, Statement::CreateTable { .. }));
+            assert!(matches!(store.history[1].1, Statement::Snapshot(_)));
+            assert_eq!(store.history[1].0, 3, "snapshot stamped at the clock");
+        }
+
+        // Growth is now bounded: one entry per later mutation, and re-prune
+        // rebuilds the snapshot in place instead of stacking them.
+        db.execute(&[Statement::Insert(record("ledger:3", BTreeMap::new(), None))])
+            .unwrap();
+        assert_eq!(db.store().history.len(), 3);
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        assert_eq!(
+            db.store().history.len(),
+            2,
+            "re-prune does not stack snapshots"
+        );
+
+        // Data is untouched by compaction: current state has all three rows.
+        let now = db
+            .execute(&[Statement::Select(Select { ..select("ledger") })])
+            .unwrap();
+        assert_eq!(now[0].rows.len(), 3);
+    }
+
+    #[test]
+    fn as_of_before_snapshot_errors_after_prune() {
+        // create=1, i1=2, i2=3 → snapshot at 3; AS OF 1/2 must fail loudly
+        // (the pruned prefix is gone) instead of returning a declarations-only
+        // partial view (issue #95).
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::new(), None)),
+            Statement::Insert(record("t:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+
+        // Before pruning: the old window still replays (regression).
+        let ok = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(2),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(ok[0].rows.len(), 1, "pre-prune AS OF unchanged");
+
+        db.execute(&[Statement::PruneHistory]).unwrap();
+
+        let err = db.execute(&[Statement::Select(Select {
+            as_of: Some(2),
+            ..select("t")
+        })]);
+        assert!(
+            matches!(err, Err(Error::HistoryPruned { pruned_through: 3 })),
+            "pre-snapshot AS OF fails loudly, got {err:?}"
+        );
+
+        // From the snapshot onward everything reconstructs.
+        let at = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(3),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(at[0].rows.len(), 2, "snapshot view = state at the clock");
+        db.execute(&[Statement::Insert(record("t:3", BTreeMap::new(), None))])
+            .unwrap();
+        let later = db
+            .execute(&[Statement::Select(Select {
+                as_of: Some(4),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(later[0].rows.len(), 3, "post-snapshot delta replays");
+    }
+
+    #[test]
+    fn prune_history_compacts_memory_blocks_too() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("root_t", None),
+            Statement::Memory { name: "blk".into() },
+            create("inner", None),
+            Statement::Insert(record("inner:1", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        db.execute(&[Statement::PruneHistory]).unwrap();
+        {
+            let store = db.store();
+            let only_decls_and_snap = |h: &Vec<(i64, Statement)>| {
+                h.iter().all(|(_, s)| {
+                    matches!(s, Statement::CreateTable { .. } | Statement::Snapshot(_))
+                })
+            };
+            assert!(only_decls_and_snap(&store.history), "root compacted");
+            let blk = store.memories.get("blk").expect("memory block exists");
+            assert!(
+                only_decls_and_snap(&blk.history),
+                "memory compacted with its own snapshot"
+            );
+            assert!(
+                blk.records
+                    .contains_key(&RecordId::parse("inner:1").unwrap()),
+                "memory data intact"
+            );
+        }
+
+        // AS OF inside the memory, before its snapshot → HistoryPruned.
+        let past = db.execute(&[
+            Statement::Memory { name: "blk".into() },
+            Statement::Select(Select {
+                as_of: Some(1),
+                ..select("inner")
+            }),
+        ]);
+        assert!(
+            matches!(past, Err(Error::HistoryPruned { .. })),
+            "memory-scoped temporal read fails loudly, got {past:?}"
+        );
+
+        // Current reads in the memory are untouched.
+        let now = db
+            .execute(&[
+                Statement::Memory { name: "blk".into() },
+                Statement::Select(Select { ..select("inner") }),
+            ])
+            .unwrap();
+        assert_eq!(now[0].rows.len(), 1);
+    }
+
+    #[test]
+    fn order_by_field_sorts_with_direction_and_id_tiebreak() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record(
+                "t:b",
+                BTreeMap::from([("seq".into(), num(50))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:a",
+                BTreeMap::from([("seq".into(), num(10))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:c",
+                BTreeMap::from([("seq".into(), num(30))]),
+                None,
+            )),
+            // Absent field = `null` = lowest rank (spec §2.3 / cmp_total).
+            Statement::Insert(record("t:d", BTreeMap::new(), None)),
+            // Tie with t:a — the RecordId tie-break must show in BOTH
+            // directions (DESC reverses the key only).
+            Statement::Insert(record(
+                "t:e",
+                BTreeMap::from([("seq".into(), num(10))]),
+                None,
+            )),
+            // Cross-type value: strings rank above every number; cmp_total
+            // must order it without panicking.
+            Statement::Insert(record(
+                "t:f",
+                BTreeMap::from([("seq".into(), str_("abc"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids = |desc: bool| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    order: Some(Order::Field {
+                        key: "seq".into(),
+                        desc,
+                    }),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // ASC: null first, ties id-asc (t:a before t:e), then 30, 50, string.
+        assert_eq!(ids(false), ["t:d", "t:a", "t:e", "t:c", "t:b", "t:f"]);
+        // DESC: key reversed — but ties STAY id-asc and nulls end up last.
+        assert_eq!(ids(true), ["t:f", "t:b", "t:c", "t:a", "t:e", "t:d"]);
+    }
+
+    #[test]
+    fn order_by_unknown_field_errors_loudly() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::from([("a".into(), num(1))]), None)),
+        ])
+        .unwrap();
+
+        // Rows exist but no record of the table carries the key → almost
+        // certainly a typo: fail loudly, never return id-ordered rows as a
+        // plausible-looking answer.
+        let err = db.execute(&[Statement::Select(Select {
+            order: Some(Order::Field {
+                key: "nope".into(),
+                desc: false,
+            }),
+            ..select("t")
+        })]);
+        assert!(
+            matches!(err, Err(Error::UnknownSortField { .. })),
+            "typo field errors, got {err:?}"
+        );
+
+        // No rows at all → nothing to mis-sort → no error.
+        let empty = db
+            .execute(&[Statement::Select(Select {
+                order: Some(Order::Field {
+                    key: "nope".into(),
+                    desc: false,
+                }),
+                filter: Some(Filter::FieldEquals {
+                    field: "a".into(),
+                    value: Value::Int(999),
+                }),
+                ..select("t")
+            })])
+            .unwrap();
+        assert_eq!(empty[0].rows.len(), 0);
+    }
+
+    #[test]
+    fn order_by_field_wins_over_knn_ranking() {
+        // Explicit structural sorts apply in kNN mode — same precedence as
+        // `::recency` (score-based orders defer; see #119 for the full
+        // precedence table).
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("seq".into(), num(5))]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("seq".into(), num(1))]),
+                Some(vec![0.0, 1.0]),
+            )),
+        ])
+        .unwrap();
+        let res = db
+            .execute(&[Statement::Select(Select {
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 10,
+                }),
+                order: Some(Order::Field {
+                    key: "seq".into(),
+                    desc: false,
+                }),
+                ..select("t")
+            })])
+            .unwrap();
+        let ids: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| r.record.id.to_string())
+            .collect();
+        // t:1 is the nearest neighbor but t:2 has the smaller seq.
+        assert_eq!(ids, ["t:2", "t:1"]);
+    }
+
+    #[test]
+    fn history_since_reports_exact_deltas_including_edges() {
+        // Timeline: create=1 (with dim), t:1=2, t:2=3, RELATE=4 (edge-only!),
+        // FORGET t:2=5 (removes a row AND t:1's incident edge). A row-state
+        // diff of two AS OF reads would see NOTHING at ts4 — this must.
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record("t:1", BTreeMap::new(), Some(vec![1.0, 0.0]))),
+            Statement::Insert(record("t:2", BTreeMap::new(), Some(vec![0.0, 1.0]))),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("t:1").unwrap(),
+                name: "refs".into(),
+                to: RecordId::parse("t:2").unwrap(),
+                created_at: 0,
+                weight: None,
+                props: BTreeMap::new(),
+            }),
+            Statement::Forget {
+                id: RecordId::parse("t:2").unwrap(),
+            },
+        ])
+        .unwrap();
+
+        let res = db.execute(&[Statement::HistorySince(0)]).unwrap();
+        assert!(matches!(res[0].kind, QueryKind::History { since: 0 }));
+        let kinds: Vec<_> = res[0]
+            .rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.record.id.to_string(),
+                    format!("history:{}", {
+                        match r.record.body.get("ts") {
+                            Some(Value::Int(t)) => *t,
+                            other => panic!("ts field, got {other:?}"),
+                        }
+                    })
+                );
+                match r.record.body.get("kind") {
+                    Some(Value::Str(k)) => k.clone(),
+                    other => panic!("kind field, got {other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(kinds, ["CREATE", "INSERT", "INSERT", "RELATE", "FORGET"]);
+        // CREATE carries its declaration (table + dim) …
+        assert_eq!(
+            res[0].rows[0].record.body.get("table"),
+            Some(&Value::Str("t".into()))
+        );
+        assert_eq!(res[0].rows[0].record.body.get("dim"), Some(&Value::Int(2)));
+        // … and the edge-only RELATE carries both endpoints (issue #118's
+        // correctness gap — a row diff would have missed this entry) …
+        let rel = &res[0].rows[3].record.body;
+        assert_eq!(rel.get("from"), Some(&Value::Str("t:1".into())));
+        assert_eq!(rel.get("to"), Some(&Value::Str("t:2".into())));
+        assert_eq!(rel.get("name"), Some(&Value::Str("refs".into())));
+        // … and FORGET is a tombstone for the removed record.
+        assert_eq!(
+            res[0].rows[4].record.body.get("id"),
+            Some(&Value::Str("t:2".into()))
+        );
+        // The score mirrors the mutation ts (display only; body.ts is i64).
+        assert_eq!(res[0].rows[3].score, 4.0);
+
+        // Exclusive cutoff: strictly-after semantics.
+        let since3 = db.execute(&[Statement::HistorySince(3)]).unwrap();
+        assert_eq!(since3[0].rows.len(), 2, "RELATE + FORGET only");
+        // At/after the last mutation: an empty delta, not an error.
+        let tail = db.execute(&[Statement::HistorySince(5)]).unwrap();
+        assert!(tail[0].rows.is_empty());
+        // The read is side-effect free.
+        let cur = db
+            .execute(&[Statement::Select(Select { ..select("t") })])
+            .unwrap();
+        assert_eq!(cur[0].rows.len(), 1, "only t:1 survives the FORGET");
+    }
+
+    #[test]
+    fn history_since_respects_compaction_horizon() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record("t:1", BTreeMap::new(), None)),
+            Statement::Insert(record("t:2", BTreeMap::new(), None)),
+        ])
+        .unwrap();
+        db.execute(&[Statement::PruneHistory]).unwrap(); // snapshot @3
+        db.execute(&[Statement::Insert(record("t:3", BTreeMap::new(), None))])
+            .unwrap(); // ts4
+
+        // Cutoff below the snapshot: mutations (since, 3] are gone — the
+        // same loud retention contract as AS OF, never a partial delta.
+        let err = db.execute(&[Statement::HistorySince(2)]);
+        assert!(
+            matches!(err, Err(Error::HistoryPruned { pruned_through: 3 })),
+            "got {err:?}"
+        );
+
+        // From the horizon on: the delta works, and the snapshot itself is
+        // bookkeeping — never reported as a mutation.
+        let ok = db.execute(&[Statement::HistorySince(3)]).unwrap();
+        assert!(matches!(ok[0].kind, QueryKind::History { since: 3 }));
+        assert_eq!(ok[0].rows.len(), 1, "only the post-prune INSERT: {ok:?}");
+        assert_eq!(ok[0].rows[0].record.id.to_string(), "history:4");
+    }
+
+    #[test]
+    fn history_since_scopes_to_memory_blocks() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("root_t", None), // root clock 1
+            Statement::Memory { name: "blk".into() },
+            create("inner", None), // blk clock 1 (own history)
+            Statement::Insert(record("inner:1", BTreeMap::new(), None)), // blk 2
+        ])
+        .unwrap();
+
+        // Inside the block: only the block's mutations (per-block sync).
+        let blk = db
+            .execute(&[
+                Statement::Memory { name: "blk".into() },
+                Statement::HistorySince(0),
+            ])
+            .unwrap();
+        assert_eq!(blk[0].rows.len(), 2, "block CREATE + INSERT: {blk:?}");
+        assert_eq!(
+            blk[0].rows[1].record.body.get("id"),
+            Some(&Value::Str("inner:1".into()))
+        );
+
+        // At root: only root's history — MEMORY statements never log.
+        let root = db.execute(&[Statement::HistorySince(0)]).unwrap();
+        assert_eq!(root[0].rows.len(), 1, "root CREATE only: {root:?}");
+        assert_eq!(
+            root[0].rows[0].record.body.get("table"),
+            Some(&Value::Str("root_t".into()))
+        );
+    }
+
+    /// Shared fixtures for the #119 precedence/recipe tests: three docs with
+    /// text (bm25), `topic` (field sort / `IN` pool), vectors (kNN), a heavy
+    /// upvote on `doc:b` (so `::score` disagrees with relevance), and
+    /// insertion order a → b → c (so `::recency` is c → b → a).
+    fn precedence_fixture() -> Database {
+        let mut db = Database::default();
+        db.execute(&[
+            create("doc", Some(2)),
+            Statement::Insert(record(
+                "doc:a",
+                BTreeMap::from([
+                    ("text".into(), str_("alpha alpha")),
+                    ("topic".into(), str_("z")),
+                ]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "doc:b",
+                BTreeMap::from([("text".into(), str_("beta")), ("topic".into(), str_("a"))]),
+                Some(vec![0.0, 1.0]),
+            )),
+            Statement::Insert(record(
+                "doc:c",
+                BTreeMap::from([
+                    ("text".into(), str_("alpha other")),
+                    ("topic".into(), str_("m")),
+                ]),
+                Some(vec![0.7, 0.7]),
+            )),
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse("u:1").unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse("doc:b").unwrap(),
+                created_at: 0,
+                weight: Some(5.0),
+                props: BTreeMap::from([("value".into(), Value::Int(1))]),
+            }),
+        ])
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn order_by_precedence_matrix_matches_spec() {
+        // The verified matrix (issue #119, spec §2.3 step 5): score-based
+        // orders are honored in scan/kNN modes and IGNORED in bm25/hybrid
+        // (relevance/fusion wins); structural orders are honored everywhere.
+        let mut db = precedence_fixture();
+        let mut run = |knn: bool, bm25: bool, order: Option<Order>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    knn: knn.then(|| Knn {
+                        query: vec![1.0, 0.0],
+                        k: 10,
+                    }),
+                    filter: bm25.then(|| Filter::Bm25 {
+                        field: "text".into(),
+                        query: "alpha".into(),
+                        k: None,
+                    }),
+                    order,
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let field_order = || Order::Field {
+            key: "topic".into(),
+            desc: false,
+        };
+
+        // scan mode: BTree default; the score-based op is honored (the heavy
+        // upvote floats doc:b).
+        assert_eq!(run(false, false, None), ["doc:a", "doc:b", "doc:c"]);
+        assert_eq!(
+            run(false, false, Some(Order::Score)),
+            ["doc:b", "doc:a", "doc:c"]
+        );
+        // kNN mode: similarity default; score-based and structural honored.
+        assert_eq!(run(true, false, None), ["doc:a", "doc:c", "doc:b"]);
+        assert_eq!(
+            run(true, false, Some(Order::Score)),
+            ["doc:b", "doc:a", "doc:c"]
+        );
+        assert_eq!(
+            run(true, false, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        // bm25 mode: relevance default; score-based IGNORED (byte-identical
+        // to the unordered query — the reported silent-OK hazard); structural
+        // orders honored.
+        let relevance = run(false, true, None);
+        assert_eq!(relevance, ["doc:a", "doc:c", "doc:b"]);
+        assert_eq!(run(false, true, Some(Order::Score)), relevance);
+        assert_eq!(
+            run(false, true, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        assert_eq!(
+            run(false, true, Some(field_order())),
+            ["doc:b", "doc:c", "doc:a"]
+        );
+        // hybrid mode: fused default; score-based IGNORED, structural honored.
+        let fused = run(true, true, None);
+        assert_eq!(run(true, true, Some(Order::Score)), fused);
+        assert_eq!(
+            run(true, true, Some(Order::Recency)),
+            ["doc:c", "doc:b", "doc:a"]
+        );
+        assert_eq!(
+            run(true, true, Some(field_order())),
+            ["doc:b", "doc:c", "doc:a"]
+        );
+    }
+
+    #[test]
+    fn rerank_pool_recipe_scores_only_the_pool() {
+        // The #119 recipe: restrict FIRST (server-side IN, post-#93), then
+        // rank by ::score — never score the whole scan.
+        let mut db = precedence_fixture();
+        let mut run = |filter: Option<Filter>| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter,
+                    order: Some(Order::Score),
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Unrestricted: ::score ranks every row — doc:b floats on its weight.
+        assert_eq!(run(None), ["doc:b", "doc:a", "doc:c"]);
+        // Restricted pool: only pool members are ranked (doc:b excluded even
+        // though it would have won).
+        let pool = run(Some(Filter::FieldIn {
+            field: "topic".into(),
+            values: vec![Value::Str("z".into()), Value::Str("m".into())],
+        }));
+        assert_eq!(pool, ["doc:a", "doc:c"], "pool only: {pool:?}");
+        assert!(!pool.contains(&"doc:b".to_string()));
+    }
+
+    #[test]
+    fn feedback_weight_and_value_disagree_by_design() {
+        // The #119 operator table: ::score reads `weight` (when set),
+        // ::votes reads `value` only — an explicit weight splits them on
+        // purpose (plus the post-#85 bare downvote).
+        let mut db = Database::default();
+        let vote = |to: &str, voter: &str, props: BTreeMap<String, Value>, weight: Option<f32>| {
+            Statement::Relate(RelationEdge {
+                from: RecordId::parse(voter).unwrap(),
+                name: "voted".into(),
+                to: RecordId::parse(to).unwrap(),
+                created_at: 0,
+                weight,
+                props,
+            })
+        };
+        db.execute(&[
+            create("doc", None),
+            Statement::Insert(record("doc:x", BTreeMap::new(), None)),
+            Statement::Insert(record("doc:y", BTreeMap::new(), None)),
+            Statement::Insert(record("doc:z", BTreeMap::new(), None)),
+            // x: upvote damped by an explicit weight …
+            vote(
+                "doc:x",
+                "u:1",
+                BTreeMap::from([("value".into(), Value::Int(1))]),
+                Some(0.3),
+            ),
+            // … y: plain upvote …
+            vote(
+                "doc:y",
+                "u:2",
+                BTreeMap::from([("value".into(), Value::Int(1))]),
+                None,
+            ),
+            // … z: bare downvote (works since #85).
+            vote(
+                "doc:z",
+                "u:3",
+                BTreeMap::from([("value".into(), Value::Int(-1))]),
+                None,
+            ),
+        ])
+        .unwrap();
+        let mut scores = |order: Order| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    order: Some(order),
+                    ..select("doc")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| (r.record.id.to_string(), r.score))
+                .collect::<Vec<_>>()
+        };
+
+        // ::score follows `weight`: (0.3+1)/3 < (1+1)/3, bare downvote lowest.
+        let ranked = scores(Order::Score);
+        let ids: Vec<_> = ranked.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, ["doc:y", "doc:x", "doc:z"]);
+        assert!((ranked[0].1 - 2.0 / 3.0).abs() < 1e-4, "{ranked:?}");
+        assert!((ranked[1].1 - 1.3 / 3.0).abs() < 1e-4, "{ranked:?}");
+        assert!((ranked[2].1 - 0.0).abs() < 1e-4, "{ranked:?}");
+
+        // ::votes follows `value` only: x still counts ONE upvote (the 0.3
+        // weight is ignored), z counts one downvote — nets 1, 1, -1.
+        let voted = scores(Order::Votes);
+        let by_id = |id: &str| {
+            voted
+                .iter()
+                .find(|(k, _)| k == id)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(|| panic!("{id} missing from {voted:?}"))
+        };
+        assert!(
+            (by_id("doc:x") - 1.0).abs() < 1e-4,
+            "weight ignored: {voted:?}"
+        );
+        assert!((by_id("doc:y") - 1.0).abs() < 1e-4, "{voted:?}");
+        assert!((by_id("doc:z") - -1.0).abs() < 1e-4, "{voted:?}");
+    }
+
+    #[test]
+    fn where_and_requires_every_term() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("a".into(), num(1)), ("b".into(), str_("x"))]),
+                Some(vec![1.0, 0.0]),
+            )),
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("a".into(), num(1)), ("b".into(), str_("y"))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:3",
+                BTreeMap::from([("a".into(), num(0)), ("b".into(), str_("x"))]),
+                None,
+            )),
+            // No `a` at all: the missing-field rule applies per term.
+            Statement::Insert(record(
+                "t:4",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // All-of: only rows satisfying BOTH terms (t:2 fails b, t:3 fails a,
+        // t:4 lacks a — its term fails independently).
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldEquals {
+                    field: "a".into(),
+                    value: Value::Int(1),
+                },
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+            ])),
+            ["t:1"]
+        );
+        // Term order does not matter; `a >= 0` admits 0 (t:3) but excludes
+        // the field-less t:4.
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+                Filter::FieldCmp {
+                    field: "a".into(),
+                    op: CmpOp::Ge,
+                    value: Value::Int(0),
+                },
+            ])),
+            ["t:1", "t:3"]
+        );
+        // A term no record can satisfy (missing field) empties the AND.
+        assert!(ids_where(Filter::And(vec![
+            Filter::FieldEquals {
+                field: "missing".into(),
+                value: Value::Int(1),
+            },
+            Filter::FieldEquals {
+                field: "a".into(),
+                value: Value::Int(1),
+            },
+        ]))
+        .is_empty());
+        // IS NOT NULL composes with a predicate (only t:1 is embedded).
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::HasEmbedding,
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: Value::Str("x".into()),
+                },
+            ])),
+            ["t:1"]
+        );
+    }
+
+    #[test]
+    fn where_and_filters_edge_props_all_of() {
+        // MATCH edge-prop filters accept the same conjunction (issues
+        // #93/#125): all-of against the edge's props.
+        let mut db = Database::default();
+        let edge = |to: &str, conf: f64, kind: &str| RelationEdge {
+            from: RecordId::parse("s:1").unwrap(),
+            name: "e".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: BTreeMap::from([
+                ("conf".into(), Value::Float(conf)),
+                ("kind".into(), Value::Str(kind.into())),
+            ]),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("s:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:2", BTreeMap::new(), None)),
+            Statement::Insert(record("m:3", BTreeMap::new(), None)),
+            Statement::Relate(edge("m:1", 0.9, "x")),
+            Statement::Relate(edge("m:2", 0.2, "x")),
+            Statement::Relate(edge("m:3", 0.9, "y")),
+        ])
+        .unwrap();
+        let mut reach = |terms: Vec<Filter>| {
+            let props = if terms.len() == 1 {
+                Some(terms.into_iter().next().unwrap())
+            } else {
+                Some(Filter::And(terms))
+            };
+            let res = db
+                .execute(&[Statement::Match(MatchPath {
+                    start: RecordId::parse("s:1").unwrap(),
+                    steps: vec![MatchStep {
+                        direction: MatchDirection::Out,
+                        name: "e".into(),
+                        edge_props: props,
+                    }],
+                    as_of: None,
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let conf_term = |op: CmpOp, v: f64| Filter::FieldCmp {
+            field: "conf".into(),
+            op,
+            value: Value::Float(v),
+        };
+        let kind_term = |k: &str| Filter::FieldEquals {
+            field: "kind".into(),
+            value: Value::Str(k.into()),
+        };
+
+        // All-of: high confidence AND kind x → only m:1 (m:2 fails conf,
+        // m:3 fails kind).
+        assert_eq!(
+            reach(vec![conf_term(CmpOp::Ge, 0.5), kind_term("x")]),
+            ["m:1"]
+        );
+        // Single term unchanged: high confidence → m:1 and m:3.
+        assert_eq!(reach(vec![conf_term(CmpOp::Ge, 0.5)]), ["m:1", "m:3"]);
+        // Nothing satisfies both: high confidence AND kind x at > 0.9.
+        assert!(reach(vec![conf_term(CmpOp::Gt, 0.9), kind_term("x")]).is_empty());
+    }
+
+    #[test]
+    fn id_predicate_binds_to_record_identity() {
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", None),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+            // A body key named `id` must NOT shadow the pseudo-field
+            // (issue #128's documented precedence).
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("b".into(), str_("y")), ("id".into(), str_("t:9"))]),
+                None,
+            )),
+            Statement::Insert(record(
+                "t:3",
+                BTreeMap::from([("b".into(), str_("x"))]),
+                None,
+            )),
+        ])
+        .unwrap();
+        let mut ids_where = |filter: Filter| {
+            let res = db
+                .execute(&[Statement::Select(Select {
+                    filter: Some(filter),
+                    ..select("t")
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let id = |v: &str| Value::Str(v.into());
+
+        // The rerank-pool predicate: exactly the requested identities.
+        assert_eq!(
+            ids_where(Filter::FieldIn {
+                field: "id".into(),
+                values: vec![id("t:1"), id("t:3")],
+            }),
+            ["t:1", "t:3"]
+        );
+        // Exact identity …
+        assert_eq!(
+            ids_where(Filter::FieldEquals {
+                field: "id".into(),
+                value: id("t:2"),
+            }),
+            ["t:2"]
+        );
+        // … pseudo-field wins: t:2's BODY id ("t:9") is not matchable —
+        // no record's identity is t:9.
+        assert!(ids_where(Filter::FieldEquals {
+            field: "id".into(),
+            value: id("t:9"),
+        })
+        .is_empty());
+        // `!=` is the exact complement of `=`.
+        assert_eq!(
+            ids_where(Filter::FieldCmp {
+                field: "id".into(),
+                op: CmpOp::Ne,
+                value: id("t:1"),
+            }),
+            ["t:2", "t:3"]
+        );
+        // Composes with #125 conjunctions.
+        assert_eq!(
+            ids_where(Filter::And(vec![
+                Filter::FieldIn {
+                    field: "id".into(),
+                    values: vec![id("t:1"), id("t:3")],
+                },
+                Filter::FieldEquals {
+                    field: "b".into(),
+                    value: str_("x"),
+                },
+            ])),
+            ["t:1", "t:3"]
+        );
+    }
+
+    #[test]
+    fn id_on_edge_filters_is_an_ordinary_prop() {
+        // Edges have no record identity: `id` in an edge-prop filter falls
+        // through to a normal prop lookup (issue #128, documented in §2.3).
+        let mut db = Database::default();
+        let edge = |to: &str, id_prop: Option<&str>| RelationEdge {
+            from: RecordId::parse("s:1").unwrap(),
+            name: "e".into(),
+            to: RecordId::parse(to).unwrap(),
+            created_at: 0,
+            weight: None,
+            props: id_prop
+                .map(|v| BTreeMap::from([("id".into(), Value::Str(v.into()))]))
+                .unwrap_or_default(),
+        };
+        db.execute(&[
+            create("g", None),
+            Statement::Insert(record("s:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:1", BTreeMap::new(), None)),
+            Statement::Insert(record("m:2", BTreeMap::new(), None)),
+            Statement::Relate(edge("m:1", Some("custom"))),
+            Statement::Relate(edge("m:2", None)),
+        ])
+        .unwrap();
+        let mut reach = |value: &str| {
+            let res = db
+                .execute(&[Statement::Match(MatchPath {
+                    start: RecordId::parse("s:1").unwrap(),
+                    steps: vec![MatchStep {
+                        direction: MatchDirection::Out,
+                        name: "e".into(),
+                        edge_props: Some(Filter::FieldEquals {
+                            field: "id".into(),
+                            value: Value::Str(value.into()),
+                        }),
+                    }],
+                    as_of: None,
+                })])
+                .unwrap();
+            res[0]
+                .rows
+                .iter()
+                .map(|r| r.record.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Ordinary prop lookup: only the edge carrying that prop matches.
+        assert_eq!(reach("custom"), ["m:1"]);
+        // No identity binding on edges: the start's own id matches nothing.
+        assert!(reach("s:1").is_empty());
+    }
+
+    #[test]
+    fn tables_index_tracks_every_declaration() {
+        // Issue #133 step 1: the `tables` index carries every CREATE TABLE
+        // (with or without a dim) — the source seed_declared reads.
+        let mut db = Database::default();
+        db.execute(&[
+            create("with_dim", Some(4)),
+            create("no_dim", None),
+            Statement::Insert(record(
+                "with_dim:1",
+                BTreeMap::new(),
+                Some(vec![1.0, 0.0, 0.0, 0.0]),
+            )),
+        ])
+        .unwrap();
+        let store = db.store();
+        assert_eq!(store.tables.get("with_dim"), Some(&Some(4)));
+        assert_eq!(store.tables.get("no_dim"), Some(&None));
+        assert!(!store.tables.contains_key("never_declared"));
     }
 
     #[test]
@@ -1467,6 +3552,7 @@ mod tests {
                     edge_props: None,
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -1647,6 +3733,7 @@ mod tests {
                     edge_props: None,
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -1680,6 +3767,7 @@ mod tests {
                     edge_props: edge_props.clone(),
                 })
                 .collect(),
+            as_of: None,
         })
     }
 
@@ -1818,6 +3906,7 @@ mod tests {
                 name: "knows".into(),
                 edge_props: Some(filter),
             }],
+            as_of: None,
         });
         let res = db.execute(&[path]).unwrap();
         let ids: Vec<String> = res[0]
@@ -2362,6 +4451,8 @@ mod temporal_tests {
             limit: None,
             as_of,
             fields: None,
+            offset: None,
+            aggregate: None,
         })
     }
 
@@ -2532,6 +4623,8 @@ mod memory_tests {
             limit: None,
             as_of: None,
             fields: None,
+            offset: None,
+            aggregate: None,
         })
     }
 
@@ -2629,6 +4722,8 @@ mod memory_tests {
                     limit: None,
                     as_of: Some(2),
                     fields: None,
+                    offset: None,
+                    aggregate: None,
                 }),
             ])
             .unwrap();
@@ -2649,6 +4744,8 @@ mod memory_tests {
                 limit: None,
                 as_of: Some(2),
                 fields: None,
+                offset: None,
+                aggregate: None,
             })])
             .unwrap();
         assert_eq!(

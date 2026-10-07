@@ -6,6 +6,11 @@
 //!   across lines and connections.
 //! * `--stdio` — read lines from stdin, write responses to stdout. Purely
 //!   deterministic and transport-free (the base for MCP/agent use later).
+//!
+//! Both modes accept `--db <path>` to serve a persistent single-file store
+//! (same semantics as `nql-cli --db`); without it the server is in-memory and
+//! everything is lost on exit. The store's single-writer lock (issue #84)
+//! means one server process owns the file — a second `--db` opener fails fast.
 
 use std::env;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -17,7 +22,23 @@ const DEFAULT_PORT: &str = "7878";
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let server = Server::new();
+    // `--db <path>` serves a persistent store (issue #89); without it the
+    // session is in-memory (deterministic, throwaway).
+    let db_path = args
+        .iter()
+        .position(|a| a == "--db" || a == "-d")
+        .and_then(|i| args.get(i + 1).cloned());
+    let server = match &db_path {
+        Some(p) => match Server::open(p) {
+            Ok(s) => s,
+            Err(e) => {
+                // Same clean `error: ...` convention as nql-cli (issue #84).
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => Server::new(),
+    };
 
     if args.iter().any(|a| a == "--stdio") {
         run_stdio(server)

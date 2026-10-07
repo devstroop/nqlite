@@ -1,11 +1,11 @@
 # nql-server
 
-A minimal, deterministic line-protocol server for `nqlite`. It exposes nql
+A minimal, deterministic line-protocol server for `nqlite`. It exposes NQL
 execution (via `nql` parsing/analysis + the `nqlite` engine) over either a
 plain TCP listener or plain stdio, using a simple one-program-per-line text
 protocol.
 
-The server is **zero-LLM and deterministic**: no randomness, no wall-clock, no
+The server is **No-LLM and deterministic**: no randomness, no wall-clock, no
 timestamps in any response; output ordering comes from the engine's BTree
 scans and stable sorts, ids are rendered as-is, and scores use 4 decimal
 places. It never panics on bad input — a malformed program yields an `ERR`
@@ -13,7 +13,7 @@ line and execution continues.
 
 ## Protocol
 
-Each input line is one nql program (`;`-separated statements). The response is:
+Each input line is one NQL program (`;`-separated statements). The response is:
 
 - **one line per `SELECT` result**, formatted as
   `SELECT <table> (<N> rows): <id> score=<s.4> {fields}; <id> ...` — rows in
@@ -25,7 +25,7 @@ Each input line is one nql program (`;`-separated statements). The response is:
 
 A single shared `Database` persists across **all** lines and connections, so a
 session may `CREATE TABLE`, `INSERT`, and `SELECT` across separate lines.
-Because the nql `Analyzer` validates per-plan, the server remembers declared
+Because the NQL `Analyzer` validates per-plan, the server remembers declared
 tables and re-validates them across lines (dimension contracts still enforced).
 
 ## Running

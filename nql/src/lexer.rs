@@ -35,8 +35,14 @@ pub enum Token {
     /// `::`
     DoubleColon,
     Eq,
+    /// `!=`
+    Ne,
     Lt,
+    /// `<=`
+    Le,
     Gt,
+    /// `>=`
+    Ge,
     Star,
     Eof,
 }
@@ -197,9 +203,21 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token::Eq
             }
+            Some(b'!') => {
+                self.bump();
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    Token::Ne
+                } else {
+                    return Err(self.err("unexpected `!` (did you mean `!=`?)"));
+                }
+            }
             Some(b'<') => {
                 self.bump();
-                if self.peek() == Some(b'-') {
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    Token::Le
+                } else if self.peek() == Some(b'-') {
                     self.bump();
                     Token::LeftArrow
                 } else {
@@ -208,7 +226,12 @@ impl<'a> Lexer<'a> {
             }
             Some(b'>') => {
                 self.bump();
-                Token::Gt
+                if self.peek() == Some(b'=') {
+                    self.bump();
+                    Token::Ge
+                } else {
+                    Token::Gt
+                }
             }
             Some(b':') => {
                 self.bump();

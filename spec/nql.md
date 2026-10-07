@@ -1,10 +1,10 @@
-# nql — Neural Query Language Specification
+# NQL — Neural Query Language Specification
 
 Version: 0.1 (M0 slice) · Status: living spec — implementers target this file;
 changes here are contract changes (PRs that alter grammar must update this file).
 
-nql is the query language of **nqlite**, a deterministic, zero-LLM
-database. nql expresses records, typed relations (graph), embeddings, temporal
+NQL is the query language of **nqlite**, a deterministic, No-LLM
+database. NQL expresses records, typed relations (graph), embeddings, temporal
 context, and hybrid retrieval in ONE grammar. The engine never calls an LLM;
 vectors are BYO (agent-supplied `f32` arrays). This file defines the grammar
 and the semantics that both the parser (`nql`) and the engine (`nqlite`) must
@@ -19,7 +19,8 @@ Keywords are case-insensitive. Whitespace/comments (`--` to end of line, `/* */`
 are ignored. `...` in the grammar is a list separator (`a, b, ...`).
 
 ```
-statement      = create_table | insert | relate | select | match | closure | memory | forget ;
+statement      = create_table | insert | relate | select | match | closure | memory | forget
+               | prune | history ;
 
 create_table   = 'CREATE' 'TABLE' ident [ 'VECTOR' '<' 'f32' ',' int '>' ] ;
 
@@ -30,28 +31,40 @@ relate         = 'RELATE' '(' recordid ')' '->' ':' ident '->' '(' recordid ')'
 
 select         = 'SELECT' select_list 'FROM' ident
                  [ 'WHERE' where_clause ]
-                 [ 'ORDER' 'BY' '::' order_op ]
+                 [ 'ORDER' 'BY' order_key ]
                  [ 'AS' 'OF' int ]
-                 [ 'LIMIT' int ] ;
+                 [ 'OFFSET' int ] [ 'LIMIT' int [ 'OFFSET' int ] ] ;
 
 forget         = 'FORGET' recordid ;
 
 memory         = 'MEMORY' ident ;
 
-match          = 'MATCH' '(' recordid ')' path_step+ ;
-closure        = 'CLOSURE' '(' recordid ')' path_step+ ;
-path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
-edge_props     = 'WHERE' field_equals ;
+prune          = 'PRUNE' 'HISTORY' ;
 
-select_list    = '*' | ident (',' ident)* ;
-where_clause   = field_equals | vector_knn | has_embedding | bm25 | hybrid ;
+history        = 'HISTORY' 'SINCE' int ;
+
+match          = 'MATCH' '(' recordid ')' path_step+ [ 'AS OF' int ] [ 'COUNT' ] ;
+closure        = 'CLOSURE' '(' recordid ')' path_step+ [ 'AS OF' int ] ;
+path_step      = ('->' | '<-') ':' ident [ edge_props ] ;
+edge_props     = 'WHERE' conjunction ;
+
+select_list    = '*' | 'COUNT' '(' '*' ')' | ident (',' ident)* ;
+where_clause   = conjunction | vector_knn | bm25 | hybrid ;
+conjunction    = term ( 'AND' term )* ;
+term           = predicate | has_embedding ;
+predicate      = field_equals | field_cmp | field_in | field_between ;
 field_equals   = ident '=' value ;
+field_cmp      = ident ('!=' | '<' | '<=' | '>' | '>=') value ;
+field_in       = ident 'IN' '[' [ value (',' value)* ] ']' ;
+field_between  = ident 'BETWEEN' value 'AND' value ;
 vector_knn     = 'vector::similarity' '(' 'embedding' ',' vector ')' 'AND' 'k' '=' int ;
 has_embedding  = 'embedding' 'IS' 'NOT' 'NULL' ;
 bm25           = '::bm25' '(' ident ',' string ')' [ 'AND' 'k' '=' int ] ;
 hybrid         = bm25 'AND' vector_knn | vector_knn 'AND' bm25 ;
-order_op       = 'similarity' | 'salience' | 'score' | 'votes' | 'feedback'
-               | 'recency' ;
+order_op       = 'similarity' | 'salience' [ '(' num ',' num ',' num ',' num ')' ]
+               | 'score' | 'votes' | 'feedback' | 'recency' ;
+order_key      = '::'? order_op | field [ 'DESC' ] ;
+num           = int | float ;
 
 object         = ( ident ':' value ) ( ',' ident ':' value )* | '' ;
 value          = 'null' | 'true' | 'false' | int | float | string
@@ -85,10 +98,12 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 | `CREATE TABLE t [VECTOR<f32,N>]` | Declares table `t`; optional fixed embedding dim `N`. Re-declaring with a dim enforces it on future INSERTs. |
 | `INSERT INTO t:id {body} [EMBED v]` | Upsert record `t:id`. If table has declared dim, `len(embedding)` MUST equal it else `EmbeddingDimMismatch`. Embedding is BYO — engine never computes it. |
 | `RELATE (a)->:name->(b) [SET ...]` | Appends a directed, named edge with properties. `weight` (float, 0..=1) and any other props. Edges are first-class: votes, provenance, temporal info all live here (see §4). |
-| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <edge-prop> = <value>` to only traverse edges whose props match. Deterministic (see §2.5). |
-| `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH (see §2.5). |
-| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; limits; returns records (+computed score). |
+| `MATCH (a) -> :name -> :other <- :back` | Walks the graph from record `a` along the named edges in order, returning the records reached after the last hop. Each step may carry `WHERE <predicate>` (equality, comparisons, `IN`, `BETWEEN`) to only traverse edges whose props match. `MATCH ... COUNT` returns the number of matching edge-path instances instead of records (multiplicity). `AS OF <ts>` traverses a historical snapshot. Deterministic (see §2.5). |
+| `CLOSURE (a) -> :name` | Transitive closure: every record reachable from `a` via the named edges (any number of hops, BFS to fixpoint), deduped by first-visit order, scored by BFS depth (0 = start). Edge-property filters apply per step like MATCH; accepts `AS OF <ts>` like MATCH (see §2.5). |
+| `SELECT ... FROM t ...` | Scans table `t`; filters (incl. `::bm25` lexical scoring); optional kNN; `AS OF <ts>` time-travels to a historical view; orders deterministically; paginates (`OFFSET`/`LIMIT`); `COUNT(*)` counts instead of listing; returns records (+computed score). |
 | `FORGET t:id` | Deletes the record AND all incident edges. |
+| `PRUNE HISTORY` | Compacts the mutation history into a snapshot at the current clock: bounded growth, cheap `AS OF` from the snapshot onward; `AS OF` earlier than the snapshot errors (`HistoryPruned`). Applies to MEMORY blocks too (issue #95). |
+| `HISTORY SINCE <ts>` | Exact mutation delta since the cutoff — one row per CREATE/INSERT/RELATE/FORGET with its subject ids (rows AND edges + tombstones): the sync read that a two-`AS OF` diff cannot give you (issue #118). |
 | `MEMORY <name>` | Switches the plan's context to the named memory (created lazily): subsequent statements target that memory's own store — records, edges, history (so `AS OF` composes). Core/archival/shared partitions for agents (see §2.8). |
 
 ### 2.3 SELECT pipeline (fixed order)
@@ -96,7 +111,35 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 1. **Scan** — records of table `t` in BTree order.
 2. **Filter** — `WHERE`:
    - `field = value`: exact, deterministic equality against body value.
+   - `field != value`, `field < | <= | > | >= value`, `field IN [v, …]`,
+     `field BETWEEN a AND b` (inclusive) — the comparison predicates
+     (issues #93/#94). All but `!=`/`=`/`IN` order values with a **total
+     cross-type order**: type ranks `null < bool < number < string < array <
+     doc < vector < ref`; within numbers comparison is numeric and exact
+     (ints never round through floats; `NaN` sorts after every number);
+     arrays/docs/vectors compare element/key-wise, then by length. `=`,
+     `!=`, and `IN` keep exact value equality (`1` and `1.0` are different
+     values), so `= v` and `!= v` are complements. A record that does not
+     carry the field never matches (the long-standing `=` rule); an explicit
+     `null` participates and ranks lowest. The order is proptest-pinned
+     (reflexive, antisymmetric, transitive, never panics).
    - `embedding IS NOT NULL`: only records with vectors.
+   - **Conjunction** (issue #125): combinable terms compose with `AND` —
+     `field-predicates… AND embedding IS NOT NULL AND …`, n-ary, evaluated
+     all-of per row (each term keeps its own missing-field rule; a term that
+     fails excludes the row). Single operator, so no precedence exists.
+     Scoring clauses do **not** join conjunctions: `::bm25`/`vector::similarity`
+     keep their own forms (`::bm25(...) AND vector::similarity(...)` is the
+     hybrid, §2.6) — mixing them into an `AND` chain is a positioned error.
+     The same conjunction grammar drives MATCH/CLOSURE edge-property filters
+     (§2.5), evaluated all-of against the edge's `props`.
+   - `id = | != | IN [...]` (issue #128): compares against the record's own
+     identity in display form (`table:id`) — the rerank-pool predicate
+     (`WHERE id IN ["doc:7", …]` server-side). The literal must be that
+     string; ordered forms (`<`, `<=`, `>`, `>=`, `BETWEEN`) are positioned
+     errors (ids are not an ordered value). A body key named `id` never
+     shadows the pseudo-field; in edge-property filters — edges have no
+     record identity — `id` is an ordinary prop lookup.
    - `vector::similarity(embedding, $q) AND k = N`: kNN candidate set (see §3).
    - `::bm25(field, "query") [AND k = N]`: lexical scoring — every row is
      ranked by BM25 relevance over the field; `k` caps the returned rows.
@@ -109,17 +152,63 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
    row's final score is the reciprocal-rank fusion (RRF) of its rank in the
    lexical list and its rank in the vector list: `1/(60 + rank_lex) +
    1/(60 + rank_vec)`, ranks 1-based, ties broken by RecordId asc (see §2.6).
-5. **Order** — `ORDER BY ::op` (default: BTree order):
+5. **Order** — `ORDER BY ::op` or `ORDER BY <field> [DESC]` (default: BTree
+   order):
    - `::similarity` — cosine desc (requires kNN query).
    - `::salience` — `α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
-     with deterministic engine defaults (α..δ are AGENT-side knobs, not engine
-     config); without a kNN query, salience reduces to the feedback term.
+     with deterministic engine defaults **α=0.7, β=0, γ=0, δ=0.3** (α..δ are
+     AGENT-side knobs, not engine config); without a kNN query, the default
+     salience reduces to the feedback term. Agents tune per-query with
+     `ORDER BY ::salience(α, β, γ, δ)` — exactly four comma-separated numbers.
+     Term definitions (pure arithmetic, No-LLM):
+     - `similarity` — cosine vs the kNN query vector (`0` without a kNN query);
+     - `strength` — `(recency + freq) / 2`, where `recency = 1/(1+age)` with
+       `age = max(0, clock − created_at)` and `freq = n/(n+1)` over the
+       record's incident edges (either direction);
+     - `importance` — the agent-written `importance` field clamped to `[0,1]`
+       (missing/non-numeric → `0`; the engine never invents it, §5);
+     - `score` — the Laplace-smoothed `::score` clamped to `[0,1]`.
    - `::score` — Laplace-smoothed mean over `:voted` edges, desc.
    - `::recency` — `created_at` desc.
-   (Hybrid queries always order by the fused score; explicit `ORDER BY` is
-   ignored in that mode.)
-6. **Limit** — keep first N (or the kNN/BM25 `k` cap, whichever is smallest).
-7. **Project** — keep only the fields listed in `select_list` (`SELECT *`
+   - `<field> [DESC]` (issue #117) — sort by a body field under the same
+     total order as the §2.3 filters (`Value::cmp_total`): absent fields and
+     explicit `null`s rank lowest. `DESC` reverses the **key only** — ties
+     always keep ascending RecordId (the §2.1 total order holds in both
+     directions). If the query returns rows but no record of the table
+     carries the field, the query errors (`UnknownSortField`) — a typo must
+     not become a silent all-equal sort. `DESC` after a `::` operator is a
+     positioned error (operators have fixed directions). Like `::recency`,
+     an explicit field sort applies even in kNN/BM25 modes (score-based
+     orders defer to those rankings — precedence documented with #119).
+   **Mode precedence (verified, issue #119).** The score a row *displays* is
+   always the mode's score (kNN similarity, bm25 relevance, hybrid RRF
+   fusion); the sort key follows this table:
+
+   | mode \ `ORDER BY` | *(none)* | score-based ops (`::similarity`, `::salience`, `::score`, `::votes`, `::feedback`) | `::recency` | `<field> [DESC]` |
+   |---|---|---|---|---|
+   | scan | BTree (RecordId asc) | honored — the op's own score | honored | honored |
+   | kNN | similarity desc | honored — the op's own score | honored | honored |
+   | bm25 | relevance desc | **ignored — relevance wins** | honored | honored |
+   | hybrid | fused (RRF) desc | **ignored — fusion wins** | honored | honored |
+
+   Relevance dominance is the point of the bm25/hybrid modes: a score-based
+   order would silently undo the ranking the query asked for (silent-OK was
+   the reported hazard, issue #119). Structural orders — `::recency` and
+   `<field> [DESC]` — are honored in **every** mode: they sort by data the
+   mode's score does not contain. Note the display/order split: rows always
+   *show* the mode's score even when a structural order re-sorts them.
+   (This supersedes the earlier blanket "explicit `ORDER BY` is ignored in
+   hybrid": that holds for score-based ops only — every cell above is
+   pinned by the `order_by_precedence_matrix_matches_spec` test.)
+6. **Offset / Limit** — `OFFSET n` skips the first `n` rows after ordering;
+   then keep the first N (or the kNN/BM25 `k` cap, whichever is smallest) of
+   what remains (issues #93/#94).
+7. **Aggregate** — `SELECT COUNT(*)` returns ONE row `{"count": <n>}`
+   instead of records: `n` is the number of records that passed step 2's
+   filter, so ordering, offset, limit, and projection never affect it (a
+   count is computed before them and builds no kNN/BM25 index). Deterministic
+   (issue #94).
+8. **Project** — keep only the fields listed in `select_list` (`SELECT *`
    keeps every field). Presentation-only: filters, scores, ordering, and
    limits all ran on the full record. A listed field a record does not have
    is simply absent from that row (no error, BTree field order preserved).
@@ -136,14 +225,27 @@ before a SELECT apply first, so a plan may create/insert/relate/query in one pas
   empty result — never an error.
 - Each step follows every edge with the given name in the given direction
   (`->` = outgoing from a frontier record, `<-` = incoming toward it). A step
-  may carry `WHERE <edge-prop> = <value>`: only edges whose `props` field
-  equals the value are traversed (exact equality against the edge's props).
+  may carry `WHERE <predicate>` — any field predicate of §2.3 (equality,
+  comparisons, `IN`, `BETWEEN`) evaluated against the edge's `props`:
+  only edges whose props match are traversed (issue #93).
 - Edges are scanned in append order; reached endpoints are deduplicated by
   `RecordId` keeping first appearance. The result rows carry the score of the
   first edge that reached them (`weight`, or `0.0` when unset).
 - Dangling edges (endpoints never inserted) are skipped.
 - `MATCH` (path semantics): only the final frontier is returned — intermediate
   hops are not in the output.
+- `MATCH ... COUNT` (issue #94): returns one row `{"count": <n>}` instead of
+  the frontier, where `n` is the number of edge-path **instances** (walks)
+  matching the steps — parallel edges count separately, so the multiplicity
+  between two records stays observable. Walk counts accumulate per node per
+  step as saturating `u64`s (order-independent, hence deterministic). The same
+  edge/prop filters and dangling-edge rules apply; a missing start yields
+  `{"count": 0}`.
+- `AS OF <ts>` on `MATCH` and `CLOSURE` (issue #92): the traversal runs
+  against the reconstructed snapshot — mutation history replayed to `ts`
+  (§2.7) — so the start record, frontier, and edges are exactly what existed
+  at that cutoff. Composes with `COUNT`. A cutoff before the start record
+  exists yields the empty result (same rule as a missing start).
 - `CLOSURE` (transitive closure): each step is expanded to a fixpoint (BFS,
   any number of hops) before the next step begins; every record ever reached —
   including the start — is returned once in first-visit order, scored by BFS
@@ -166,8 +268,11 @@ and fuses them with reciprocal-rank fusion (RRF):
 
 ### 2.7 Temporal reads (`AS OF`)
 
-`SELECT ... AS OF <int>` executes against the store **as of logical timestamp
-`<int>`**, not the current state. Semantics:
+`SELECT ... AS OF <int>`, `MATCH ... AS OF <int>`, and
+`CLOSURE ... AS OF <int>` execute against the store **as of logical timestamp
+`<int>`**, not the current state (graph traversals joined `SELECT` here in
+issue #92 — they replay the same history and walk the reconstructed
+snapshot). Semantics:
 
 - Every mutating statement executed through the engine is appended to the
   store's mutation history under the next logical timestamp (a deterministic
@@ -181,6 +286,33 @@ and fuses them with reciprocal-rank fusion (RRF):
 - `AS OF` with a cutoff beyond the last mutation is the full current state.
 - The timestamp is the **logical** mutation counter, not a wall-clock
   datetime; a datetime-literal form is future work.
+- **History compaction (`PRUNE HISTORY`, issue #95):** replaces the history
+  with a snapshot of the current state at the current clock, plus the
+  `CreateTable` declaration statements retained at their original timestamps
+  (they are the only record of empty/dim-less tables — issue #89 — and
+  re-executing them is idempotent). Growth stops tracking superseded
+  versions, and later `AS OF` reads rebuild from the snapshot instead of
+  ts0. **Retention contract:** `AS OF T` with `T` earlier than the snapshot
+  fails with `HistoryPruned` ("history before ts N was compacted …") — loud,
+  never a partial view. Compaction applies to every `MEMORY` block's own
+  history too, is deterministic (a pure function of the store), is
+  WAL-logged (it survives a reopen without an explicit flush), and lands in
+  the main file at the next checkpoint. **Downside caveat:** a store pruned
+  by a binary with this feature cannot be opened by older binaries (the
+  snapshot entry is a new statement variant); unpruned stores decode
+  unchanged.
+- **Delta reads (`HISTORY SINCE <ts>`, issue #118):** every mutation strictly
+  after the cutoff, in append (ts-ascending) order — one result row per entry:
+  `{ ts, kind, …subjects }` where `kind` ∈ `CREATE` (table + optional `dim`),
+  `INSERT` / `FORGET` (record `id`), `RELATE` (`from`, `to`, edge `name`).
+  Rows **and** edges in one read: a state-diff of two `AS OF` reads is blind
+  to edge-only mutations (a `RELATE` between existing records changes no
+  rows) — exactly what a sync consumer must not miss. Exclusive cutoff
+  (`ts > since`); an empty result means nothing changed; read-only (never
+  WAL'd); runs inside a `MEMORY` block against that block's own history;
+  honors the `PRUNE HISTORY` retention horizon (`HistoryPruned` below the
+  snapshot, and snapshot entries themselves are never reported as
+  mutations).
 
 ### 2.8 Memory blocks (`MEMORY <name>`)
 
@@ -225,7 +357,7 @@ Semantics:
 | `::score` | `(Σ weights + 1) / (n + 2)` over `:voted` edges; `0.5` with no votes (Laplace smoothing). Each edge's weight is its explicit `weight`, else its signed `value` (`value = -1` downvotes); an edge with neither counts as `+1` | pure arithmetic |
 | `::votes(record)` | `(up, down, net)` counts over `:voted` edges | pure arithmetic |
 | `::feedback(record)` | time-decayed recent feedback | engine-clock only |
-| `::salience` | `α·similarity + β·strength + γ·importance + δ·score` | fixed order, no races |
+| `::salience` | `α·similarity + β·strength + γ·importance + δ·score` (defaults 0.7/0/0/0.3; tune: `::salience(α, β, γ, δ)`) | fixed order, no races |
 | `::bm25(field, "q")` | Okapi BM25 lexical score (k1=1.2, b=0.75); every row scored, ordered by relevance | pure arithmetic |
 | `k = N` | kNN / BM25 result cap | — |
 
@@ -237,20 +369,22 @@ Semantics:
 - **Votes are edges (decision D9):** `(voter)->:voted {value:+1|-1, weight, created_at}->(record)`.
   No separate vote machinery; provenance and one-transaction semantics come free.
   The engine accepts both `voted` and `:voted` spellings at every reader
-  (nql text strips the colon on write; edges built directly through the IR
+     (NQL text strips the colon on write; edges built directly through the IR
   may keep it — see issue #98).
   Vote `weight` spans `-1..=1` and defaults to the edge's `value` when omitted, so
   `SET value = -1` alone is a downvote under `::score` too; an explicit `weight`
   overrides `value` for `::score` only (`::votes`/`::feedback` always read `value`).
 - `FORGET` removes incident edges, keeping the graph clean.
 
-## 5. Zero-LLM & BYO-vector contract
+## 5. No-LLM & BYO-vector contract
 
 - The engine never calls an embedder/LLM/network — to embed, chunk, summarize,
   compact, or rerank. Any learning lives in the agent/client.
 - Vectors arrive as `f32` arrays at INSERT time. `importance` is a number the
   AGENT writes; the engine never invents it.
-- Salience weights α..δ are agent-side; engine uses fixed deterministic defaults.
+- Salience weights α..δ are agent-side (passed per-query as
+  `ORDER BY ::salience(α, β, γ, δ)`); engine defaults are deterministic
+  (0.7, 0, 0, 0.3).
 
 ## 6. Examples
 

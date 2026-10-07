@@ -1,8 +1,8 @@
 # nqlite — Consolidated Design Intent & Decisions
 
-> State: design-in-progress (2026-08). This file captures the agreed philosophy and
-> open questions BEFORE the research-backed plan. It is the source of truth for WHY.
-> The PLAN.md in this repo is the action plan; this file is the reasoning.
+> State: **locked design intent — the source of truth for WHY.** D1–D9 are
+> resolved (status inline); §6 reconciles the benchmark targets against
+> measurements (last reconciled 2026-10-07). Action plan: [PLAN.md](../PLAN.md).
 
 ## 0. The one-line pitch
 A **context-first, neural database** that is serverless like SQLite — a single
@@ -45,8 +45,8 @@ repo):
 nqlite-workspace/
   nql/        # front-end ONLY: parser + AST + analyzer. MUST NOT know storage exists.
   nql-ir/     # tiny shared contract: the lowered Plan / IR both ends compile against.
-  nqlite/     # the engine: storage + indexes + executor that runs an nql Plan.
-  spec/       # nql grammar spec (nql.md), file-format spec, operator semantics.
+  nqlite/     # the engine: storage + indexes + executor that runs an NQL Plan.
+  spec/       # NQL grammar spec (nql.md), file-format spec, operator semantics.
   docs/       # design reasoning, hardening, comparison, research notes.
 ```
 
@@ -68,7 +68,7 @@ Cargo dev-dependencies so the language never bends to engine internals.
 
 We distinguish three "intelligence" tiers and deliberately keep them apart:
 
-1. **Deterministic / statistical (IN the engine, always on, offline, zero-LLM):**
+1. **Deterministic / statistical (IN the engine, always on, offline, No-LLM):**
    BM25 lexical, HNSW/ANN similarity, distance, re-rank-by-distance, graph
    traversal, closure, PageRank, co-occurrence edges, recency/time-decay salience,
    keyword/token NER. Reproducible => property-testable.
@@ -128,7 +128,7 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
     Provenance, time, per-voter granularity, and one-transaction all come free.
     `weight` defaults to the `value` when omitted (so `value:-1` downvotes under
     `::score` too); an explicit `weight` overrides `value` for `::score` only.
-  - Deterministic engine operators (allowed — pure arithmetic, zero-LLM):
+  - Deterministic engine operators (allowed — pure arithmetic, No-LLM):
     `::votes(record)` → (up, down, net); `::score(record)` → **Laplace-smoothed
     mean** (M1 default: robust with few votes; Wilson lower bound deferred to
     ranking-API milestone); `::feedback(record)` → time-decayed recent feedback.
@@ -140,8 +140,10 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
     future agent-side reranker. The *learning* (weight tuning α..δ, reranker
     training) lives in the agent layer, never in the engine.
   - Salience gets a fourth deterministic term:
-    `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·feedback_score`
-    (weights α..δ are agent-side knobs).
+    `::salience = α·similarity + β·strength(recency,freq) + γ·importance + δ·score`
+    (weights α..δ are agent-side knobs, passed per-query as
+    `ORDER BY ::salience(α, β, γ, δ)`; engine defaults 0.7/0/0/0.3 —
+    LANDED 2026-10-06, issue #88).
   - **LANDED (2026-08-03)**: `Order::Votes` + `Order::Feedback` in nql-ir;
     `vote_counts` (up/down/net over `:voted` edges) and `feedback_score`
     (time-decayed: Σ sign·1/(1+λ·age), `now` = max created_at in store — pure,
@@ -156,13 +158,31 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
   - Poisoning/drift: votes carry voter + trust weight; engine stores, agent
     decides trust policy; deterministic decay for old votes.
 
-## 6. Benchmark targets (aspirational, tune later)
+## 6. Benchmark targets vs measured (reconciled 2026-10-06, issue #115)
 
-- reopen cold and query a 100K-record store in milliseconds.
-- kNN recall@10 >= 0.95 on a standard set; ANN memory bounded.
-- deterministic: same input -> byte-identical output across runs.
-- crash in WAL mid-commit -> auto-recover, no corruption.
-- ingest 100K records < a few seconds.
+Measured on the reference box (Intel Xeon E5-2640 v4 @ 2.40 GHz, release
+profile, warm cache; tooling: `nqlite/examples/open_profile` + the E08
+release ladder — full numbers and method on issue #115):
+
+- **reopen cold a 100K-record store**: measured — **~0.26 s** engine load
+  after #133's lazy history decode (warm-cache medians of 3; ~0.46 s first
+  touch; ~0.54 s CLI end-to-end). The store file splits 31.5 MB core / 31.0 MB
+  history tail: current-state queries decode only the core, and the first
+  temporal read pays the deferred tail once per session. (Was ~0.7 s load /
+  ~0.875 s CLI before #133.) The "milliseconds" wording stays **retired**:
+  exact-scan queries floor at 75–140 ms @100K — sub-10 ms needs the ANN path
+  (#96's gate). (E08's earlier "1.8 s" figure included ~0.9 s of harness-side
+  output parsing, not engine time.)
+- **kNN recall@10 >= 0.95**: met at 5k rows (**0.96**, CI gate in #114);
+  degrades at 50k (0.81) with default params — sweep flags exist; the gate
+  pins the 5k target.
+- **deterministic: same input -> byte-identical output across runs**: met —
+  248 workspace tests incl. transcript-digest checks.
+- **crash in WAL mid-commit -> auto-recover, no corruption**: met — CRC /
+  torn-frame tests (spec file-format §4).
+- **ingest 100K records < a few seconds**: met in-process (**3.74 s** line
+  protocol, release); the chunked CLI file tier is slower (67.7 s — dominated
+  by per-session reopens, issue #115/E08).
 
 ## 7. Tone for docs (repo conventions)
 

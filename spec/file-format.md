@@ -9,13 +9,36 @@ order — no `HashMap` anywhere in the format).
 
 ```
 offset 0   : magic   = 8 bytes: "NQLITE01" (0x4E 0x51 0x4C 0x49 0x54 0x45 0x30 0x31)
-offset 8   : version = u32 LE = 1
+offset 8   : version = u32 LE = 3   (current layout; 2 = the legacy inline layout, still readable)
 offset 12  : reserved = u32 LE = 0
-offset 16  : payload = postcard(Store)
+offset 16  : core_len = u64 LE
+offset 24  : core     = postcard(core frame)
+offset ...  : history  = postcard(Vec<(i64, Statement)>) — tail, to EOF
 ```
 
-`Store` = `{ records: BTreeMap<RecordId, Record>, edges: Vec<RelationEdge>,
-vector_dims: BTreeMap<String, usize> }` (see `nql-ir`).
+The **core frame** = `{ records, edges, vector_dims, clock, memories, tables }`
+— the store minus its history (issue #133):
+
+- **The history tail is not decoded at open.** Current-state queries never
+  pay for it; the first temporal read (`AS OF`, `HISTORY SINCE`,
+  `PRUNE HISTORY`) claims it once per session (`ensure_history`), prepending
+  it to any WAL-replayed entries (file entries always predate them).
+- `Store.tables` (the declared-table index, issue #133) rides in the core;
+  nested memories rebuild theirs from their inline histories.
+- Legacy v2 files (single inline `postcard(Store)` payload, history included)
+  load through the compatibility path and rebuild `tables` from that history;
+  versions ≤1 are rejected (`BadVersion`) — as they have been since `AS OF`
+  landed.
+- **Downside:** binaries older than the v3 layout reject version-3 files at
+  the version check — loud, never a partial load (truncated frames error as
+  `StorageError::Truncated`).
+
+The history tail carries `Store.history`, which after `PRUNE HISTORY`
+(issue #95) contains a `Statement::Snapshot` entry: the compacted state
+plus the retained `CreateTable` declarations. **Downside caveat:** binaries
+older than the compaction feature cannot decode a pruned store (unknown
+statement variant) and fail loudly at `postcard` decode; unpruned stores
+decode unchanged.
 
 A missing main file means an empty store.
 

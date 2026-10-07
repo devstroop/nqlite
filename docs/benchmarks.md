@@ -2,8 +2,9 @@
 
 Reproducible benchmark page for nqlite — how to regenerate every number that
 appears in this repo's performance claims. All timings are wall-clock
-milliseconds, lower is better, measured **in-memory only** (no persistence
-layer yet).
+milliseconds, lower is better. The `nql-bench` corpus runs are measured
+**in-memory only**; persistence / cold-start numbers (the on-disk store) have
+their own section below.
 
 ## Methodology
 
@@ -75,9 +76,112 @@ range) because both are exact scans over in-memory data; hybrid ≈ kNN + BM25.
 `scripts/bench-compare/bench.py` runs the same corpus against sqlite-vec,
 LanceDB and Chroma **when their Python drivers are importable**; a missing
 driver is reported as `skipped` — the harness never fails because a competitor
-isn't installed. On this box none of the three drivers are present, so the
-matrix degrades honestly to nqlite-only (see "Reproduce" for how to install
-them).
+isn't installed. All three drivers are now wired **including the `rec@10`
+quality column** (mean over 30 queries vs exact cosine top-10 on the shared
+corpus; each store's vectors are unit-normalized at insert so its L2 ranking
+is cosine-equivalent — see the shared `unit`/`mean_recall10` helpers in the
+driver; lancedb rows carry an `id` column for index mapping).
+
+Latest run with all columns: [`scripts/bench-compare/report-2026-10-06.md`](../scripts/bench-compare/report-2026-10-06.md)
+(**all three competitors installed** — sqlite-vec 0.1.9, lancedb 0.39.0,
+chromadb 1.5.9): recall nqlite **1.0000 @1k / 0.96 @5k** vs **1.0000 for all
+three competitors at both sizes** (competitors' rec@10 = 30-query mean vs
+exact cosine top-10 on the shared corpus, vectors unit-normalized so their
+L2 ranking ≡ cosine — bases stated in the report). The earlier
+`report-2026-08-04.md` (Raspberry Pi, all three drivers) remains the
+three-driver *latency* reference — numbers are never comparable across those
+two machines.
+
+## Recall (quality, issue #96)
+
+Latency is half the story; the other half is whether the **opt-in HNSW index
+still returns the right neighbors**. `nql-bench --recall` measures the
+standard ANN metric — recall@K of HNSW against the exact brute-force top-K —
+on its own deterministic dim-64 vector set (seed 42, queries seeded apart
+from the corpus). The dim-8 *timing* corpus is deliberately not used here:
+in 8 dimensions HNSW is trivially exact and would report a meaningless 1.0.
+
+```sh
+# quality report (JSON; requires the hnsw feature for ANN numbers)
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 5000
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 50000 --queries 30 --dim 64
+
+# parameter sweep (recall degrades with N at default params — see below)
+cargo run -q -p nql-bench --features hnsw -- --recall --rows 50000 --hnsw-m 32 --hnsw-ef 256
+
+# the gate: asserts recall@10 >= 0.95 (decisions §6 target)
+cargo test -p nqlite --test recall --features hnsw
+```
+
+Measured on this box (2026-10-06, `dim=64`, `HnswVectorIndex::new(seed=42, …)`):
+
+| rows | queries | m / efc / ef | recall@10 | recall@50 | recall@100 |
+|---:|---:|---|---:|---:|---:|
+| 5 000 | 20 | 16 / 200 / 64 (default) | **0.96** | 0.959 | 0.937 |
+| 50 000 | 30 | 16 / 200 / 64 (default) | **0.81** | 0.756 | 0.687 |
+
+**The honest finding: default parameters degrade with scale.** At 5k the ANN
+path clears decisions §6's `recall@10 ≥ 0.95` target; at 50k it falls to 0.81 —
+the gate (`nqlite/tests/recall.rs`, rows=5000) pins the 5k regime, and the
+`--hnsw-m/--hnsw-efc/--hnsw-ef` flags exist so the 50k regime can be swept
+(e.g. `--hnsw-m 32 --hnsw-ef 256` raises 2k-row recall to 1.0 in the smoke
+run) before any default-parameter claim at scale. Keep this table updated
+when params or the corpus change.
+
+Notes:
+
+- Recall numbers are **build-profile independent** — the HNSW graph and the
+  queries are seeded, so debug and release produce the same graph and the
+  same neighbors. (Latencies above are dev-profile; recall is not.)
+- Search beam: `fast-hnsw` widens `ef` to `max(ef, k)` — measuring with
+  `k = rows` would silently turn the gate into a near-exact run. Both the
+  bench and the gate cap `k` at 100 (see the comment in `nqlite/tests/recall.rs`).
+- `scripts/bench-compare/bench.py` carries a `rec@10` column: nqlite's own
+  HNSW-vs-exact (its dim-64 set) and — since 2026-10-06 — sqlite-vec's recall
+  vs exact cosine top-10 on the shared corpus (`off` when nql-bench is built
+  without `--features hnsw`; LanceDB/Chroma `n/a` — no quality metric wired).
+
+## Cold start / persistence (issues #115, #133)
+
+Cold-start cost of the on-disk store — how long `Database::open` takes before
+the first query, and what the first *temporal* query additionally pays.
+
+**Method:** a 100 000-record store (one `INSERT` per row) written by the
+current `checkpoint` path (format **v3**: core frame + history tail, see
+`spec/file-format.md` §1), then:
+
+```sh
+cargo build --release -p nqlite --example open_profile
+target/release/examples/open_profile /path/to/store.nql   # load / count / scan
+# E08 harness (file_tier cold-open @100k + kNN/BM25/hybrid ladder):
+cd ../nqlite-experiments && EXP08_PROFILE=release EXP08_SIZES=1000,5000,20000,50000,100000 \
+  NQL_SERVER_BIN=$PWD/../nqlite/target/release/nql-server \
+  NQL_CLI_BIN=$PWD/../nqlite/target/release/nql \
+  python3 experiments/exp08_scale_ladder.py
+```
+
+**Measured 2026-10-07, commit `915a79b`, release profile, reference box
+(see Methodology):**
+
+| metric | v3 (this run) | pre-#133 (legacy full decode) |
+|---|---:|---:|
+| `open_profile` load, first touch | 459.7 ms | — |
+| `open_profile` load, warm (median of 3) | **260 ms** (255.6–262.4) | ~640–715 ms |
+| CLI open-only (no query) | **542–549 ms** | ~875 ms |
+| CLI, first statement temporal | 958–1273 ms | (folded into load) |
+| E08 `file_tier` cold-open @100k, WAL | **1338 ms** | ~1810 ms |
+| E08 `file_tier` cold-open @100k, ckpt | **1135 ms** | ~1810 ms |
+
+File layout of the profiled store: 62 511 796 B total = **31 547 635 B core
+frame** + **30 964 137 B history tail**. `open` decodes only the core (records,
+edges, tables) — the history tail is claimed lazily and decoded on the first
+temporal read (`HISTORY`, `AS OF`, closures; measured above as the
+temporal-first delta), which is why warm load sits at ~0.26 s (target ≤ 0.3 s,
+decisions §6) while a temporal-first session pays core + tail + replay.
+
+Compatibility (tested in `nqlite/tests/persistence.rs`): legacy **v2** files
+still load (inline postcard layout, tables rebuilt), **v1 / v99** are rejected
+with `BadVersion (supported: 2, 3)`, truncated v3 frames with `Truncated`.
 
 ## Reproduce
 
@@ -108,8 +212,9 @@ python3 -m venv /tmp/bench-venv
   a single k=10 kNN query costs ~140 ms; that is the price of exact,
   deterministic results, and it is 1–2 orders of magnitude slower than
   sqlite-vec/LanceDB/Chroma on the same data. The upside is that the exact
-  index is on by default and ANN (feature-gated HNSW-style) can be opted into
-  when determinism-per-query is not the binding constraint.
+  index is on by default and ANN (feature-gated HNSW) can be opted into — its
+  recall@10 vs exact is now measured (0.96 at 5k rows, see **Recall** above)
+  and gated by `cargo test -p nqlite --test recall --features hnsw`.
 - **These are dev-build numbers.** An unoptimized build is what the
   reproducible commands produce; release would be substantially faster, but
   then every reader would need the same `--release` flags to compare. State

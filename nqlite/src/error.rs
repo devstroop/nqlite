@@ -25,6 +25,24 @@ pub enum Error {
     /// meaning as part of a plan, where it scopes subsequent statements.
     #[error("`MEMORY {name}` must run inside a plan to switch context")]
     MemoryWithoutContext { name: String },
+
+    /// A temporal read (`AS OF` or `HISTORY SINCE`) asked for a timestamp
+    /// earlier than the store's history snapshot: compaction
+    /// (`PRUNE HISTORY`, issue #95) dropped the mutations that would answer
+    /// it.
+    #[error(
+        "history before ts {pruned_through} was compacted (PRUNE HISTORY); AS OF / HISTORY SINCE timestamps earlier than the snapshot are no longer available"
+    )]
+    HistoryPruned { pruned_through: i64 },
+
+    /// `ORDER BY <field>` where no record of the queried table carries the
+    /// field (issue #117): every row would sort as equal and fall back to
+    /// RecordId order — almost certainly a typo, so the query fails loudly
+    /// instead of returning a plausible-looking wrong ordering.
+    #[error(
+        "ORDER BY field `{field}` exists on no record of table `{table}` (typo? rows would sort as all-equal)"
+    )]
+    UnknownSortField { field: String, table: String },
 }
 
 /// Convenience alias used across the crate.

@@ -3,15 +3,17 @@
 **A context-first, deterministic, serverless database for AI agents — SQLite for
 AI memory.**
 
-nqlite is an embedded database — one file, SQLite-style ergonomics — that stores
-records, typed graph relations, embedding vectors, and temporal context under a
-single deterministic, **zero-LLM**, ACID transaction. It is built to be the
-durable memory and context substrate for AI agents: the agent decides what to
-write, relate, embed, and recall during a conversation; nqlite faithfully, safely,
-and reproducibly holds the agent's chained context — offline, forever.
+nqlite is the context substrate, built for one job: durably hold an agent's
+evolving context — records, typed graph relations, embedding vectors, and
+time — under a single ACID transaction and a hard **No-LLM** contract.
+Responsibilities are split by design: the engine stores and recalls
+deterministically (hybrid kNN + BM25, `MATCH` traversal, `AS OF` time
+travel); the agent above decides what to write, relate, embed, and forget.
+All of it offline, in one file — a durable substrate for agent memory that
+outlives any model.
 
 *"Neural" here means embeddings are first-class data — nothing in the engine
-learns. For the full framing, see [docs/positioning.md](docs/positioning.md).*
+learns. Full framing and terminology: [docs/positioning.md](docs/positioning.md).*
 
 [![GitHub](https://img.shields.io/badge/github-devstroop%2Fnqlite-181717?logo=github)](https://github.com/devstroop/nqlite)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -23,14 +25,13 @@ learns. For the full framing, see [docs/positioning.md](docs/positioning.md).*
 
 - [Why nqlite](#why-nqlite)
 - [Features](#features)
-- [Zero-LLM guarantee](#zero-llm-guarantee)
+- [Guarantees](#guarantees)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [The nql language](#the-nql-language)
+- [The NQL language](#the-nql-language)
 - [Architecture](#architecture)
 - [Performance](#performance)
-- [Design & research](#design--research)
-- [Positioning](#positioning)
+- [Documentation](#documentation)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -57,59 +58,76 @@ This gives you:
 - **Agent native**: `MATCH` graph traversal, `::similarity` kNN, `::salience`,
   `::score`, and `::feedback` in a single query language — the operations an
   agent needs to chain context over a conversation.
-- **Serverless**: `open a file` and start. Optional network server (line
-  protocol, TCP or stdio) and an MCP server (`nql-mcp`) are built in.
+- **Serverless**: `open a file` and start.
 
 ## Features
 
 - **Records** — `table:id` identifiers, schemaless document bodies, and
   `VECTOR<f32, N>` embeddings as first-class typed fields.
 - **Graph relations** — directed, named, typed edges with properties, weight,
-  and provenance; one transaction across records + vectors + edges.
-- **Deterministic retrieval** — lexical + vector + graph in one query:
-  - `vector::similarity(...)` / `ORDER BY ::similarity` — cosine kNN
-  - `::bm25(field, "query")` — BM25 lexical scoring
-  - `::bm25(...) AND vector::similarity(...)` — hybrid retrieval, both
-    signals fused with reciprocal-rank fusion (deterministic)
-  - `ORDER BY ::salience` — `α·similarity + β·strength + γ·importance + δ·feedback`
-  - `ORDER BY ::score` — Laplace-smoothed mean of `:voted` feedback edges
-  - `ORDER BY ::votes` / `::feedback` — community/vote-driven ranking
-  - `ORDER BY ::recency` — creation-time ordering
+  and provenance.
+- **Deterministic retrieval & ranking** — cosine kNN (`vector::similarity`),
+  BM25 (`::bm25`), and hybrid fusion (RRF) in one `WHERE`; ranking by
+  `::salience` (4-term, agent-tunable via `::salience(α, β, γ, δ)`), `::score`
+  (Laplace mean over `:voted` edges), `::votes`, `::feedback`, `::recency`,
+  or any body field (`ORDER BY seq [DESC]` — documented total order, loud
+  typo errors). Filters `!= < <= > >= IN [..] BETWEEN`, `COUNT(*)`, and
+  `LIMIT/OFFSET` complete the slice — semantics in
+  [spec/nql.md §2.3](spec/nql.md).
 - **Graph traversal** — `MATCH` (1+ hops, both directions, per-step edge
-  property filters) and `CLOSURE` (transitive closure, BFS-depth scores).
-- **Embedded & serverless** — a single file; open a path, start recall.
-  Network server mode (line protocol, TCP or stdio) and an MCP server
-  (`nql-mcp`) are built in.
-- **Concurrency model** — Single-writer, snapshot readers — SQLite-style; one
-  process owns writes, readers see a consistent snapshot per `execute`
-  ([spec/file-format.md](spec/file-format.md) §4).
-- **Hardened** — fuzzed parser (cargo-fuzz) + property tests, single-writer
-  transaction snapshot semantics, deterministic benchmarks.
+  property filters) and `CLOSURE` (transitive closure, BFS-depth scores);
+  both accept `AS OF <ts>` (historical snapshots) and `MATCH ... COUNT`
+  (edge multiplicity).
+- **Time travel** — `AS OF <ts>` on `SELECT`/`MATCH`/`CLOSURE`, backed by
+  deterministic history replay; `HISTORY SINCE <ts>` returns the exact
+  mutation delta (rows *and* edges, tombstones included) for sync; and
+  `PRUNE HISTORY` compacts that history into a snapshot (bounded growth,
+  cheap recent `AS OF`; earlier timestamps fail loudly instead of guessing).
+- **Embedded & serverless** — one file, zero services; optional line-protocol
+  server (TCP/stdio) and MCP server (`nql-mcp`).
+- **Transactions** — one ACID transaction spans records + edges + vectors +
+  their indexes (semantics under [Guarantees](#guarantees)).
+- **Hardened** — fuzzed parser (cargo-fuzz) + property tests, crash-recovery
+  (CRC / torn-frame) tests, deterministic benchmarks.
 
-## Zero-LLM guarantee
+## Guarantees
+
+### No-LLM guarantee
 
 **The engine will never call an LLM** — not to embed, chunk, summarize, compact,
 or rerank. Vectors are **BYO**: the agent (or any external provider) computes them
 and pushes plain `f32` arrays. Any learning lives in the agent/client. This is a
-hard design contract (see [docs/decisions.md](docs/decisions.md)).
+hard design contract (see [docs/decisions.md §1](docs/decisions.md)).
+
+### Deterministic execution
+
+Identical `(plan, store)` ⇒ byte-identical results — no wall-clock, no
+randomness, no hidden model ([spec/nql.md §2.1](spec/nql.md)). The companion
+harness (`nqlite-experiments`) re-asserts this with transcript digests on every
+run.
+
+### Single-writer ACID
+
+SQLite-style concurrency: one writer, snapshot readers per `execute`, sidecar
+WAL with CRC torn-frame recovery ([spec/file-format.md §4](spec/file-format.md)).
+One process owns the file (flock-guarded); readers never block writers.
 
 ## Installation
 
-Add the workspaces as a path/v1 dependency (crates published once stabilized):
-
-```toml
-[dependencies]
-nql = "0.1"
-nqlite = "0.1"
-nql-ir = "0.1"
-nql-cli = "0.1"   # optional: the REPL/script runner
-```
-
-Or build the CLI from source:
+Build from source (works today):
 
 ```bash
 cargo build --release --package nql-cli
 # binary: target/release/nql
+```
+
+Use it as a library — published to crates.io once stabilized; until then,
+pull straight from the repository:
+
+```toml
+[dependencies]
+nqlite = { git = "https://github.com/devstroop/nqlite" }  # engine
+nql    = { git = "https://github.com/devstroop/nqlite" }  # front-end (parser)
 ```
 
 **Requirements**: Rust 1.82+ (see `rust-version` in Cargo.toml). No system
@@ -128,7 +146,7 @@ nql 0.1.0 — type :help for help, :quit to exit
 >> CREATE TABLE turn VECTOR<f32, 384>;
 >> INSERT INTO turn:1 { "role": "user", "text": "I work on the ML team" };
 >> SELECT * FROM turn;
-SELECT turn (1)
+SELECT turn (1 rows)
   turn:1  score=0.0000  {role="user", text="I work on the ML team"}
 ```
 
@@ -148,17 +166,27 @@ cargo run -q -p nql-mcp -- --db memory.nql   # persistent
 ```
 
 `nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
-`relate`, `select`, `match_path`, `forget`) with deterministic JSON results.
+`relate`, `forget`, `select`, `match_path`, `closure`) with deterministic
+JSON results; `select` supports temporal reads (`as_of`) and `MEMORY`-block
+(`memory`), and `execute_nql` carries the full grammar (including
+`AS OF` and `MEMORY` scoping).
 
-Or speak the line protocol directly (`nql-server`, TCP or stdio) — **each line
-is its own plan starting at the root store**, so `MEMORY` must prefix every
-statement that belongs to a memory block; a bare `MEMORY core;` line does not
-carry over to the next line (an unprefixed write after it silently hits root
-and answers `OK`):
+Or speak the line protocol directly (`nql-server`, TCP or stdio). Line-protocol
+rule: **each line is its own plan starting at the root store** — `MEMORY` must
+prefix every statement it scopes (see [spec/nql.md §2.8](spec/nql.md)):
 
 ```bash
 printf 'MEMORY core; CREATE TABLE note; MEMORY core; INSERT INTO note:1 { "text": "x" };\nMEMORY core; SELECT * FROM note;\n' \
   | cargo run -q -p nql-server -- --stdio
+```
+
+Add `--db memory.nql` (either mode) to serve a **persistent** store — same
+semantics as `nql-cli --db`, including the single-writer lock; without it the
+server is in-memory and everything is lost on exit:
+
+```bash
+cargo run -q -p nql-server -- --db memory.nql            # TCP on :7878
+cargo run -q -p nql-server -- --db memory.nql --stdio    # line protocol on stdio
 ```
 
 Or in Rust, programmatically:
@@ -185,9 +213,13 @@ fn main() {
 }
 ```
 
-## The nql language
+Runnable end-to-end examples (memory, chains, ledgers):
+`cargo run -p nqlite --example chat_memory` — see
+[docs/agent-patterns.md](docs/agent-patterns.md).
 
-nql is a SQL-like grammar with SurrealDB-style records and graph operators,
+## The NQL language
+
+NQL is a SQL-like grammar with SurrealDB-style records and graph operators,
 written for neural/context workloads. Multiple statements run as one plan (one
 transaction), separated by `;`:
 
@@ -230,10 +262,11 @@ nql-ir/   shared contract: value types + Statement/Select/Order/Plan
    ▼
 nqlite/   engine: deterministic execution over Store
    ├─ records (BTreeMap)  ──  relations (edges)  ──  vectors (VectorIndex)
-   └─ ACID transaction (single-writer, snapshot readers)  [M1: file + WAL]
+   └─ ACID transaction (single-writer, snapshot readers)  [file + WAL]
 
-nql-server/  line-protocol server (TCP + stdio)
+nql-server/  line-protocol server (TCP + stdio, optional `--db` persistence)
 nql-mcp/     MCP server (stdio) — exposes nqlite as tools for AI agents
+nql-bench/   benchmark harness (kNN/BM25/hybrid latency, recall@K quality)
 ```
 
 **Why three crates?** `nql` (front-end) and `nqlite` (engine) are separated by a
@@ -242,43 +275,29 @@ each half is hardened independently. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Performance
 
-Reproducible numbers live in **[docs/benchmarks.md](docs/benchmarks.md)**:
-deterministic corpus (xorshift64* seed 42, dim-8 vectors), measured on the
-reference box, and regenerable with `./scripts/bench.sh` — methodology,
-results, and an honest "where nqlite is weak" section included.
+All numbers are engine-only and bound to a commit, profile, and machine —
+methodology, raw runs, and an honest "where nqlite is weak" section live in
+**[docs/benchmarks.md](docs/benchmarks.md)** (regenerate: `./scripts/bench.sh`;
+micro-benchmarks: `cargo bench -p nqlite`).
 
-In short (dev build, this box):
+Headline (reference box, release build): **100K-record reopen ≈ 0.26 s**
+(core-only lazy load; ≈ 0.54 s CLI end-to-end), ingest 100K in **3.74 s**
+in-process, exact-scan queries floor at 75–140 ms @100K — sub-10 ms needs the
+feature-gated ANN path (recall@10 ≥ 0.95 CI gate at 5k rows). Cross-DB
+quality matrix (sqlite-vec / LanceDB / Chroma): [scripts/bench-compare/](scripts/bench-compare/).
 
-- ~10–14 µs per dim-8 record ingested in bulk (12.3 ms / 1000 rows,
-  136.6 ms / 10000 rows).
-- kNN is an exact brute-force scan by default (no ANN): ~730 ms / 50 queries
-  @ 1000 rows, ~1430 ms / 10 queries @ 10000 rows.
-- hybrid ≈ kNN + BM25 in the same pass.
+## Documentation
 
-These are **the engine only** (no LLM in the path) — the honest numbers.
-Micro-benchmarks also live under `cargo bench -p nqlite` (criterion).
+Full index: **[docs/README.md](docs/README.md)**.
 
-## Design & research
-
-- **[docs/decisions.md](docs/decisions.md)** — the non-negotiables, mental model,
-  and every design decision D1–D9 (incl. votes-as-edges, Laplace `::score`,
-  vector-strategy).
-- **[docs/positioning.md](docs/positioning.md)** — the pitch and framing:
-  what nqlite is/isn't, the "SQLite for AI memory" story, honest comparisons,
-  terminology.
-- **[docs/research.md](docs/research.md)** — external research + sources:
-  agent-memory systems, embedded/vector engines, query-language design.
-- **[docs/comparison.md](docs/comparison.md)** — how nqlite sits vs sqlite-vec,
-  LanceDB, Chroma, and SurrealDB.
-
-## Positioning
-
-nqlite is **SQLite for AI memory**: the deterministic, single-file context
-store that agents write into and recall from — not a vector DB with a graph
-bolted on, and not a "neural" engine that learns. Embeddings are first-class
-data (BYO), learning lives in the agent above the DB, and everything the
-engine does is byte-deterministic. The full pitch, honest comparisons, and
-terminology live in **[docs/positioning.md](docs/positioning.md)**.
+| | |
+|---|---|
+| [docs/decisions.md](docs/decisions.md) | Design intent: non-negotiables, mental model, decisions D1–D9 |
+| [docs/positioning.md](docs/positioning.md) | Pitch & framing: what nqlite is/isn't, honest comparisons, terminology |
+| [spec/nql.md](spec/nql.md) · [spec/file-format.md](spec/file-format.md) | Normative: grammar & semantics · on-disk format |
+| [docs/agent-patterns.md](docs/agent-patterns.md) | Runnable agent recipes (`cargo run -p nqlite --example …`) |
+| [docs/benchmarks.md](docs/benchmarks.md) | Methodology, measured numbers, weaknesses |
+| [docs/research.md](docs/research.md) · [docs/comparison.md](docs/comparison.md) | External sources & landscape · position vs sqlite-vec/LanceDB/Chroma/SurrealDB |
 
 ## Roadmap
 
@@ -288,7 +307,7 @@ issue in [ISSUES.md](ISSUES.md). (This README stays state-independent.)
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) — branch model (`main → develop → feat/*`),
-checklist (`fmt + clippy + test`), and the zero-LLM/ determinism rules. This is a
+checklist (`fmt + clippy + test`), and the No-LLM/ determinism rules. This is a
 welcoming project; bug reports and PRs are appreciated.
 
 ## License

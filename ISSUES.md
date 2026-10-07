@@ -104,13 +104,13 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
   dep; docs honesty (ISSUE-15 MCP re-scope, PLAN status log, KANBAN archived,
   spec order_op/statement sync).
 - **ISSUE-18 — feat/bm25-grammar** · M2 · PR #37
-  `WHERE ::bm25(field, "query") [AND k = N]` wired into the nql parser +
+  `WHERE ::bm25(field, "query") [AND k = N]` wired into the NQL parser +
   analyzer (engine `Filter::Bm25` already existed); spec sync (fts moved from
   planned to M0 grammar, `order_op` gains `::votes`/`::feedback`, statement
   list gains `match`).
 - **ISSUE-17 — feat/fix-votes-wal** · M1 · PR #36
   `::score` now matches the parser's no-colon `"voted"` convention (votes
-  created via nql count again); read-only `MATCH` no longer written to the
+  created via NQL count again); read-only `MATCH` no longer written to the
   WAL (`is_mutating` excludes SELECT and MATCH).
 - **ISSUE-12 — feat/graph-relations** · M0/M1 · PR #32
   RELATE + 1-hop MATCH; edges with props/weight/time. `MATCH (a) -> :name <- :name`
@@ -142,8 +142,8 @@ Each issue = one feature branch. Feature branches merge into `develop` via PR;
 |---|---|
 | M0 — Deterministic context engine | ISSUE-1..6 (ir-value-types, ir-plan, engine-core, nql-parser, grammar-spec, vector-index-brute) + ISSUE-12 (graph-relations) |
 | M1 — Real storage (file, WAL, ACID) | ISSUE-7..8, 11, 13, 17, 20, 22 (fuzzing, vector-index-HNSW, feedback, storage-wal, fix-votes-wal, graph-core, feedback-harness) |
-| M2 — nql grammar real | ISSUE-5, 9, 10, 14, 18, 23..28 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning, temporal-reads, memory-blocks, bench-run) |
+| M2 — NQL grammar real | ISSUE-5, 9, 10, 14, 18, 23..28 (grammar-spec, analyzer-planner, repl, bm25-fts, bm25-grammar, hybrid-retrieval, bench-compare, positioning, temporal-reads, memory-blocks, bench-run) |
 | M3 — Agents & MCP | ISSUE-15, 16, 21 (server-mode, agent-examples, mcp-server) |
 
-_This file replaces docs/KANBAN.md. It is an archive: kept for history, no
+_This file replaces docs/archive/KANBAN.md. It is an archive: kept for history, no
 longer maintained by hand — the live tracker is GitHub issues (see header)._

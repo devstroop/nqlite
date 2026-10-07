@@ -21,8 +21,8 @@
 
 use crate::lexer::{tokenize, Spanned, Token};
 use nql_ir::{
-    Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Plan, Record, RecordId,
-    RelationEdge, Select, Statement, Value,
+    Aggregate, CmpOp, Filter, Id, Knn, MatchDirection, MatchPath, MatchStep, Order, Plan, Record,
+    RecordId, RelationEdge, Select, Statement, Value,
 };
 use std::collections::BTreeMap;
 
@@ -223,11 +223,31 @@ impl Parser {
             Token::Ident(kw) if kw.eq_ignore_ascii_case("memory") => self.parse_memory(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("select") => self.parse_select(),
             Token::Ident(kw) if kw.eq_ignore_ascii_case("forget") => self.parse_forget(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("prune") => self.parse_prune(),
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("history") => self.parse_history(),
             other => Err(self.err_here(format!(
-                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET), found {}",
+                "expected a statement keyword (CREATE, INSERT, RELATE, MATCH, CLOSURE, MEMORY, SELECT, FORGET, PRUNE, HISTORY), found {}",
                 describe(other)
             ))),
         }
+    }
+
+    /// `HISTORY SINCE <ts>` — exact delta read (issue #118): every mutation
+    /// strictly after the cutoff (rows AND edges + tombstones), for sync
+    /// without two full `AS OF` replays. Read-only; never WAL'd.
+    fn parse_history(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("history", "HISTORY")?;
+        self.expect_keyword("since", "SINCE after HISTORY")?;
+        Ok(Statement::HistorySince(self.expect_int("SINCE timestamp")?))
+    }
+
+    /// `PRUNE HISTORY` — compact the mutation history into a snapshot at the
+    /// current clock (issue #95): bounded growth, cheap replay from the
+    /// snapshot; `AS OF` before it then errors loudly (spec §2.7).
+    fn parse_prune(&mut self) -> Result<Statement, NqlError> {
+        self.expect_keyword("prune", "PRUNE")?;
+        self.expect_keyword("history", "HISTORY after PRUNE")?;
+        Ok(Statement::PruneHistory)
     }
 
     fn parse_create(&mut self) -> Result<Statement, NqlError> {
@@ -325,6 +345,12 @@ impl Parser {
     fn parse_match(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("match", "MATCH")?;
         let path = self.parse_path("MATCH")?;
+        // `MATCH ... COUNT` — walk-count mode (issue #94). Statements can only
+        // start with keywords, so a `COUNT` here can't be the next statement.
+        if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("count")) {
+            self.bump();
+            return Ok(Statement::MatchCount(path));
+        }
         Ok(Statement::Match(path))
     }
 
@@ -360,10 +386,9 @@ impl Parser {
             let mut edge_props = None;
             if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("where")) {
                 self.bump();
-                let field = self.expect_ident("edge-property field after WHERE")?;
-                self.expect_token(Token::Eq, "`=` in edge-property filter")?;
-                let value = self.parse_value()?;
-                edge_props = Some(Filter::FieldEquals { field, value });
+                // Same term grammar as a WHERE clause (issues #93/#125):
+                // predicates composed with AND — evaluated against edge props.
+                edge_props = Some(self.parse_where_conjunction()?);
             }
             steps.push(MatchStep {
                 direction,
@@ -374,14 +399,28 @@ impl Parser {
         if steps.is_empty() {
             return Err(self.err_here(format!("{kw} requires at least one edge step (`-> :name`)")));
         }
-        Ok(MatchPath { start, steps })
+        // `[ 'AS OF' int ]` (issue #92): shared by MATCH and CLOSURE — the
+        // engine traverses the history-replayed snapshot (spec §2.7), the
+        // same machinery `SELECT ... AS OF` uses. It precedes a trailing
+        // MATCH `COUNT` (parse_match consumes COUNT after this returns).
+        let mut as_of = None;
+        if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("as")) {
+            self.bump();
+            self.expect_keyword("of", "OF after AS")?;
+            as_of = Some(self.expect_int("AS OF timestamp")?);
+        }
+        Ok(MatchPath {
+            start,
+            steps,
+            as_of,
+        })
     }
 
     fn parse_select(&mut self) -> Result<Statement, NqlError> {
         self.expect_keyword("select", "SELECT")?;
-        // Field list (or `*`): carried into the IR as the projection
-        // (`None` = star = full records).
-        let fields = self.parse_field_list()?;
+        // Field list (or `*`), or `COUNT(*)`: carried into the IR as the
+        // projection (`None` = star = full records) and/or aggregate.
+        let (fields, aggregate) = self.parse_field_list()?;
         self.expect_keyword("from", "FROM")?;
         let table = self.expect_ident("table name after FROM")?;
 
@@ -389,6 +428,7 @@ impl Parser {
         let mut filter = None;
         let mut order = None;
         let mut limit = None;
+        let mut offset = None;
         let mut as_of = None;
 
         loop {
@@ -402,23 +442,51 @@ impl Parser {
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("order") => {
                     self.bump();
                     self.expect_keyword("by", "BY after ORDER")?;
-                    if matches!(self.peek_tok(), Token::DoubleColon | Token::Colon) {
+                    let colon_prefixed =
+                        matches!(self.peek_tok(), Token::DoubleColon | Token::Colon);
+                    if colon_prefixed {
                         self.bump();
                     }
                     let o = self.expect_ident("order key after ORDER BY")?;
                     order = Some(match o.to_ascii_lowercase().as_str() {
                         "similarity" => Order::Similarity,
-                        "salience" => Order::Salience,
+                        "salience" => self.parse_salience_order()?,
                         "score" => Order::Score,
                         "recency" => Order::Recency,
                         "votes" => Order::Votes,
                         "feedback" => Order::Feedback,
-                        _ => {
+                        // A bare non-operator identifier is a body-field sort
+                        // (issue #117). `::` commits to the operator list, so
+                        // `::seq` stays a positioned error, not a field.
+                        _ if colon_prefixed => {
                             return Err(self.err_here(format!(
-                                "unknown ORDER BY key `{o}` (expected similarity, salience, score, recency, votes, or feedback)"
+                                "unknown ORDER BY operator `{o}` (expected similarity, \
+                                 salience, score, recency, votes, or feedback — or a \
+                                 bare field name without `::`)"
                             )));
                         }
+                        _ => Order::Field {
+                            key: o,
+                            desc: false,
+                        },
                     });
+                    // `<field> [DESC]` (issue #117). Operator keys have fixed
+                    // directions, so DESC after one is a positioned error —
+                    // never a silent no-op (#91's lesson).
+                    if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("desc"))
+                    {
+                        self.bump();
+                        match &mut order {
+                            Some(Order::Field { desc, .. }) => *desc = true,
+                            _ => {
+                                return Err(self.err_here(
+                                    "`DESC` applies to field sorts only \
+                                     (`ORDER BY <field> DESC`); `::` operators have \
+                                     fixed directions",
+                                ));
+                            }
+                        }
+                    }
                 }
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("as") => {
                     self.bump();
@@ -429,6 +497,17 @@ impl Parser {
                 Token::Ident(kw) if kw.eq_ignore_ascii_case("limit") => {
                     self.bump();
                     limit = Some(self.expect_usize("LIMIT count")?);
+                    // `LIMIT n OFFSET m` in one clause …
+                    if matches!(self.peek_tok(), Token::Ident(k) if k.eq_ignore_ascii_case("offset"))
+                    {
+                        self.bump();
+                        offset = Some(self.expect_usize("OFFSET count")?);
+                    }
+                }
+                // … or OFFSET on its own (either clause order).
+                Token::Ident(kw) if kw.eq_ignore_ascii_case("offset") => {
+                    self.bump();
+                    offset = Some(self.expect_usize("OFFSET count")?);
                 }
                 _ => break,
             }
@@ -442,6 +521,8 @@ impl Parser {
             limit,
             as_of,
             fields,
+            offset,
+            aggregate,
         }))
     }
 
@@ -460,10 +541,21 @@ impl Parser {
 
     // -- shared pieces ------------------------------------------------------
 
-    /// `SELECT <field>, ... | *` — carried into [`Select::fields`]: `None`
-    /// for `*` (full records), `Some(list)` for an explicit projection the
-    /// engine applies as the final pipeline step (spec §2.3).
-    fn parse_field_list(&mut self) -> Result<Option<Vec<String>>, NqlError> {
+    /// `SELECT <field>, ... | * | COUNT(*)` — carried into
+    /// [`Select::fields`] (`None` for `*` = full records) and/or
+    /// [`Select::aggregate`]; the engine applies projection as the final
+    /// pipeline step (spec §2.3). `COUNT` is only an aggregate when followed
+    /// by `(*)`, so a field literally named `count` still works.
+    fn parse_field_list(&mut self) -> Result<(Option<Vec<String>>, Option<Aggregate>), NqlError> {
+        if matches!(self.peek_tok(), Token::Ident(c) if c.eq_ignore_ascii_case("count"))
+            && matches!(self.peek_n(1), Token::LParen)
+        {
+            self.bump(); // `count`
+            self.expect_token(Token::LParen, "`(` after COUNT")?;
+            self.expect_token(Token::Star, "`*` inside COUNT(")?;
+            self.expect_token(Token::RParen, "`)` after COUNT(")?;
+            return Ok((None, Some(Aggregate::CountStar)));
+        }
         let mut fields = Vec::new();
         let mut star = false;
         loop {
@@ -477,13 +569,15 @@ impl Parser {
                     self.bump();
                     fields.push(name);
                 }
-                _ => return Err(self.err_here("expected a field name or `*` in SELECT")),
+                _ => {
+                    return Err(self.err_here("expected a field name, `*`, or `COUNT(*)` in SELECT"))
+                }
             }
             if !self.eat_comma() {
                 break;
             }
         }
-        Ok(if star { None } else { Some(fields) })
+        Ok((if star { None } else { Some(fields) }, None))
     }
 
     /// `<ident>:<id>` — id is a number or a bare word.
@@ -516,6 +610,14 @@ impl Parser {
             let filter = self.parse_bm25_filter()?;
             let mut knn = None;
             if self.eat_keyword("and") {
+                if !matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("vector"))
+                {
+                    return Err(self.err_here(
+                        "`::bm25(...)` may only be ANDed with `vector::similarity(...)` \
+                         (the hybrid form); field predicates belong to a plain WHERE \
+                         conjunction (issue #125)",
+                    ));
+                }
                 knn = Some(self.parse_knn()?);
             }
             return Ok((knn, Some(filter)));
@@ -527,21 +629,170 @@ impl Parser {
                 let knn = self.parse_knn()?;
                 let mut filter = None;
                 if self.eat_keyword("and") {
+                    if !matches!(self.peek_tok(), Token::DoubleColon) {
+                        return Err(self.err_here(
+                            "after a kNN clause, `AND` may only introduce `::bm25(...)` \
+                             (hybrid form) — field predicates belong to a plain WHERE \
+                             conjunction (issue #125)",
+                        ));
+                    }
                     filter = Some(self.parse_bm25_filter()?);
                 }
                 return Ok((Some(knn), filter));
             }
         }
+        // Field-level terms compose with `AND` (issue #125): n-ary, all-of,
+        // no precedence — one combinable subset, shared with edge props.
+        let filter = self.parse_where_conjunction()?;
+        Ok((None, Some(filter)))
+    }
+
+    /// A conjunction of combinable terms: `term (AND term)*` — n-ary all-of
+    /// (issue #125). Shared by `WHERE` clauses and MATCH/CLOSURE
+    /// edge-property filters; a single term stays unwrapped (the existing
+    /// `Filter` variants, unchanged for consumers).
+    fn parse_where_conjunction(&mut self) -> Result<Filter, NqlError> {
+        let mut terms = vec![self.parse_where_term()?];
+        while self.eat_keyword("and") {
+            if matches!(self.peek_tok(), Token::DoubleColon) {
+                return Err(self.err_here(
+                    "`::bm25` does not take part in `AND` conjunctions — the hybrid \
+                     form is `::bm25(...) AND vector::similarity(...)` (issue #125)",
+                ));
+            }
+            if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("vector")) {
+                return Err(self.err_here(
+                    "`vector::similarity` does not take part in field-predicate `AND` \
+                     conjunctions — put the kNN clause first: `WHERE \
+                     vector::similarity(...) AND k = N [AND ::bm25(...)]` (issue #125)",
+                ));
+            }
+            terms.push(self.parse_where_term()?);
+        }
+        Ok(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            Filter::And(terms)
+        })
+    }
+
+    /// One combinable WHERE term: a field predicate or `IS NOT NULL` — the
+    /// subset `AND` composes (scoring clauses keep their own forms,
+    /// issue #125).
+    fn parse_where_term(&mut self) -> Result<Filter, NqlError> {
         let field = self.expect_ident("WHERE field name")?;
         if matches!(self.peek_tok(), Token::Ident(kw) if kw.eq_ignore_ascii_case("is")) {
             self.bump();
             self.expect_keyword("not", "NOT in `IS NOT NULL`")?;
             self.expect_keyword("null", "NULL in `IS NOT NULL`")?;
-            return Ok((None, Some(Filter::HasEmbedding)));
+            return Ok(Filter::HasEmbedding);
         }
-        self.expect_token(Token::Eq, "`=` in WHERE clause")?;
+        self.parse_field_predicate(field)
+    }
+
+    /// A field predicate once its name is consumed: `= <value>`,
+    /// `!= | < | <= | > | >= <value>`, `IN [<v>, …]`, or
+    /// `BETWEEN <lo> AND <hi>` (issues #93/#94, spec §2.3). Shared by
+    /// `WHERE` clauses and MATCH/CLOSURE edge-property filters.
+    fn parse_field_predicate(&mut self, field: String) -> Result<Filter, NqlError> {
+        // `id` is the pseudo-field bound to the record's `table:id` display
+        // string (issue #128): `=`, `!=`, and `IN` only — ids are not an
+        // ordered value, so ordered comparisons are positioned errors.
+        let is_id = field == "id";
+        if is_id
+            && matches!(
+                self.peek_tok(),
+                Token::Lt | Token::Le | Token::Gt | Token::Ge
+            )
+        {
+            return Err(self.err_here(
+                "`id` supports only `=`, `!=`, and `IN [...]` — ids are not an \
+                 ordered value (issue #128)",
+            ));
+        }
+        let cmp = match self.peek_tok() {
+            Token::Eq => {
+                self.bump();
+                let value = self.parse_value()?;
+                if is_id {
+                    self.require_id_string(&value)?;
+                }
+                return Ok(Filter::FieldEquals { field, value });
+            }
+            Token::Ne => CmpOp::Ne,
+            Token::Lt => CmpOp::Lt,
+            Token::Le => CmpOp::Le,
+            Token::Gt => CmpOp::Gt,
+            Token::Ge => CmpOp::Ge,
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("in") => {
+                self.bump();
+                // Element-wise, NOT parse_value: an all-numeric literal list
+                // would collapse to Value::Vector (M0 array contract) and
+                // `group IN [1, 2, 3]` could never match an Int field.
+                self.expect_token(Token::LBracket, "`[` after IN (e.g. `IN [1, 2, 3]`)")?;
+                let mut values = Vec::new();
+                loop {
+                    if matches!(self.peek_tok(), Token::RBracket) {
+                        self.bump();
+                        break;
+                    }
+                    values.push(self.parse_value()?);
+                    if !self.eat_comma() {
+                        self.expect_token(Token::RBracket, "`]` closing the IN list")?;
+                        break;
+                    }
+                }
+                if is_id {
+                    for v in &values {
+                        self.require_id_string(v)?;
+                    }
+                }
+                return Ok(Filter::FieldIn { field, values });
+            }
+            Token::Ident(kw) if kw.eq_ignore_ascii_case("between") => {
+                if is_id {
+                    return Err(self.err_here(
+                        "`id` supports only `=`, `!=`, and `IN [...]` — ids are not an \
+                         ordered value (issue #128)",
+                    ));
+                }
+                self.bump();
+                let lo = self.parse_value()?;
+                self.expect_keyword("and", "AND between BETWEEN bounds")?;
+                let hi = self.parse_value()?;
+                return Ok(Filter::FieldBetween { field, lo, hi });
+            }
+            _ => {
+                return Err(self.err_here(format!(
+                    "expected an operator after `{field}` \
+                     (`=`, `!=`, `<`, `<=`, `>`, `>=`, `IN [...]`, or `BETWEEN ... AND ...`)"
+                )))
+            }
+        };
+        self.bump(); // the comparison token
         let value = self.parse_value()?;
-        Ok((None, Some(Filter::FieldEquals { field, value })))
+        if is_id {
+            self.require_id_string(&value)?;
+        }
+        Ok(Filter::FieldCmp {
+            field,
+            op: cmp,
+            value,
+        })
+    }
+
+    /// `WHERE id <op> …` compares against the `table:id` display string
+    /// (issue #128): a non-string literal is a positioned error, not a
+    /// silent never-match.
+    fn require_id_string(&self, value: &Value) -> Result<(), NqlError> {
+        if matches!(value, Value::Str(_)) {
+            Ok(())
+        } else {
+            Err(self.err_here(
+                "`id` predicates compare against the `table:id` string, e.g. \
+                 `id = \"doc:7\"` (issue #128)",
+            ))
+        }
     }
 
     /// `::bm25(<field>, "<query>") [AND k = <N>]` — the lexical filter alone.
@@ -762,6 +1013,45 @@ impl Parser {
             )),
         }
     }
+
+    /// `::salience` order key: bare (engine defaults α=0.7, β=0, γ=0, δ=0.3) or
+    /// agent-tuned `::salience(α, β, γ, δ)` — four comma-separated numbers
+    /// (issue #88, spec §2.3). Weights must be finite; arity is exactly 4.
+    fn parse_salience_order(&mut self) -> Result<Order, NqlError> {
+        if !matches!(self.peek_tok(), Token::LParen) {
+            return Ok(Order::Salience);
+        }
+        self.bump();
+        let mut w = [0.0f32; 4];
+        for (i, slot) in w.iter_mut().enumerate() {
+            if i > 0 {
+                self.expect_token(Token::Comma, "`,` between salience weights")?;
+            }
+            let s = self.bump();
+            let raw: f64 = match &s.tok {
+                Token::Int(n) => *n as f64,
+                Token::Float(f) => *f,
+                other => {
+                    return Err(self.err_at(
+                        &s,
+                        format!(
+                            "expected a number for salience weight {} of 4 \
+                             (α, β, γ, δ), found {}",
+                            i + 1,
+                            describe(other)
+                        ),
+                    ))
+                }
+            };
+            let v = raw as f32;
+            if !v.is_finite() {
+                return Err(self.err_at(&s, "salience weights must be finite".to_string()));
+            }
+            *slot = v;
+        }
+        self.expect_token(Token::RParen, "`)` after salience weights")?;
+        Ok(Order::SalienceWeighted(w))
+    }
 }
 
 fn describe(t: &Token) -> String {
@@ -784,8 +1074,11 @@ fn describe(t: &Token) -> String {
         Token::Colon => "`:`".into(),
         Token::DoubleColon => "`::`".into(),
         Token::Eq => "`=`".into(),
+        Token::Ne => "`!=`".into(),
         Token::Lt => "`<`".into(),
+        Token::Le => "`<=`".into(),
         Token::Gt => "`>`".into(),
+        Token::Ge => "`>=`".into(),
         Token::Star => "`*`".into(),
         Token::Eof => "end of input".into(),
     }

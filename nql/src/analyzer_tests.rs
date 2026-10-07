@@ -32,6 +32,8 @@ fn select(table: &str, knn: Option<Knn>, order: Option<Order>) -> Statement {
         limit: None,
         as_of: None,
         fields: None,
+        offset: None,
+        aggregate: None,
     })
 }
 
@@ -214,6 +216,7 @@ fn match_analyzes_without_table_declaration() {
             name: "mentions".into(),
             edge_props: None,
         }],
+        as_of: None,
     });
     let out = Analyzer::analyze_statement(&stmt).expect("standalone MATCH analyzes");
     assert_eq!(out, stmt, "MATCH passes through unchanged");
@@ -228,6 +231,7 @@ fn match_with_empty_id_string_errors() {
             name: "mentions".into(),
             edge_props: None,
         }],
+        as_of: None,
     });
     let err = Analyzer::analyze_statement(&stmt).expect_err("empty id string must fail");
     assert!(matches!(err, AnalysisError::EmptyId { .. }));
@@ -244,6 +248,7 @@ fn closure_analyzes_without_table_declaration() {
             name: "mentions".into(),
             edge_props: None,
         }],
+        as_of: None,
     });
     let out = Analyzer::analyze_statement(&stmt).expect("standalone CLOSURE analyzes");
     assert_eq!(out, stmt, "CLOSURE passes through unchanged");

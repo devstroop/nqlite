@@ -2,7 +2,7 @@
 
 Runnable examples (`nqlite/examples/`) showing how an **agent** builds
 long-lived context — memory, retrieval, and a tool ledger — on top of the
-nqlite engine. The engine stays a deterministic, zero-LLM function of
+nqlite engine. The engine stays a deterministic, No-LLM function of
 `(plan, store)`; **all learning happens in the agent's example code**, which
 decides what to write, relate, and embed.
 
@@ -40,11 +40,16 @@ SELECT * FROM turn
 ```
 
 The **importance knob**: the agent hand-writes an `importance` field on each
-turn and converts it into a `:voted` edge weight
-(`(agent) -[:voted {weight}]-> (turn)`). The engine's salience formula blends
-`0.7 · similarity + 0.3 · importance`, so a slightly less similar but much
-more important turn (importance 0.9) can outrank a nearer-but-less-important
-one (0.8) — the recalled "context" reflects what the *agent* judged valuable.
+turn. Two deterministic routes for it to matter — (a) the original one,
+converting it into a `:voted` edge weight
+(`(agent) -[:voted {weight}]-> (turn)`) so it enters the Laplace `::score`,
+or (b) the direct γ weight: `ORDER BY ::salience(0.7, 0, 0.3, 0)` blends
+`0.7 · similarity + 0.3 · importance` with no edge at all (spec §2.3; bare
+`ORDER BY ::salience` uses the engine defaults 0.7/0/0/0.3, i.e.
+`0.7 · similarity + 0.3 · score`). Either way a slightly less similar but
+much more important turn (importance 0.9) can outrank a
+nearer-but-less-important one (0.8) — the recalled "context" reflects what
+the *agent* judged valuable.
 
 ## 2. RAG loop — `examples/rag_loop.rs`
 
@@ -89,6 +94,57 @@ SELECT * FROM call WHERE tool = "web_search";
 are removed in one step, so the audit trail stays consistent.
 
 ---
+
+## 4. Re-ranking & feedback recipes (post-#93)
+
+### Restrict the pool first, then score
+
+`ORDER BY ::score` ranks *the scan* — there is no candidate-set concept
+(pool-by-design). The rerank recipe is therefore **restrict first, score
+second**:
+
+```sql
+-- the retriever's candidates are keyed by a body field:
+SELECT * FROM doc
+    WHERE topic IN ["rust", "wasm"]     -- server-side pool (#93's IN)
+    ORDER BY ::score
+    LIMIT 2;
+```
+
+`IN` makes the restriction server-side whenever the pool carries a body key
+(the `WHERE topic = …` + client-intersect workaround from exp02 still works
+and still scales to pools keyed by anything else). Retriever pools keyed by
+**RecordId** — the common case, since kNN returns ids — have no id predicate
+yet: intersect the id set client-side, or use `WHERE id IN [...]` once #128
+lands (it turns this recipe into one query). Either way the rule is the
+same: `::score` over an unrestricted table is `::score` over *every* row.
+
+### Which feedback operator reads what
+
+After #85 the three operators are sign-consistent but they do **not** read
+the same fields — an explicit `weight` splits them by design:
+
+| operator | reads | explicit `weight` | `value` |
+|---|---|---|---|
+| `::score` | edge `weight` (fallback: signed `value`, then `1.0`) | **overrides `value`** — magnitude *and* sign come from `weight` | used only when `weight` is absent |
+| `::votes` | edge `value` (`+1` / `-1` counts) | **ignored** | the only input |
+| `::feedback` | edge `value` sign × time decay | **ignored** | the only input |
+
+Recipes:
+
+- plain up/down: `SET value = 1` / `SET value = -1` — since #85 a bare
+  `value = -1` already *lowers* `::score` (weight derives from value).
+- confidence-weighted score without changing the vote count:
+  `(agent) -[:voted {value: 1, weight: 0.3}]-> (doc:x)` — `::score` sees the
+  0.3, `::votes` still counts exactly one upvote, `::feedback` still decays
+  its `+1`.
+- never set the two to opposite signs unless you mean it: `::score` follows
+  `weight`, the other two follow `value` — they *will* disagree by design.
+
+These tables are pinned by tests that run in CI: the full mode matrix is
+`order_by_precedence_matrix_matches_spec`, the pool recipe is
+`rerank_pool_recipe_scores_only_the_pool`, and the weight/value split is
+`feedback_weight_and_value_disagree_by_design`.
 
 ## Why the engine stays deterministic while the agent learns
 

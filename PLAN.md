@@ -7,13 +7,14 @@ captured under `docs/`.
 
 Goal: a deterministic, serverless, context-first database for AI agents —
 "SQLite for AI memory": SQLite ergonomics, one embedded file, ACID,
-zero-LLM-dependency in the engine. (Framing: see docs/positioning.md.)
+No-LLM-dependency in the engine. (Framing: see docs/positioning.md.)
 
 ---
 
 ## Guiding principles (from docs/decisions.md)
 
-1. Engine is 100% deterministic, zero LLM dependency, forever.
+1. Engine guarantees hold forever: deterministic, No-LLM
+   ([README §Guarantees](README.md#guarantees), [decisions §1](docs/decisions.md)).
 2. Learning lives in the agent; the store is the durable substrate.
 3. Context is chained via records + typed graph relations + embeddings + time,
    queryable in one pass.
@@ -32,7 +33,7 @@ zero-LLM-dependency in the engine. (Framing: see docs/positioning.md.)
 - Concurrency determinism: snapshot isolation => per-snapshot reads deterministic.
 - Graph: 1-hop `MATCH` in M0; recursive `CLOSURE` in M1.
 - Competitive north star: SurrealDB ("context layer for agents") is the heavy
-  incumbent; sqlite-vec is the bolt-on. We own the file-serverless + zero-LLM +
+  incumbent; sqlite-vec is the bolt-on. We own the file-serverless + No-LLM +
   one-transaction corner. Full positioning in docs/comparison.md.
 
 ---
@@ -45,7 +46,7 @@ Goal: prove the whole thing works end-to-end in one file, offline, deterministic
 - [ ] `nql-ir`: value types, RecordId, Value, Vec, Datetime, RelationEdge.
 - [ ] `nql`: minimal parser for the v0-visionable language slice
       (create/insert/select/relate/knn/match).
-- [ ] `nqlite`: in-memory engine that executes the nql Plan.
+- [ ] `nqlite`: in-memory engine that executes the NQL Plan.
       - Store: records by table:id; IndexMap/BTree.
       - Relations: adjacency table (from, edge, to, props).
       - Vector: brute-force kNN initially (exact, correct); HNSW later.
@@ -69,10 +70,16 @@ Goal: prove the whole thing works end-to-end in one file, offline, deterministic
       triples → recall@K / precision@K vs real usage data; catches retrieval
       regressions on grammar/index/fusion changes.
 - [ ] Fuzz the parser (`cargo-fuzz`) and storage (proptest invariants).
-- [ ] Benchmark harness vs sqlite-vec, LanceDB, Chroma (ingest TPS, P95 kNN,
-      recall@10, cold-open latency).
+- [x] Benchmark harness vs sqlite-vec, LanceDB, Chroma (ingest TPS, P95 kNN,
+      recall@10, cold-open latency) — **recall@K quality shipped**
+      (`nql-bench --recall` vs exact + HNSW, gate `cargo test -p nqlite
+      --test recall --features hnsw` at ≥0.95, `rec@10` column in
+      bench-compare; docs/benchmarks.md §Recall). Remaining: competitor
+      driver installs for their quality columns (bench-compare skips them
+      honestly when absent); cold-open numbers live in nqlite-experiments
+      E08's file tier.
 
-## Milestone 2 — nql grammar real (spec), analyzer, IR stability
+## Milestone 2 — NQL grammar real (spec), analyzer, IR stability
 
 - [ ] Write `spec/nql.md` full grammar + semantics (docs-in-sync-with-code).
 - [ ] AST -> plan lowering with a real optimizer pass.
@@ -107,7 +114,7 @@ Every milestone ships with:
 - deterministic tests (proptest, fuzz) green,
 - docs in sync (README/CHANGELOG/PLAN),
 - benchmark numbers where relevant,
-- zero LLM dependency demonstrated,
+- No-LLM dependency demonstrated,
 - one demo.
 
 ## Status log
@@ -120,7 +127,7 @@ Every milestone ships with:
   branch model live (main → develop → feat/*, PRs + CI protection);
   per-branch worktrees under /mnt/ext1/nqlite-worktrees/.
 - 2026-08-03: **wave-1** merged — ir-plan, engine-core, nql-parser, grammar-spec,
-  + end-to-end integration tests + `;` separators. nql→engine pipeline proven.
+  + end-to-end integration tests + `;` separators. NQL→engine pipeline proven.
 - 2026-08-03: **wave-2** merged — vector-index (VectorIndex trait, brute-force
   default, feature-gated HNSW), fuzzing (proptest + cargo-fuzz), repl (nql-cli).
   Released to main via PR #13. 45+ tests across 4 crates + nql-cli.
@@ -140,8 +147,8 @@ Every milestone ships with:
   dead `tracing` dep; docs honesty (MCP re-scope, spec order_op/statement,
   PLAN state). ISSUE-17..19 tracked the follow-up.
 - 2026-08-07: **wave-10** merged — idempotent-memory + context-chain agent
-  examples (gated fleet process, deterministic/zero-LLM at engine level),
-  release notes (`docs/release-wave-10.md`). Released via PR #66; develop→main
+  examples (gated fleet process, deterministic/No-LLM at engine level),
+  release notes (`docs/archive/release-wave-10.md`). Released via PR #66; develop→main
   via PR #67.
 - 2026-08-07: **hardening wave** — GitHub issue migration (#65), crate publish
   metadata + `publish.yml` (#72, issue #68), benchmark wave (#73),
@@ -154,7 +161,7 @@ Every milestone ships with:
 
 ## Tracker
 
-- **ISSUES.md** is the issue tracker (replaces docs/KANBAN.md — see its footer).
+- **ISSUES.md** is the issue tracker (replaces docs/archive/KANBAN.md — see its footer).
   Each issue = one feature branch; statuses open → in progress → merged (in
-  develop) → released (in main). docs/KANBAN.md is retained as an archive and
+  develop) → released (in main). docs/archive/KANBAN.md is retained as an archive and
   is no longer maintained.

@@ -1,11 +1,11 @@
 # nqlite — Research Findings
 
-Collected 2026-08 (direct, primary sources). Updates this doc when a decision
-changes (docs trend concurrency with code). Sources are dated/attributed inline.
+Collected 2026-08 from primary sources and official documentation — dated and
+attributed inline. Update this doc when a decision changes (docs move in the
+same PR as code).
 
-> Method note: the initial parallel research delegate batch (`deleg_d3bf401b`)
-> failed to return results (upstream API 500 on final synthesis). The material
-> below was instead gathered directly via primary-source fetches and official docs.
+> Method: gathered directly via primary-source fetches and official docs;
+> re-verify any claim whose source has since moved.
 
 ---
 
@@ -23,7 +23,7 @@ it delegates to a KV store. BSL license.
 Implication for nqlite (differentiation, stated honestly):
 - Overlap is real on the *data model* (documents + edges + vectors + time).
 - nqlite's edge is **true serverless single-file** (SQLite-style), a **hard
-  zero-LLM / zero-AI guarantee in the engine**, a minimal footprint, and a clean
+  No-LLM / zero-AI guarantee in the engine**, a minimal footprint, and a clean
   grammar authored for neural (context) workloads. SurrealDB is heavy and
   infrastructure-forward; "embedded" there still pulls in a server-less library
   tied to a KV backend and does not center the zero-agent coupling constraint.
@@ -67,7 +67,7 @@ Decision signal: prefer **exact brute-force for M0 (correctness, determinism)**,
 then adopt an HNSW crate behind a **storage-engine abstraction** so we can swap
 `fast-hnsw`.
 
-### 3. Agent-memory patterns (to mine for the nql grammar + schema)
+### 3. Agent-memory patterns (to mine for the NQL grammar + schema)
 - **mem0** (mem0ai): LLM-driven memory layer. **KEY**: its extraction AND
   consolidation are **LLM-aware** (LLM discovers the "important" facts). This is
   precisely the "AI lives in the agent, not the DB" posture you've chosen — the
@@ -83,7 +83,7 @@ then adopt an HNSW crate behind a **storage-engine abstraction** so we can swap
 - **LangChain/LangGraph memory**: layered ShortTermBuffer / semantic long-term,
   episodic + semantic + procedural taxonomy; summary-based compaction.
 
-These map to a bare **nql** op-set: CREATE/UPDATE record, RELATE, recall
+These map to a bare **NQL** op-set: CREATE/UPDATE record, RELATE, recall
 (semantic+lexical), a `MEMORY`/context region set, attach/share, and — for the
 agent that chooses — a deterministic `COMPACT`/`FORGET`/decay primitive (the LLM
 is *outside*).
@@ -94,7 +94,7 @@ is *outside*).
 
 1. The niche is **real and being claimed from the heavy side** (SurrealDB) and
    the **bolt-on side** (sqlite-vec). The unclaimed corner = **true
-   file-serverless, deterministic, zero-LLM, with document+graph+vector+time
+   file-serverless, deterministic, No-LLM, with document+graph+vector+time
    under ONE transaction and a grammar authored for neural context.**
 2. **Storage**: we are deliberately NOT "backed by RocksDB/LevelDB + SQLite
    = two engines". nqlite ships **its own single-file store** (SQLite-style) so it stays a dependency-light single file + a sidecar
@@ -109,11 +109,11 @@ is *outside*).
    crash-safe, reproducible — something mem0/Letta/Lance/chroma can't claim
    because the LLM is in their write path.
 
-## Appendix A — Salvaged from the failed delegation batch (traces only, 2026-08-03)
+## Appendix A — Additional sources (gathered 2026-08-03)
 
-The parallel research batch (deleg_d3bf401b) hit HTTP 500 on final synthesis for
-all three tasks; briefs were lost. Their raw tool-traces survived and confirm/
-extend the primary research above. Notable extra sources + facts worth keeping:
+Secondary findings from a partially-failed research batch whose raw tool-traces
+survived; every fact below stays attributable to its named source. These
+confirm and extend the primary research above:
 
 1. **langmem (LangChain's memory library)** — conceptual guide is the cleanest
    modern statement of the agent-memory model:
@@ -122,7 +122,7 @@ extend the primary research above. Notable extra sources + facts worth keeping:
      runtime) vs profiles (strict-schema, looked up directly).
    - Every memory op = "accept conversation + current memory state, **prompt an
      LLM** to expand/consolidate, respond with updated state" — i.e. the LLM is
-     IN the write path. Confirms our zero-LLM-in-engine moat.
+     IN the write path. Confirms our No-LLM-in-engine moat.
    - **Recall design rule (usable verbatim in nqlite)**: "memory relevance is
      more than semantic similarity. Recall should combine similarity with
      'importance' of the memory, and the memory's 'strength' = f(how recently /
@@ -153,17 +153,17 @@ extend the primary research above. Notable extra sources + facts worth keeping:
    HNSW under the hood; local engine = RocksDB-backed. Confirms our own-file
    choice as the differentiator vs their KV-backend approach.
 
-6. **Parser engineering sources** (for nql front-end):
+6. **Parser engineering sources** (for NQL front-end):
    - sqlparser-rs (apache/datafusion-sqlparser-rs) — the de-facto Rust SQL
      parser; reference for dialect/spec structure.
    - winnow (github.com/winnow-rs/winnow) — maintained nom successor; better
-     errors, streaming; candidate for nql parser base.
+     errors, streaming; candidate for NQL parser base.
    - cargo-fuzz structure-aware fuzzing (rust-fuzz.github.io/book/cargo-fuzz/
      structure-aware-fuzzing.html) — for grammar fuzzing with structured inputs.
    - proptest (docs.rs/proptest) — property-testing for deterministic invariants.
    - SQLite `WITH` (sqlite.org/lang_with.html) + Cypher variable-length paths
      (neo4j.com/docs/cypher-manual/current/patterns/variable-length-paths/) —
-     reference semantics for nql recursive `CLOSURE`/`MATCH *1..n`.
+     reference semantics for NQL recursive `CLOSURE`/`MATCH *1..n`.
 
 7. **pgvector benchmark** (markaicode.com/benchmarks/postgresql-pgvector-benchmark)
    and Qdrant system-design (markaicode.com/architecture/...) — useful baseline

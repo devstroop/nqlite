@@ -1,7 +1,8 @@
 //! Single-file persistence with a sidecar write-ahead log (M1).
 //!
 //! Byte-deterministic format (see `spec/file-format.md`):
-//! - main file: magic + version + `postcard(Store)`
+//! - main file: magic + version + length-prefixed core frame + history tail
+//!   (v3; the legacy single-payload v2 layout still loads, issue #133)
 //! - WAL: append-only frames of `crc32(len || payload)`, len, postcard(Statement)
 //!
 //! Crash-safety: the main file is replaced atomically (tmp + rename + fsync);
@@ -9,18 +10,22 @@
 //! mismatch / bad length). Acknowledged transactions survive crashes; a crash
 //! mid-commit can only drop the in-flight transaction, never corrupt.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use nql_ir::{Statement, Store};
+use nql_ir::{Record, RecordId, RelationEdge, Statement, Store};
 use thiserror::Error;
 
 /// Checkpoint the WAL into the main file once it exceeds this size.
 pub const CHECKPOINT_THRESHOLD: u64 = 1 << 20; // 1 MiB
 
 const MAGIC: &[u8; 8] = b"NQLITE01";
-const FORMAT_VERSION: u32 = 2;
+/// Current layout (issue #133): length-prefixed core frame + history tail.
+const FORMAT_VERSION: u32 = 3;
+/// Previous layout (single inline `postcard(Store)` payload) — still readable.
+const LEGACY_VERSION: u32 = 2;
 const WAL_SUFFIX: &str = ".wal";
 const LOCK_SUFFIX: &str = ".lock";
 
@@ -31,8 +36,10 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Postcard(#[from] postcard::Error),
-    #[error("unsupported format version {0} (expected {FORMAT_VERSION})")]
+    #[error("unsupported format version {0} (supported: {LEGACY_VERSION}, {FORMAT_VERSION})")]
     BadVersion(u32),
+    #[error("truncated main file (core/history frame out of bounds)")]
+    Truncated,
     #[error("bad magic header")]
     BadMagic,
     #[error("torn/corrupt WAL frame at offset {0} (truncated)")]
@@ -55,6 +62,7 @@ impl Clone for StorageError {
             Self::BadVersion(v) => Self::BadVersion(*v),
             Self::BadMagic => Self::BadMagic,
             Self::TornFrame(o) => Self::TornFrame(*o),
+            Self::Truncated => Self::Truncated,
             Self::Locked(p) => Self::Locked(p.clone()),
         }
     }
@@ -68,6 +76,7 @@ impl PartialEq for StorageError {
             (Self::BadVersion(a), Self::BadVersion(b)) => a == b,
             (Self::BadMagic, Self::BadMagic) => true,
             (Self::TornFrame(a), Self::TornFrame(b)) => a == b,
+            (Self::Truncated, Self::Truncated) => true,
             (Self::Locked(a), Self::Locked(b)) => a == b,
             _ => false,
         }
@@ -100,6 +109,69 @@ pub struct StoreFile {
     /// of this handle *is* the release. Non-unix Drop reads both fields.
     _lock: Option<File>,
     wal_len: u64,
+    /// `(offset, len)` of the history tail in a version-3 main file — set at
+    /// load, `take`n on the first temporal read (issue #133: lazy decode).
+    hist_range: std::cell::Cell<Option<(u64, u64)>>,
+}
+
+/// On-disk core frame (v3, issue #133): the store minus its history, plus the
+/// explicit `tables` index (the legacy payload skips it via `serde(skip)`).
+#[derive(serde::Serialize)]
+struct StoreCoreRef<'a> {
+    records: &'a BTreeMap<RecordId, Record>,
+    edges: &'a Vec<RelationEdge>,
+    vector_dims: &'a BTreeMap<String, usize>,
+    clock: i64,
+    memories: &'a BTreeMap<String, Store>,
+    tables: &'a BTreeMap<String, Option<usize>>,
+}
+
+/// Owned core frame — what the v3 loader decodes.
+#[derive(serde::Deserialize)]
+struct StoreCore {
+    records: BTreeMap<RecordId, Record>,
+    edges: Vec<RelationEdge>,
+    vector_dims: BTreeMap<String, usize>,
+    clock: i64,
+    memories: BTreeMap<String, Store>,
+    tables: BTreeMap<String, Option<usize>>,
+}
+
+impl StoreCore {
+    /// Build the in-memory store: history starts empty (its tail loads
+    /// lazily); `tables` comes from the frame, nested memories get theirs
+    /// rebuilt from their inline histories.
+    fn into_store(self) -> Store {
+        let mut store = Store {
+            records: self.records,
+            edges: self.edges,
+            vector_dims: self.vector_dims,
+            clock: self.clock,
+            history: Vec::new(),
+            memories: self.memories,
+            tables: self.tables,
+        };
+        store.rebuild_tables();
+        store
+    }
+}
+
+impl StoreFile {
+    /// Take the pending history range once (issue #133): `None` for legacy
+    /// files and after the first temporal read has claimed it.
+    pub(crate) fn take_history_range(&self) -> Option<(u64, u64)> {
+        self.hist_range.take()
+    }
+
+    /// Decode the history tail at `(offset, len)` from the main file.
+    pub(crate) fn read_history(&self, offset: u64, len: u64) -> Result<Vec<(i64, Statement)>> {
+        use std::io::{Seek, SeekFrom};
+        let mut f = File::open(&self.main)?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len as usize];
+        f.read_exact(&mut buf)?;
+        Ok(postcard::from_bytes(&buf)?)
+    }
 }
 
 /// Take the exclusive single-writer lock for `lock_path`.
@@ -173,6 +245,7 @@ impl StoreFile {
             _lock_path: lock_path,
             _lock: Some(lock),
             wal_len,
+            hist_range: std::cell::Cell::new(None),
         })
     }
 
@@ -201,11 +274,34 @@ impl StoreFile {
             return Err(StorageError::BadMagic);
         }
         let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        if version != FORMAT_VERSION {
-            return Err(StorageError::BadVersion(version));
+        match version {
+            // Legacy inline layout (pre-#133): one payload, history included.
+            LEGACY_VERSION => {
+                let mut store: Store = postcard::from_bytes(&data[16..])?;
+                // `tables` is serde(skip)'ed: rebuild from the inline history.
+                store.rebuild_tables();
+                Ok(store)
+            }
+            FORMAT_VERSION => {
+                // [core_len: u64 LE][core frame][history tail to EOF] (issue #133).
+                if data.len() < 24 {
+                    return Err(StorageError::Truncated);
+                }
+                let core_len = u64::from_le_bytes(data[16..24].try_into().unwrap()) as usize;
+                let core_end = 24usize
+                    .checked_add(core_len)
+                    .filter(|&end| end <= data.len())
+                    .ok_or(StorageError::Truncated)?;
+                let core: StoreCore = postcard::from_bytes(&data[24..core_end])?;
+                let store = core.into_store();
+                // History stays undecoded (issue #133): remember where the
+                // tail is; the first temporal read pays for it.
+                self.hist_range
+                    .set(Some((core_end as u64, (data.len() - core_end) as u64)));
+                Ok(store)
+            }
+            _ => Err(StorageError::BadVersion(version)),
         }
-        let store = postcard::from_bytes(&data[16..])?;
-        Ok(store)
     }
 
     /// Replay every WAL frame into `store`, truncating at the first torn frame.
@@ -287,12 +383,25 @@ impl StoreFile {
 
     /// Atomically rewrite the main file from `store` and truncate the WAL.
     pub fn checkpoint(&mut self, store: &Store) -> Result<()> {
-        let mut buf = Vec::with_capacity(16 + 1024);
+        // v3 layout (issue #133): core frame (the store minus its history)
+        // with an explicit length, then the history tail to EOF.
+        let core = StoreCoreRef {
+            records: &store.records,
+            edges: &store.edges,
+            vector_dims: &store.vector_dims,
+            clock: store.clock,
+            memories: &store.memories,
+            tables: &store.tables,
+        };
+        let core_bytes = postcard::to_allocvec(&core)?;
+        let hist_bytes = postcard::to_allocvec(&store.history)?;
+        let mut buf = Vec::with_capacity(24 + core_bytes.len() + hist_bytes.len());
         buf.extend_from_slice(MAGIC);
         buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
-        let body = postcard::to_allocvec(store)?;
-        buf.extend_from_slice(&body);
+        buf.extend_from_slice(&(core_bytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&core_bytes);
+        buf.extend_from_slice(&hist_bytes);
 
         // tmp + rename + fsync for atomic replacement.
         let tmp = self.main.with_extension("nql.tmp");
