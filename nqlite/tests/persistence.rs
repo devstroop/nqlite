@@ -386,3 +386,140 @@ fn prune_history_compaction_survives_reopen() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn legacy_v2_inline_layout_still_loads() {
+    // D4 matrix (issue #133): the v3 reader must keep accepting the legacy
+    // v2 layout (single inline postcard(Store) payload) — hand-crafted here
+    // so the bytes are the PRE-#133 shape, independent of the current writer.
+    let dir = std::env::temp_dir().join(format!("nqlite-legacy-v2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("db.nql");
+
+    let mut db = Database::default();
+    db.execute(
+        &parse(
+            "CREATE TABLE t VECTOR<f32, 2>;
+             INSERT INTO t:1 { \"name\": \"alpha\" } EMBED [1.0, 0.0];
+             INSERT INTO t:2 { \"name\": \"beta\" } EMBED [0.0, 1.0];",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let store = db.into_store();
+
+    let mut bytes = b"NQLITE01".to_vec(); // MAGIC (storage.rs)
+    bytes.extend_from_slice(&2u32.to_le_bytes()); // LEGACY_VERSION
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    bytes.extend_from_slice(&postcard::to_allocvec(&store).unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+
+    {
+        let mut db = Database::open(&path).expect("legacy v2 file must load");
+        assert_eq!(
+            db.store().records.len(),
+            2,
+            "records decoded from inline payload"
+        );
+        // tables rebuilt from the inline history (step 1 contract).
+        assert_eq!(db.store().tables.get("t"), Some(&Some(2)));
+        // temporal reads work against the inline history (no lazy tail).
+        let at = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(at[0].rows.len(), 1, "inline history replays");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unsupported_versions_and_truncated_v3_rejected() {
+    // D4: loud rejections, never a partial load (issue #133).
+    let dir = std::env::temp_dir().join(format!("nqlite-badver-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for version in [1u32, 99u32] {
+        let path = dir.join(format!("v{version}.nql"));
+        let mut bytes = b"NQLITE01".to_vec();
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &bytes).unwrap();
+        match Database::open(&path) {
+            Err(nqlite::StorageError::BadVersion(v)) => assert_eq!(v, version),
+            other => panic!("version {version}: expected BadVersion, got {other:?}"),
+        }
+    }
+
+    // v3 header whose core length points past EOF → Truncated.
+    let path = dir.join("trunc.nql");
+    let mut bytes = b"NQLITE01".to_vec();
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&9999u64.to_le_bytes());
+    bytes.extend_from_slice(b"junk");
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        Database::open(&path),
+        Err(nqlite::StorageError::Truncated)
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn first_temporal_read_decodes_the_history_tail() {
+    // The lazy seam (issue #133): a flushed v3 file (history tail) plus a
+    // WAL-only mutation — the FIRST statement being temporal must claim the
+    // tail and prepend it so file entries and WAL entries both answer, in
+    // timestamp order. Without ensure_history, AS OF 2 would silently miss
+    // the file's entries.
+    let dir = std::env::temp_dir().join(format!("nqlite-lazyhist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("db.nql");
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"n\": 1 };
+                 INSERT INTO t:2 { \"n\": 2 };",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.flush().unwrap(); // v3 file: core + history tail through ts3
+        db.execute(&parse("INSERT INTO t:3 { \"n\": 3 };").unwrap())
+            .unwrap();
+    } // drop: WAL survives (no checkpoint on drop)
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let at2 = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(at2[0].rows.len(), 1, "AS OF 2 needs the file history tail");
+        let at4 = db
+            .execute(&parse("SELECT * FROM t AS OF 4;").unwrap())
+            .unwrap();
+        assert_eq!(
+            at4[0].rows.len(),
+            3,
+            "file tail + WAL entries, ascending ts"
+        );
+        let now = db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        assert_eq!(now[0].rows.len(), 3, "current state after the claim");
+        // Once claimed, later temporal reads reuse the decoded history (the
+        // range is taken exactly once) — another AS OF must not re-read.
+        let again = db
+            .execute(&parse("SELECT * FROM t AS OF 3;").unwrap())
+            .unwrap();
+        assert_eq!(again[0].rows.len(), 2);
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

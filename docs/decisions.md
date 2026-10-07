@@ -164,13 +164,15 @@ Measured on the reference box (Intel Xeon E5-2640 v4 @ 2.40 GHz, release
 profile, warm cache; tooling: `nqlite/examples/open_profile` + the E08
 release ladder — full numbers and method on issue #115):
 
-- **reopen cold a 100K-record store**: measured **~0.7 s** (`Database::open`:
-  55 ms read + ~0.6 s postcard decode; ~0.85 s CLI end-to-end). The earlier
-  "milliseconds" wording was aspirational and is **retired**: exact-scan
-  queries also floor at 75–140 ms @100K. The follow-up — lazy history decode
-  (**#133**) targeting ~0.2–0.3 s reopen, plus the ANN path for sub-10 ms
-  queries (#96's gate) — carries the ambition now. (E08's earlier "1.8 s"
-  figure included ~0.9 s of harness-side output parsing, not engine time.)
+- **reopen cold a 100K-record store**: measured — **~0.26 s** engine load
+  after #133's lazy history decode (warm-cache medians of 3; ~0.46 s first
+  touch; ~0.54 s CLI end-to-end). The store file splits 31.5 MB core / 31.0 MB
+  history tail: current-state queries decode only the core, and the first
+  temporal read pays the deferred tail once per session. (Was ~0.7 s load /
+  ~0.875 s CLI before #133.) The "milliseconds" wording stays **retired**:
+  exact-scan queries floor at 75–140 ms @100K — sub-10 ms needs the ANN path
+  (#96's gate). (E08's earlier "1.8 s" figure included ~0.9 s of harness-side
+  output parsing, not engine time.)
 - **kNN recall@10 >= 0.95**: met at 5k rows (**0.96**, CI gate in #114);
   degrades at 50k (0.81) with default params — sweep flags exist; the gate
   pins the 5k target.

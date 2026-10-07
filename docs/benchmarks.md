@@ -2,8 +2,9 @@
 
 Reproducible benchmark page for nqlite — how to regenerate every number that
 appears in this repo's performance claims. All timings are wall-clock
-milliseconds, lower is better, measured **in-memory only** (no persistence
-layer yet).
+milliseconds, lower is better. The `nql-bench` corpus runs are measured
+**in-memory only**; persistence / cold-start numbers (the on-disk store) have
+their own section below.
 
 ## Methodology
 
@@ -139,6 +140,48 @@ Notes:
   HNSW-vs-exact (its dim-64 set) and — since 2026-10-06 — sqlite-vec's recall
   vs exact cosine top-10 on the shared corpus (`off` when nql-bench is built
   without `--features hnsw`; LanceDB/Chroma `n/a` — no quality metric wired).
+
+## Cold start / persistence (issues #115, #133)
+
+Cold-start cost of the on-disk store — how long `Database::open` takes before
+the first query, and what the first *temporal* query additionally pays.
+
+**Method:** a 100 000-record store (one `INSERT` per row) written by the
+current `checkpoint` path (format **v3**: core frame + history tail, see
+`spec/file-format.md` §1), then:
+
+```sh
+cargo build --release -p nqlite --example open_profile
+target/release/examples/open_profile /path/to/store.nql   # load / count / scan
+# E08 harness (file_tier cold-open @100k + kNN/BM25/hybrid ladder):
+cd ../nqlite-experiments && EXP08_PROFILE=release EXP08_SIZES=1000,5000,20000,50000,100000 \
+  NQL_SERVER_BIN=$PWD/../nqlite/target/release/nql-server \
+  NQL_CLI_BIN=$PWD/../nqlite/target/release/nql \
+  python3 experiments/exp08_scale_ladder.py
+```
+
+**Measured 2026-10-07, commit `915a79b`, release profile, reference box
+(see Methodology):**
+
+| metric | v3 (this run) | pre-#133 (legacy full decode) |
+|---|---:|---:|
+| `open_profile` load, first touch | 459.7 ms | — |
+| `open_profile` load, warm (median of 3) | **260 ms** (255.6–262.4) | ~640–715 ms |
+| CLI open-only (no query) | **542–549 ms** | ~875 ms |
+| CLI, first statement temporal | 958–1273 ms | (folded into load) |
+| E08 `file_tier` cold-open @100k, WAL | **1338 ms** | ~1810 ms |
+| E08 `file_tier` cold-open @100k, ckpt | **1135 ms** | ~1810 ms |
+
+File layout of the profiled store: 62 511 796 B total = **31 547 635 B core
+frame** + **30 964 137 B history tail**. `open` decodes only the core (records,
+edges, tables) — the history tail is claimed lazily and decoded on the first
+temporal read (`HISTORY`, `AS OF`, closures; measured above as the
+temporal-first delta), which is why warm load sits at ~0.26 s (target ≤ 0.3 s,
+decisions §6) while a temporal-first session pays core + tail + replay.
+
+Compatibility (tested in `nqlite/tests/persistence.rs`): legacy **v2** files
+still load (inline postcard layout, tables rebuilt), **v1 / v99** are rejected
+with `BadVersion (supported: 2, 3)`, truncated v3 frames with `Truncated`.
 
 ## Reproduce
 

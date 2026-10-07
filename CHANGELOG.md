@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI tests.
 
 ### Added
+- Version-3 store layout with **lazy history decode** (issue #133): the main
+  file becomes a length-prefixed core frame (records/edges/dims/clock/
+  memories/tables) plus a history tail to EOF; `Database::execute` claims the
+  tail **once per session, only when the plan is temporal** (`AS OF`,
+  `HISTORY SINCE`, `PRUNE HISTORY`) — current-state queries never decode it.
+  Legacy v2 files still load (compatibility path, `tables` rebuilt from their
+  inline history); older binaries reject v3 at the version check (loud);
+  truncated frames raise `StorageError::Truncated`. Measured @100k (release,
+  warm): engine load ~0.7 s → **~0.26 s**, CLI open ~0.875 s → **~0.54 s**.
 - Declared-table index `Store.tables` (issue #133 step 1): every `CREATE TABLE`
   (with or without a VECTOR dim) lands in a live-maintained registry that the
   server's analyzer re-seeding now reads directly — the O(history) scan is gone
