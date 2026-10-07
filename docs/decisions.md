@@ -45,8 +45,8 @@ repo):
 nqlite-workspace/
   nql/        # front-end ONLY: parser + AST + analyzer. MUST NOT know storage exists.
   nql-ir/     # tiny shared contract: the lowered Plan / IR both ends compile against.
-  nqlite/     # the engine: storage + indexes + executor that runs an nql Plan.
-  spec/       # nql grammar spec (nql.md), file-format spec, operator semantics.
+  nqlite/     # the engine: storage + indexes + executor that runs an NQL Plan.
+  spec/       # NQL grammar spec (nql.md), file-format spec, operator semantics.
   docs/       # design reasoning, hardening, comparison, research notes.
 ```
 
@@ -68,7 +68,7 @@ Cargo dev-dependencies so the language never bends to engine internals.
 
 We distinguish three "intelligence" tiers and deliberately keep them apart:
 
-1. **Deterministic / statistical (IN the engine, always on, offline, zero-LLM):**
+1. **Deterministic / statistical (IN the engine, always on, offline, No-LLM):**
    BM25 lexical, HNSW/ANN similarity, distance, re-rank-by-distance, graph
    traversal, closure, PageRank, co-occurrence edges, recency/time-decay salience,
    keyword/token NER. Reproducible => property-testable.
@@ -128,7 +128,7 @@ We distinguish three "intelligence" tiers and deliberately keep them apart:
     Provenance, time, per-voter granularity, and one-transaction all come free.
     `weight` defaults to the `value` when omitted (so `value:-1` downvotes under
     `::score` too); an explicit `weight` overrides `value` for `::score` only.
-  - Deterministic engine operators (allowed — pure arithmetic, zero-LLM):
+  - Deterministic engine operators (allowed — pure arithmetic, No-LLM):
     `::votes(record)` → (up, down, net); `::score(record)` → **Laplace-smoothed
     mean** (M1 default: robust with few votes; Wilson lower bound deferred to
     ranking-API milestone); `::feedback(record)` → time-decayed recent feedback.

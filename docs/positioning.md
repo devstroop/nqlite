@@ -20,7 +20,7 @@
 - **A deterministic engine** — identical input ⇒ byte-identical output, always,
   everywhere. This is the property everything else hangs off: reproducible
   recall, property-testable behavior, honest benchmarks, offline operation.
-- **Zero-LLM by contract** — the engine never embeds, chunks, summarizes,
+- **No-LLM by contract** — the engine never embeds, chunks, summarizes,
   compacts, or reranks. Vectors are BYO. Learning happens *above* the database,
   in the agent, where it belongs.
 
@@ -45,7 +45,7 @@
 |---|---|
 | What is it? | The memory/context layer for AI agents |
 | What's the closest familiar thing? | SQLite — but for agent context, not relational rows |
-| What's the differentiator? | Determinism + zero-LLM + one-transaction records/graph/vectors/time |
+| What's the differentiator? | Determinism + No-LLM + one-transaction records/graph/vectors/time |
 | Who computes embeddings? | You (BYO) — the engine never encodes |
 | Who decides what matters? | The agent, above the DB |
 | What's in scope for v1? | Storage, retrieval, traversal, ranking — all deterministic |
@@ -73,8 +73,8 @@ see [spec/nql.md §2.1](../spec/nql.md).
 | Model | single-file embedded DB | vector stores (some embedded) | graph DB (server) | multi-model DB (server) |
 | Records + vectors + edges in one txn | ✅ one transaction | ❌ vectors only (or frankenstack) | ❌ vectors awkward | ✅ but heavy |
 | Deterministic engine | ✅ contract | ✅ vector math | ✅ | ✅ |
-| Zero-LLM | ✅ contract | ✅ | ✅ | ✅ |
-| Query language | nql — agent-native (MATCH, ::salience, ::score, ::feedback, hybrid bm25+kNN) | SQL / REST | Cypher | SurrealQL |
+| No-LLM | ✅ contract | ✅ | ✅ | ✅ |
+| Query language | NQL — agent-native (MATCH, ::salience, ::score, ::feedback, hybrid bm25+kNN) | SQL / REST | Cypher | SurrealQL |
 | Serverless single file | ✅ | sqlite-vec ✅, others ❌ | ❌ | ❌ |
 | MCP server | ✅ (nql-mcp) | community | community | community |
 
@@ -90,8 +90,8 @@ these claims stay measurable, not vibes.
 - **"Neural"** (used sparingly): embeddings are first-class, queryable data.
 - **"Context-first"** (preferred): the schema and query language are shaped
   around conversation context — turns, entities, mentions, votes, time.
-- **"Zero-LLM"**: a hard contract, not a roadmap item. See README's
-  [Zero-LLM guarantee](../README.md#zero-llm-guarantee).
+- **"No-LLM"**: a hard contract, not a roadmap item. See README's
+  [No-LLM guarantee](../README.md#no-llm-guarantee).
 - **"Deterministic"**: byte-identical output for identical input, no
   wall-clock, no randomness, no hidden model — see
   [spec/nql.md §2.1](../spec/nql.md).
