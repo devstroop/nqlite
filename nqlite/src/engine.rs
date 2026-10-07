@@ -172,6 +172,10 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
                     store.vector_dims.remove(table);
                 }
             }
+            // The tables index carries EVERY declaration (with or without a
+            // dim) — the seeding source that replaces history scans (issue
+            // #133 step 1).
+            store.tables.insert(table.clone(), *vector_dim);
             store.log_mutation(stmt);
             Ok(None)
         }
@@ -517,6 +521,7 @@ fn prune_history(store: &mut Store) {
         vector_dims: store.vector_dims.clone(),
         clock: store.clock,
         memories: store.memories.clone(),
+        tables: store.tables.clone(),
     };
     let mut history = decls;
     history.push((store.clock, Statement::Snapshot(Box::new(state))));
@@ -3387,6 +3392,27 @@ mod tests {
         assert_eq!(reach("custom"), ["m:1"]);
         // No identity binding on edges: the start's own id matches nothing.
         assert!(reach("s:1").is_empty());
+    }
+
+    #[test]
+    fn tables_index_tracks_every_declaration() {
+        // Issue #133 step 1: the `tables` index carries every CREATE TABLE
+        // (with or without a dim) — the source seed_declared reads.
+        let mut db = Database::default();
+        db.execute(&[
+            create("with_dim", Some(4)),
+            create("no_dim", None),
+            Statement::Insert(record(
+                "with_dim:1",
+                BTreeMap::new(),
+                Some(vec![1.0, 0.0, 0.0, 0.0]),
+            )),
+        ])
+        .unwrap();
+        let store = db.store();
+        assert_eq!(store.tables.get("with_dim"), Some(&Some(4)));
+        assert_eq!(store.tables.get("no_dim"), Some(&None));
+        assert!(!store.tables.contains_key("never_declared"));
     }
 
     #[test]

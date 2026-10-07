@@ -122,26 +122,18 @@ impl Server {
 
 /// Rebuild the analyzer's cross-line table context from a reopened store.
 ///
-/// Replays the persisted mutation histories — the root store's plus every
-/// memory block's, in append order, last declaration winning (mirroring the
-/// engine's `vector_dims` set/dim-clear semantics) — collecting every
-/// `CreateTable`. Records alone can't seed this: an empty, dimension-less
-/// table (e.g. `CREATE TABLE notes;` with no rows yet) exists *only* as a
-/// history statement. Issue #89.
+/// Analyzer re-seeding (issue #89): collect every declared table — with its
+/// optional VECTOR dim, last declaration winning (mirroring the engine's
+/// `vector_dims` set/dim-clear semantics) — from the store's `tables` index:
+/// maintained live by the engine's CreateTable arm and rebuilt from history
+/// once at load (issue #133 step 1), so no O(history) scan lives here.
+/// Records alone can't seed this: an empty, dimension-less table (e.g.
+/// `CREATE TABLE notes;` with no rows yet) exists only in that registry.
 fn seed_declared(db: &Database) -> BTreeMap<String, Option<usize>> {
-    let mut declared: BTreeMap<String, Option<usize>> = BTreeMap::new();
     let store = db.store();
-    for (_, stmt) in &store.history {
-        if let Statement::CreateTable { table, vector_dim } = stmt {
-            declared.insert(table.clone(), *vector_dim);
-        }
-    }
+    let mut declared = store.tables.clone();
     for memory in store.memories.values() {
-        for (_, stmt) in &memory.history {
-            if let Statement::CreateTable { table, vector_dim } = stmt {
-                declared.insert(table.clone(), *vector_dim);
-            }
-        }
+        declared.extend(memory.tables.clone());
     }
     declared
 }
