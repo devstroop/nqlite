@@ -12,7 +12,7 @@ transaction can span.
 | Graph/traversal | **first-class** (typed relations, MATCH/CLOSURE) | none (would need another ext) | no built-in graph | no | native graph + edges (RELATE/MATCH) |
 | Vector index | exact brute-force; HNSW feature-gated behind a trait | brute-force by default (ANN optional) | IVF-PQ / brute-force | HNSW (hnswlib) | vector field + index |
 | Single transaction spans doc+graph+vector? | **yes** | no (virtual tables bolt-on) | vectors yes; graph not native | in collection only | **yes** |
-| Zero-LLM / deterministic engine | **hard constraint, enforced** | yes (index only) | yes (store only) | yes (store only) | yes at engine, "AI-assisted" layer on top |
+| No-LLM / deterministic engine | **hard constraint, enforced** | yes (index only) | yes (store only) | yes (store only) | yes at engine, "AI-assisted" layer on top |
 | Serverless single file | **yes** (embedded file + WAL sidecar) | file is the .db (needs the ext-loaded binary) | Lance format dir / object store | server or emb. | not truly single-file; embedded or server |
 | Deploy footprint | minimal, pure-Rust | needs SQLite loader | heavier (columnar) | medium | heavy (server, KV backend) |
 
@@ -26,7 +26,7 @@ transaction can span.
 ## Wedges nqlite should lead with
 1. `OPEN(path) -> deterministic, ACID, context-first store` in one small crate.
 2. One transaction = documents + graph edges + vectors + timestamps.
-3. nql grammar: `SELECT` + `RELATE` + `MATCH` + `::similarity` + `k = N` +
+3. NQL grammar: `SELECT` + `RELATE` + `MATCH` + `::similarity` + `k = N` +
    temporal, from the start — no stitched two-DB story.
-4. Zero-LLM, property-testable, byte-deterministic — the claim mem0/Letta can't
+4. No-LLM, property-testable, byte-deterministic — the claim mem0/Letta can't
    make because their LLM is in the write path.

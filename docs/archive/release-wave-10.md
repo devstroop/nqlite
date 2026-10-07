@@ -1,7 +1,7 @@
 # Wave-10 Release Notes
 
 Wave-10 ships two new agent-pattern examples plus the gated fleet process
-that delivered them. Both stay deterministic and zero-LLM at the engine
+that delivered them. Both stay deterministic and No-LLM at the engine
 level: the agent authors every record, edge, and embedding; the engine only
 reads and resolves.
 

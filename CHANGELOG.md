@@ -158,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   degenerated to ascending record id (the *oldest* first) and `::feedback`'s
   decay was inert (every vote age 0). Explicit IR-provided values pass
   through unchanged; stamps are re-derived from statement order on WAL/AS OF
-  replay, preserving the determinism contract; nql `SET created_at = ...`
+  replay, preserving the determinism contract; NQL `SET created_at = ...`
   still lands in edge props (the field is engine-clocked).
   ([#107](https://github.com/devstroop/nqlite/issues/107))
 - Field projection: `SELECT a, b FROM t` now returns only the listed fields
@@ -167,7 +167,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and limits still run on full records; `SELECT *` unchanged; missing keys
   are absent from the row (spec §2.3 step 8).
   ([#91](https://github.com/devstroop/nqlite/issues/91))
-- nql comments per spec §1: `--` to end of line and `/* */` block comments
+- NQL comments per spec §1: `--` to end of line and `/* */` block comments
   are skipped by the lexer (previously both were lex errors, so spec §6's own
   examples failed to parse); unterminated block comments report a positioned
   error. ([#86](https://github.com/devstroop/nqlite/issues/86))
@@ -203,7 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `QueryResult` now carries a `kind` (`QueryKind::Select | Match | Closure`)
   instead of a `select` field; rows are unchanged.
 - `::score` now matches the parser's no-colon `"voted"` edge convention
-  (votes created through nql count again); read-only `MATCH` is no longer
+  (votes created through NQL count again); read-only `MATCH` is no longer
   written to the WAL.
 - Framing: "SQLite for AI memory" (see `docs/positioning.md`); "neural" now
   means embeddings-as-first-class-data, not engine intelligence.

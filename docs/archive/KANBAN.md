@@ -12,7 +12,7 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 
 ## Backlog
 
-- [ ] **feat/nql-parser** — nql front-end: tokenizer + AST for the M0 slice
+- [ ] **feat/nql-parser** — NQL front-end: tokenizer + AST for the M0 slice
       (create/insert/select/relate/knn/match). winnow-based. Storage-agnostic.
 - [ ] **feat/engine-core** — nqlite in-memory Store + executor: insert/select
       over records; deterministic iteration order.
@@ -29,7 +29,7 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 - [ ] **feat/grammar-spec** — spec/nql.md full grammar + operator semantics.
 - [ ] **feat/analyzer-planner** — analyzer, optimizer, IR stability.
 - [ ] **feat/bm25-fts** — deterministic BM25 lexical index.
-- [ ] **feat/repl** — nql REPL + docs/playground CLI.
+- [ ] **feat/repl** — NQL REPL + docs/playground CLI.
 - [ ] **feat/server-mcp** — network server mode + MCP server for agents.
 - [ ] **feat/agent-examples** — chat memory, RAG, tool-call ledger, knowledge
       graph examples (agent-side learning, engine stays deterministic).
@@ -73,5 +73,5 @@ Each card = a feature branch; feature branches merge into `develop` via PR,
 |---|---|
 | M0 — Deterministic context engine | feat/ir-value-types, feat/nql-parser, feat/engine-core, feat/graph-relations (1-hop), feat/vector-index (brute-force) |
 | M1 — Real storage (file, WAL, ACID) | feat/storage-wal, feat/vector-index (HNSW), feat/feedback, feat/fuzzing, feat/benchmarks |
-| M2 — nql grammar real | feat/grammar-spec, feat/analyzer-planner, feat/bm25-fts, feat/repl |
+| M2 — NQL grammar real | feat/grammar-spec, feat/analyzer-planner, feat/bm25-fts, feat/repl |
 | M3 — Agents & MCP | feat/server-mcp, feat/agent-examples |

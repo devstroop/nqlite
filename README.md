@@ -3,14 +3,14 @@
 **A context-first, deterministic, serverless database for AI agents — SQLite for
 AI memory.**
 
-nqlite is a single-file embedded database with SQLite-style ergonomics, built
-for one job: durably hold an agent's evolving context — records, typed graph
-relations, embedding vectors, and time — under a single ACID transaction and a
-hard **zero-LLM** contract. Responsibilities are split by design: the engine
-stores and recalls deterministically (hybrid kNN + BM25, `MATCH` traversal,
-`AS OF` time travel); the agent above decides what to write, relate, embed, and
-forget. All of it offline, in one file — a durable substrate for agent memory
-that outlives any model.
+nqlite is the context substrate, built for one job: durably hold an agent's
+evolving context — records, typed graph relations, embedding vectors, and
+time — under a single ACID transaction and a hard **No-LLM** contract.
+Responsibilities are split by design: the engine stores and recalls
+deterministically (hybrid kNN + BM25, `MATCH` traversal, `AS OF` time
+travel); the agent above decides what to write, relate, embed, and forget.
+All of it offline, in one file — a durable substrate for agent memory that
+outlives any model.
 
 *"Neural" here means embeddings are first-class data — nothing in the engine
 learns. Full framing and terminology: [docs/positioning.md](docs/positioning.md).*
@@ -28,7 +28,7 @@ learns. Full framing and terminology: [docs/positioning.md](docs/positioning.md)
 - [Guarantees](#guarantees)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [The nql language](#the-nql-language)
+- [The NQL language](#the-nql-language)
 - [Architecture](#architecture)
 - [Performance](#performance)
 - [Documentation](#documentation)
@@ -92,7 +92,7 @@ This gives you:
 
 ## Guarantees
 
-### Zero-LLM guarantee
+### No-LLM guarantee
 
 **The engine will never call an LLM** — not to embed, chunk, summarize, compact,
 or rerank. Vectors are **BYO**: the agent (or any external provider) computes them
@@ -114,21 +114,20 @@ One process owns the file (flock-guarded); readers never block writers.
 
 ## Installation
 
-Add the workspaces as a path/v1 dependency (crates published once stabilized):
-
-```toml
-[dependencies]
-nql = "0.1"
-nqlite = "0.1"
-nql-ir = "0.1"
-nql-cli = "0.1"   # optional: the REPL/script runner
-```
-
-Or build the CLI from source:
+Build from source (works today):
 
 ```bash
 cargo build --release --package nql-cli
 # binary: target/release/nql
+```
+
+Use it as a library — published to crates.io once stabilized; until then,
+pull straight from the repository:
+
+```toml
+[dependencies]
+nqlite = { git = "https://github.com/devstroop/nqlite" }  # engine
+nql    = { git = "https://github.com/devstroop/nqlite" }  # front-end (parser)
 ```
 
 **Requirements**: Rust 1.82+ (see `rust-version` in Cargo.toml). No system
@@ -147,7 +146,7 @@ nql 0.1.0 — type :help for help, :quit to exit
 >> CREATE TABLE turn VECTOR<f32, 384>;
 >> INSERT INTO turn:1 { "role": "user", "text": "I work on the ML team" };
 >> SELECT * FROM turn;
-SELECT turn (1)
+SELECT turn (1 rows)
   turn:1  score=0.0000  {role="user", text="I work on the ML team"}
 ```
 
@@ -167,8 +166,8 @@ cargo run -q -p nql-mcp -- --db memory.nql   # persistent
 ```
 
 `nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
-`relate`, `select`, `match_path`, `forget`) with deterministic JSON results;
-`select` supports temporal reads (`as_of`) and `MEMORY`-block reads
+`relate`, `forget`, `select`, `match_path`, `closure`) with deterministic
+JSON results; `select` supports temporal reads (`as_of`) and `MEMORY`-block
 (`memory`), and `execute_nql` carries the full grammar (including
 `AS OF` and `MEMORY` scoping).
 
@@ -214,9 +213,13 @@ fn main() {
 }
 ```
 
-## The nql language
+Runnable end-to-end examples (memory, chains, ledgers):
+`cargo run -p nqlite --example chat_memory` — see
+[docs/agent-patterns.md](docs/agent-patterns.md).
 
-nql is a SQL-like grammar with SurrealDB-style records and graph operators,
+## The NQL language
+
+NQL is a SQL-like grammar with SurrealDB-style records and graph operators,
 written for neural/context workloads. Multiple statements run as one plan (one
 transaction), separated by `;`:
 
@@ -259,10 +262,11 @@ nql-ir/   shared contract: value types + Statement/Select/Order/Plan
    ▼
 nqlite/   engine: deterministic execution over Store
    ├─ records (BTreeMap)  ──  relations (edges)  ──  vectors (VectorIndex)
-   └─ ACID transaction (single-writer, snapshot readers)  [M1: file + WAL]
+   └─ ACID transaction (single-writer, snapshot readers)  [file + WAL]
 
 nql-server/  line-protocol server (TCP + stdio, optional `--db` persistence)
 nql-mcp/     MCP server (stdio) — exposes nqlite as tools for AI agents
+nql-bench/   benchmark harness (kNN/BM25/hybrid latency, recall@K quality)
 ```
 
 **Why three crates?** `nql` (front-end) and `nqlite` (engine) are separated by a
@@ -303,7 +307,7 @@ issue in [ISSUES.md](ISSUES.md). (This README stays state-independent.)
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) — branch model (`main → develop → feat/*`),
-checklist (`fmt + clippy + test`), and the zero-LLM/ determinism rules. This is a
+checklist (`fmt + clippy + test`), and the No-LLM/ determinism rules. This is a
 welcoming project; bug reports and PRs are appreciated.
 
 ## License

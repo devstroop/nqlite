@@ -2,7 +2,7 @@
 
 Runnable examples (`nqlite/examples/`) showing how an **agent** builds
 long-lived context — memory, retrieval, and a tool ledger — on top of the
-nqlite engine. The engine stays a deterministic, zero-LLM function of
+nqlite engine. The engine stays a deterministic, No-LLM function of
 `(plan, store)`; **all learning happens in the agent's example code**, which
 decides what to write, relate, and embed.
 

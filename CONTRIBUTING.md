@@ -38,7 +38,7 @@ cargo test --workspace
 README.md stays state-independent. Any code change that alters a decision
 updates the matching doc in `docs/` in the SAME PR (docs/README.md index).
 
-## Zero-LLM rule
+## No-LLM rule
 
 No engine code may call an LLM/embedder/network. The engine is deterministic.
 Feature-gated, client-side AI helpers live outside `nqlite/`.

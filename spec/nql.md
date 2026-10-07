@@ -1,10 +1,10 @@
-# nql — Neural Query Language Specification
+# NQL — Neural Query Language Specification
 
 Version: 0.1 (M0 slice) · Status: living spec — implementers target this file;
 changes here are contract changes (PRs that alter grammar must update this file).
 
-nql is the query language of **nqlite**, a deterministic, zero-LLM
-database. nql expresses records, typed relations (graph), embeddings, temporal
+NQL is the query language of **nqlite**, a deterministic, No-LLM
+database. NQL expresses records, typed relations (graph), embeddings, temporal
 context, and hybrid retrieval in ONE grammar. The engine never calls an LLM;
 vectors are BYO (agent-supplied `f32` arrays). This file defines the grammar
 and the semantics that both the parser (`nql`) and the engine (`nqlite`) must
@@ -160,7 +160,7 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
      AGENT-side knobs, not engine config); without a kNN query, the default
      salience reduces to the feedback term. Agents tune per-query with
      `ORDER BY ::salience(α, β, γ, δ)` — exactly four comma-separated numbers.
-     Term definitions (pure arithmetic, zero-LLM):
+     Term definitions (pure arithmetic, No-LLM):
      - `similarity` — cosine vs the kNN query vector (`0` without a kNN query);
      - `strength` — `(recency + freq) / 2`, where `recency = 1/(1+age)` with
        `age = max(0, clock − created_at)` and `freq = n/(n+1)` over the
@@ -369,14 +369,14 @@ Semantics:
 - **Votes are edges (decision D9):** `(voter)->:voted {value:+1|-1, weight, created_at}->(record)`.
   No separate vote machinery; provenance and one-transaction semantics come free.
   The engine accepts both `voted` and `:voted` spellings at every reader
-  (nql text strips the colon on write; edges built directly through the IR
+     (NQL text strips the colon on write; edges built directly through the IR
   may keep it — see issue #98).
   Vote `weight` spans `-1..=1` and defaults to the edge's `value` when omitted, so
   `SET value = -1` alone is a downvote under `::score` too; an explicit `weight`
   overrides `value` for `::score` only (`::votes`/`::feedback` always read `value`).
 - `FORGET` removes incident edges, keeping the graph clean.
 
-## 5. Zero-LLM & BYO-vector contract
+## 5. No-LLM & BYO-vector contract
 
 - The engine never calls an embedder/LLM/network — to embed, chunk, summarize,
   compact, or rerank. Any learning lives in the agent/client.
