@@ -23,9 +23,9 @@ pub const CHECKPOINT_THRESHOLD: u64 = 1 << 20; // 1 MiB
 
 const MAGIC: &[u8; 8] = b"NQLITE01";
 /// Current layout (issue #133): length-prefixed core frame + history tail.
-const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 3;
 /// Previous layout (single inline `postcard(Store)` payload) — still readable.
-const LEGACY_VERSION: u32 = 2;
+pub const LEGACY_VERSION: u32 = 2;
 const WAL_SUFFIX: &str = ".wal";
 const LOCK_SUFFIX: &str = ".lock";
 

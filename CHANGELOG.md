@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`nql-migrate`** — bulk v2/v3 → format v4 conversion (spec §5.8): loads
+  through the existing reader (WAL replay included, WAL-only stores
+  supported), writes the canonical v4 container atomically (tmp + fsync +
+  rename + dir fsync), and **verifies** the result by decoding and
+  re-encoding it byte-identically. `--in/--out/--force`, in-place
+  migration allowed (the source lock is released before the write);
+  failures print `error: …` and exit 1. Backed by the promoted
+  **`nqlite::v4`** module — the §5 container codec lifted from the
+  golden-fixture generator (fixtures remain its byte oracle; output
+  bytes unchanged).
+
 ### Changed
 - Cross-DB recall column wired (bench-compare): the sqlite-vec driver now
   computes `rec@10` — mean over 30 queries vs exact cosine top-10 on the
