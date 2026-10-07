@@ -117,6 +117,40 @@ def bench_nqlite_recall(repo_root, rows):
 
 
 # ---------------------------------------------------------------------------
+# Shared recall helpers (cross-DB quality column): unit vectors so L2-only
+# stores rank identically to cosine; exact cosine top-10 as ground truth.
+# ---------------------------------------------------------------------------
+
+def unit(v):
+    n = math.sqrt(sum(x * x for x in v))
+    return [x / n for x in v] if n else list(v)
+
+
+def cosine(a, b):
+    num = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return num / (na * nb) if na and nb else 0.0
+
+
+def exact_top10(docs, q):
+    """Corpus indices of the exact cosine top-10 for query vector q."""
+    return set(sorted(range(len(docs)), key=lambda j: -cosine(q, docs[j]["embedding"]))[:10])
+
+
+def mean_recall10(docs, ids_of_query):
+    """Mean recall@10 over 30 seeded queries. `ids_of_query(unit_qi)` must
+    return the corpus indices the system retrieved for that unit query."""
+    qn = min(30, len(docs))
+    scores = []
+    for i in range(qn):
+        qi = unit(docs[i]["embedding"])
+        got = set(ids_of_query(qi))
+        scores.append(len(got & exact_top10(docs, qi)) / 10.0)
+    return r2(sum(scores) / len(scores)) if scores else 0.0
+
+
+# ---------------------------------------------------------------------------
 # sqlite-vec
 # ---------------------------------------------------------------------------
 
@@ -127,16 +161,6 @@ def bench_sqlite_vec(docs, knn):
         import sqlite_vec
     except ImportError:
         return {"db": "sqlite-vec", "skipped": "driver not installed (pip install sqlite-vec)"}
-
-    def unit(v):
-        n = math.sqrt(sum(x * x for x in v))
-        return [x / n for x in v] if n else list(v)
-
-    def cos(a, b):
-        num = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(x * x for x in b))
-        return num / (na * nb) if na and nb else 0.0
 
     con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
@@ -168,31 +192,24 @@ def bench_sqlite_vec(docs, knn):
         ).fetchall()
     knn_ms = (time.perf_counter() - t0) * 1000.0
 
-    # recall@10: mean over 30 seeded queries against EXACT cosine top-10 on
-    # this same corpus (the #96 gate's method, dim-8 set) — the cross-DB
-    # quality column. vec0 is exact at this size, so this pins 1.0 honestly.
-    qn = min(30, len(docs))
-    recalls = []
-    for i in range(qn):
-        qi = unit(docs[i]["embedding"])
-        got = {
+    # recall@10: 30 seeded queries vs exact cosine top-10 on this corpus (the
+    # #96 gate's method, dim-8 set). vec0 is exact at this size, so this pins
+    # 1.0 honestly.
+    recall = mean_recall10(
+        docs,
+        lambda qi: {
             r[0]
             for r in con.execute(
                 "SELECT rowid FROM vec_docs WHERE embedding MATCH ? AND k = 10",
                 (json.dumps(qi),),
             ).fetchall()
-        }
-        truth = {
-            idx
-            for idx in sorted(range(len(docs)), key=lambda j: -cos(qi, docs[j]["embedding"]))[:10]
-        }
-        recalls.append(len(got & truth) / 10.0)
+        },
+    )
     con.close()
-    recall = sum(recalls) / len(recalls) if recalls else 0.0
 
     return {"db": "sqlite-vec", "rows": len(docs), "ingest_ms": r2(ingest_ms), "knn_ms": r2(knn_ms),
             "bm25_ms": "n/a (FTS5 not wired)", "hybrid_ms": "n/a",
-            "recall_at_10": r2(recall)}
+            "recall_at_10": recall}
 
 
 # ---------------------------------------------------------------------------
@@ -211,22 +228,33 @@ def bench_lance(docs, knn):
     import pyarrow as pa
 
     schema = pa.schema([
+        pa.field("id", pa.int64()),  # corpus index — enables the recall column
         pa.field("embedding", pa.list_(pa.float32(), 8)),
         pa.field("text", pa.string()),
     ])
     tbl = db.create_table("docs", data=[], schema=schema)
     t0 = time.perf_counter()
-    tbl.add([{"embedding": d["embedding"], "text": d["text"]} for d in docs])
+    # Unit vectors: LanceDB defaults to L2, and L2 on unit vectors ≡ cosine.
+    tbl.add([
+        {"id": i, "embedding": unit(d["embedding"]), "text": d["text"]}
+        for i, d in enumerate(docs)
+    ])
     ingest_ms = (time.perf_counter() - t0) * 1000.0
 
-    q = docs[0]["embedding"]
+    q = unit(docs[0]["embedding"])
     t0 = time.perf_counter()
     for _ in range(knn):
         tbl.search(q).limit(10).to_list()
     knn_ms = (time.perf_counter() - t0) * 1000.0
+
+    recall = mean_recall10(
+        docs,
+        lambda qi: [int(r["id"]) for r in tbl.search(qi).limit(10).to_list()],
+    )
     db.drop_table("docs")
     return {"db": "lancedb", "rows": len(docs), "ingest_ms": r2(ingest_ms), "knn_ms": r2(knn_ms),
-            "bm25_ms": "n/a (no lexical index)", "hybrid_ms": "n/a"}
+            "bm25_ms": "n/a (no lexical index)", "hybrid_ms": "n/a",
+            "recall_at_10": recall}
 
 
 # ---------------------------------------------------------------------------
@@ -248,17 +276,27 @@ def bench_chroma(docs, knn):
         col.add(
             ids=[d["id"] for d in chunk],
             documents=[d["text"] for d in chunk],
-            embeddings=[d["embedding"] for d in chunk],
+            # Chroma defaults to L2; unit vectors make L2 ≡ cosine.
+            embeddings=[unit(d["embedding"]) for d in chunk],
         )
     ingest_ms = (time.perf_counter() - t0) * 1000.0
 
-    q = docs[0]["embedding"]
+    q = unit(docs[0]["embedding"])
     t0 = time.perf_counter()
     for _ in range(knn):
         col.query(query_embeddings=[q], n_results=10)
     knn_ms = (time.perf_counter() - t0) * 1000.0
+
+    recall = mean_recall10(
+        docs,
+        lambda qi: [
+            int(x.split(":")[1])
+            for x in col.query(query_embeddings=[qi], n_results=10)["ids"][0]
+        ],
+    )
     return {"db": "chroma", "rows": len(docs), "ingest_ms": r2(ingest_ms), "knn_ms": r2(knn_ms),
-            "bm25_ms": "n/a (no lexical index)", "hybrid_ms": "n/a"}
+            "bm25_ms": "n/a (no lexical index)", "hybrid_ms": "n/a",
+            "recall_at_10": recall}
 
 
 def r2(x):
@@ -333,9 +371,9 @@ def main():
         )
     print("-" * 78)
     print("note: 'n/a' = competitor lacks that operator; compare only same-shape cells.")
-    print("rec@10: nqlite = HNSW recall@10 vs exact on its dim-64 set, 30-query mean (issue #96);")
-    print("        sqlite-vec = mean over 30 queries vs EXACT cosine top-10 on THIS shared dim-8")
-    print("        corpus (vec0 unit-normalized: its L2 ranking ≡ cosine at this size);")
+    print("rec@10: nqlite = HNSW recall@10 vs exact on its dim-64 set, mean over its recall run (issue #96);")
+    print("        competitors = mean over 30 queries vs EXACT cosine top-10 on THIS shared dim-8 corpus")
+    print("        (all three stores unit-normalize vectors: their L2 ranking ≡ cosine);")
     print("        'off' = nql-bench built without --features hnsw.")
 
 
