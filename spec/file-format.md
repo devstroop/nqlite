@@ -10,7 +10,15 @@ legacy inline layout, readable through the compatibility arm; **`4` is the
 adopted target layout** (§5, issue #143) — no writer ships it yet, and the
 migration switches when the nqlite-zig cutover criteria are met.
 
-## 1. Main file (`<name>.nql`)
+**Extensions (naming convention).** The store is a *neural database
+file* — extension **`.ndb`**; sidecars follow as `<name>.ndb.wal` and
+`<name>.ndb.lock`. **`.nql` is reserved for NQL program files** (query
+scripts — the language, `spec/nql.md`). The format is content-addressed
+(magic bytes decide, never the extension), so any path works: stores
+created before this convention (named `*.nql`) remain valid and may be
+renamed with `mv`.
+
+## 1. Main file (`<name>.ndb`)
 
 ```
 offset 0   : magic   = 8 bytes: "NQLITE01" (0x4E 0x51 0x4C 0x49 0x54 0x45 0x30 0x31)
@@ -47,7 +55,7 @@ decode unchanged.
 
 A missing main file means an empty store.
 
-## 2. Write-ahead log (`<name>.nql.wal`)
+## 2. Write-ahead log (`<name>.ndb.wal`)
 
 Append-only sequence of frames, one per mutating `Statement` applied to the
 store (CreateTable / Insert / Relate / Forget):
@@ -78,7 +86,7 @@ then fsync of file + parent dir) and the WAL is truncated to zero length.
   transactions, or (worst case) drops only a transaction whose commit was never
   fsynced — never a partially-applied one, and never corruption.
 - Single-writer: one process holds the DB for writing, **enforced** by an
-  exclusive sidecar lock `<name>.nql.lock` taken in `StoreFile::open` and held
+  exclusive sidecar lock `<name>.ndb.lock` taken in `StoreFile::open` and held
   until the store is dropped (issue #84). A second opener — other process or
   other handle in the same process — fails fast with `Locked` instead of
   racing the first writer to a checkpoint (which silently lost acknowledged

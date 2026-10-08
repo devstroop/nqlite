@@ -12,7 +12,7 @@ fn second_process_open_is_rejected_while_store_held() {
     let dir = std::env::temp_dir().join(format!("nqlite-lock-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let db = dir.join("store.nql");
+    let db = dir.join("store.ndb");
     let script = dir.join("q.nql");
     std::fs::write(&script, "CREATE TABLE t; INSERT INTO t:1 { \"x\": 1 };").unwrap();
 

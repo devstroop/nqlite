@@ -173,7 +173,7 @@ current `checkpoint` path (format **v3**: core frame + history tail, see
 
 ```sh
 cargo build --release -p nqlite --example open_profile
-target/release/examples/open_profile /path/to/store.nql   # load / count / scan
+target/release/examples/open_profile /path/to/store.ndb   # load / count / scan
 # E08 harness (file_tier cold-open @100k + kNN/BM25/hybrid ladder):
 cd ../nqlite-experiments && EXP08_PROFILE=release EXP08_SIZES=1000,5000,20000,50000,100000 \
   NQL_SERVER_BIN=$PWD/../nqlite/target/release/nql-server \

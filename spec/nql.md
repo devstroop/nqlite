@@ -10,6 +10,11 @@ vectors are BYO (agent-supplied `f32` arrays). This file defines the grammar
 and the semantics that both the parser (`nql`) and the engine (`nqlite`) must
 agree on.
 
+**File conventions.** NQL program files (scripts passed to `--script`,
+stored queries) use the **`.nql`** extension — it names the *language*.
+The database store is a different artifact with a different extension:
+**`.ndb`** (see `file-format.md`).
+
 ## 1. Grammar (EBNF)
 
 Terminals: `ident` = `[A-Za-z_][A-Za-z0-9_]*`, `int` = `-?[0-9]+`,

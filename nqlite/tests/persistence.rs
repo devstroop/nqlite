@@ -11,7 +11,7 @@ fn file_backed_database_persists_across_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-persist-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1: create + insert + relate, then drop (simulates process exit
     // without explicit flush — durability comes from the WAL).
@@ -76,7 +76,7 @@ fn deterministic_reopen_bytes() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let session = || {
-        let path = dir.join(format!("db-{}.nql", std::process::id()));
+        let path = dir.join(format!("db-{}.ndb", std::process::id()));
         let mut db = Database::open(&path).unwrap();
         db.execute(
             &parse(
@@ -108,7 +108,7 @@ fn read_only_match_is_not_written_to_wal() {
     let dir = std::env::temp_dir().join(format!("nqlite-persist-match-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     let wal_len = |path: &std::path::Path| -> u64 {
         std::fs::metadata(format!("{}.wal", path.display()))
@@ -164,7 +164,7 @@ fn as_of_history_survives_checkpoint_and_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-temporal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1: create + insert + forget, then checkpoint + drop.
     {
@@ -207,7 +207,7 @@ fn memory_context_resets_across_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-wal-ctx-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1: root write, then a plan that ENDS inside memory m.
     {
@@ -265,7 +265,7 @@ fn memory_blocks_survive_wal_replay_across_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-memory-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1: write into the root and into a named memory, drop without
     // flushing (durability comes from the WAL, which logs MEMORY frames so
@@ -321,7 +321,7 @@ fn prune_history_compaction_survives_reopen() {
     let dir = std::env::temp_dir().join(format!("nqlite-prune-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     {
         let mut db = Database::open(&path).unwrap();
@@ -394,7 +394,7 @@ fn legacy_v2_inline_layout_still_loads() {
     // so the bytes are the PRE-#133 shape, independent of the current writer.
     let dir = std::env::temp_dir().join(format!("nqlite-legacy-v2-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     let mut db = Database::default();
     db.execute(
@@ -442,7 +442,7 @@ fn unsupported_versions_and_truncated_v3_rejected() {
     std::fs::create_dir_all(&dir).unwrap();
 
     for version in [1u32, 99u32] {
-        let path = dir.join(format!("v{version}.nql"));
+        let path = dir.join(format!("v{version}.ndb"));
         let mut bytes = b"NQLITE01".to_vec();
         bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -455,7 +455,7 @@ fn unsupported_versions_and_truncated_v3_rejected() {
     }
 
     // v3 header whose core length points past EOF → Truncated.
-    let path = dir.join("trunc.nql");
+    let path = dir.join("trunc.ndb");
     let mut bytes = b"NQLITE01".to_vec();
     bytes.extend_from_slice(&3u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -479,7 +479,7 @@ fn first_temporal_read_decodes_the_history_tail() {
     // the file's entries.
     let dir = std::env::temp_dir().join(format!("nqlite-lazyhist-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     {
         let mut db = Database::open(&path).unwrap();
@@ -534,7 +534,7 @@ fn flush_on_lazy_reopen_preserves_history() {
     let dir = std::env::temp_dir().join(format!("nqlite-flush-lazy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1 (fresh → eager): history is in-memory, flush writes it.
     {
@@ -590,7 +590,7 @@ fn threshold_checkpoint_on_lazy_reopen_preserves_history() {
     let dir = std::env::temp_dir().join(format!("nqlite-threshold-lazy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.nql");
+    let path = dir.join("db.ndb");
 
     // Session 1 (fresh → eager): a small history, checkpointed into main.
     {
@@ -642,7 +642,7 @@ fn engine_reads_v4_and_checkpoint_preserves_it() {
     let dir = std::env::temp_dir().join(format!("nqlite-v4-open-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("store.nql");
+    let path = dir.join("store.ndb");
 
     // A real v4 file: build the store, encode with the promoted codec.
     {
