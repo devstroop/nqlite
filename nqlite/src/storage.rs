@@ -26,6 +26,10 @@ const MAGIC: &[u8; 8] = b"NQLITE01";
 pub const FORMAT_VERSION: u32 = 3;
 /// Previous layout (single inline `postcard(Store)` payload) — still readable.
 pub const LEGACY_VERSION: u32 = 2;
+/// Format v4 (spec §5) — the adopted container `nql-migrate` writes.
+/// The engine reads it since #157, and checkpoints PRESERVE it (a v4
+/// store rewritten as a v3 core frame would be a silent downgrade).
+pub const V4_VERSION: u32 = 4;
 const WAL_SUFFIX: &str = ".wal";
 const LOCK_SUFFIX: &str = ".lock";
 
@@ -36,8 +40,12 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Postcard(#[from] postcard::Error),
-    #[error("unsupported format version {0} (supported: {LEGACY_VERSION}, {FORMAT_VERSION})")]
+    #[error(
+        "unsupported format version {0} (supported: {LEGACY_VERSION}, {FORMAT_VERSION}, {V4_VERSION})"
+    )]
     BadVersion(u32),
+    #[error("v4 container: {0}")]
+    V4(String),
     #[error("truncated main file (core/history frame out of bounds)")]
     Truncated,
     #[error("bad magic header")]
@@ -64,6 +72,7 @@ impl Clone for StorageError {
             Self::TornFrame(o) => Self::TornFrame(*o),
             Self::Truncated => Self::Truncated,
             Self::Locked(p) => Self::Locked(p.clone()),
+            Self::V4(m) => Self::V4(m.clone()),
         }
     }
 }
@@ -78,6 +87,7 @@ impl PartialEq for StorageError {
             (Self::TornFrame(a), Self::TornFrame(b)) => a == b,
             (Self::Truncated, Self::Truncated) => true,
             (Self::Locked(a), Self::Locked(b)) => a == b,
+            (Self::V4(a), Self::V4(b)) => a == b,
             _ => false,
         }
     }
@@ -112,6 +122,9 @@ pub struct StoreFile {
     /// `(offset, len)` of the history tail in a version-3 main file — set at
     /// load, `take`n on the first temporal read (issue #133: lazy decode).
     hist_range: std::cell::Cell<Option<(u64, u64)>>,
+    /// True when the main file was a format-v4 container — checkpoints
+    /// must re-encode as v4, never downgrade (#157).
+    is_v4: std::cell::Cell<bool>,
 }
 
 /// On-disk core frame (v3, issue #133): the store minus its history, plus the
@@ -246,6 +259,7 @@ impl StoreFile {
             _lock: Some(lock),
             wal_len,
             hist_range: std::cell::Cell::new(None),
+            is_v4: std::cell::Cell::new(false),
         })
     }
 
@@ -298,6 +312,14 @@ impl StoreFile {
                 // tail is; the first temporal read pays for it.
                 self.hist_range
                     .set(Some((core_end as u64, (data.len() - core_end) as u64)));
+                Ok(store)
+            }
+            V4_VERSION => {
+                // Format v4 (spec §5): the container decodes the FULL store
+                // including history (no lazy tail on this path — zig owns the
+                // v4-native lazy decode; see #157). Checkpoints stay v4.
+                let store = crate::v4::decode_store(&data).map_err(StorageError::V4)?;
+                self.is_v4.set(true);
                 Ok(store)
             }
             _ => Err(StorageError::BadVersion(version)),
@@ -383,25 +405,33 @@ impl StoreFile {
 
     /// Atomically rewrite the main file from `store` and truncate the WAL.
     pub fn checkpoint(&mut self, store: &Store) -> Result<()> {
-        // v3 layout (issue #133): core frame (the store minus its history)
-        // with an explicit length, then the history tail to EOF.
-        let core = StoreCoreRef {
-            records: &store.records,
-            edges: &store.edges,
-            vector_dims: &store.vector_dims,
-            clock: store.clock,
-            memories: &store.memories,
-            tables: &store.tables,
+        let buf: Vec<u8> = if self.is_v4.get() {
+            // A v4 store must STAY v4 (#157): rewriting it as a v3 core
+            // frame would silently downgrade a migrated file. History is
+            // eager on this path (decode_store), so it is complete here.
+            crate::v4::encode_store(store).map_err(StorageError::V4)?
+        } else {
+            // v3 layout (issue #133): core frame (the store minus its history)
+            // with an explicit length, then the history tail to EOF.
+            let core = StoreCoreRef {
+                records: &store.records,
+                edges: &store.edges,
+                vector_dims: &store.vector_dims,
+                clock: store.clock,
+                memories: &store.memories,
+                tables: &store.tables,
+            };
+            let core_bytes = postcard::to_allocvec(&core)?;
+            let hist_bytes = postcard::to_allocvec(&store.history)?;
+            let mut buf = Vec::with_capacity(24 + core_bytes.len() + hist_bytes.len());
+            buf.extend_from_slice(MAGIC);
+            buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&(core_bytes.len() as u64).to_le_bytes());
+            buf.extend_from_slice(&core_bytes);
+            buf.extend_from_slice(&hist_bytes);
+            buf
         };
-        let core_bytes = postcard::to_allocvec(&core)?;
-        let hist_bytes = postcard::to_allocvec(&store.history)?;
-        let mut buf = Vec::with_capacity(24 + core_bytes.len() + hist_bytes.len());
-        buf.extend_from_slice(MAGIC);
-        buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&(core_bytes.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&core_bytes);
-        buf.extend_from_slice(&hist_bytes);
 
         // tmp + rename + fsync for atomic replacement.
         let tmp = self.main.with_extension("nql.tmp");
