@@ -1,7 +1,7 @@
 //! nql-migrate CLI — bulk v2/v3 → format v4 (spec/file-format.md §5.8).
 //!
 //! ```text
-//! nql-migrate --in <store.nql> --out <store.nql> [--force]
+//! nql-migrate --in <store.ndb> --out <store.ndb> [--force]
 //! ```
 //!
 //! `--in == --out` performs an in-place migration (the source lock is
@@ -15,7 +15,7 @@ const USAGE: &str = "\
 nql-migrate — convert an nqlite v2/v3 store to format v4 (spec/file-format.md §5)
 
 USAGE:
-    nql-migrate --in <store.nql> --out <store.nql> [--force]
+    nql-migrate --in <store.ndb> --out <store.ndb> [--force]
 
 OPTIONS:
     --in,  -i <path>   input store (v2/v3; WAL replayed on load)

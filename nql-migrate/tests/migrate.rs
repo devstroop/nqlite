@@ -107,8 +107,8 @@ fn migrate_v3_to_v4_roundtrip() {
     let dir = std::env::temp_dir().join(format!("nql-migrate-rt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let v3 = dir.join("store.nql");
-    let v4_path = dir.join("store_v4.nql");
+    let v3 = dir.join("store.ndb");
+    let v4_path = dir.join("store_v4.ndb");
 
     seed(&v3);
 
@@ -165,9 +165,9 @@ fn migrate_is_idempotent_and_guards_output() {
     let dir = std::env::temp_dir().join(format!("nql-migrate-guard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let v3 = dir.join("store.nql");
+    let v3 = dir.join("store.ndb");
     seed(&v3);
-    let out = dir.join("out.nql");
+    let out = dir.join("out.ndb");
 
     nql_migrate::migrate(&v3, &out, false).expect("first migrate");
     // Existing output without --force is refused…
@@ -181,14 +181,14 @@ fn migrate_is_idempotent_and_guards_output() {
     assert_eq!(first, std::fs::read(&out).unwrap());
 
     // Missing input is a clear error (never a silent empty migration).
-    let missing = nql_migrate::migrate(dir.join("nope.nql"), dir.join("x.nql"), false).unwrap_err();
+    let missing = nql_migrate::migrate(dir.join("nope.ndb"), dir.join("x.ndb"), false).unwrap_err();
     assert!(
         matches!(missing, nql_migrate::Error::InputMissing(_)),
         "{missing}"
     );
 
     // In-place migration (in == out) works: lock released before the write.
-    let inplace = dir.join("store.nql");
+    let inplace = dir.join("store.ndb");
     nql_migrate::migrate(&inplace, &inplace, true).expect("in-place");
     let raw = std::fs::read(&inplace).unwrap();
     assert_eq!(u32::from_le_bytes(raw[8..12].try_into().unwrap()), 4);
@@ -205,8 +205,8 @@ fn migrate_reads_history_from_checkpointed_v3_input() {
     let dir = std::env::temp_dir().join(format!("nql-migrate-lazy-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let v3 = dir.join("store.nql");
-    let v4_path = dir.join("store_v4.nql");
+    let v3 = dir.join("store.ndb");
+    let v4_path = dir.join("store_v4.ndb");
 
     seed(&v3);
     // Checkpoint the WAL into a real v3 main file (history becomes a lazy

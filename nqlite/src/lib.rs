@@ -71,7 +71,7 @@ impl Database {
         Self { store, file: None }
     }
 
-    /// Open (or create) a persistent database at `path` (e.g. `data.nql`).
+    /// Open (or create) a persistent database at `path` (e.g. `data.ndb`).
     ///
     /// Loads the main file + replays the WAL (crash recovery), then logs every
     /// subsequent mutating plan to the WAL before returning. Call [`flush`]

@@ -15,9 +15,9 @@ UPDATE_FIXTURES=1 cargo test --test v4_fixtures
 
 | file | contents |
 |---|---|
-| `empty.nql` | `Store::default()` — required sections only (`TABLES`/`RECORDS`/`CLOCK`, counts 0), all optional sections absent |
-| `plain.nql` | records, no optional sections (numeric ids, no embeddings/edges/memories/history) |
-| `rich.nql` | engine-built: every `Value` kind, string + numeric ids in canonical order, append-ordered edges, embeddings, a nested memory (depth 2), full history |
-| `pruned.nql` | after `PRUNE HISTORY` — `Statement::Snapshot` entries in history, incl. a nested store's own snapshot |
-| `statements.json` | every `Statement` tag (0–12) as `{name, tag, hex, json}` — `hex` = postcard bytes (§5.7), `json` = serde's externally-tagged form (`json: null` for `Snapshot`: `Store.tables` inside statements is `serde(skip)`ed and `RecordId` map keys are not JSON-representable — tag 11's bytes are covered by `pruned.nql`/`rich.nql` history) |
+| `empty.ndb` | `Store::default()` — required sections only (`TABLES`/`RECORDS`/`CLOCK`, counts 0), all optional sections absent |
+| `plain.ndb` | records, no optional sections (numeric ids, no embeddings/edges/memories/history) |
+| `rich.ndb` | engine-built: every `Value` kind, string + numeric ids in canonical order, append-ordered edges, embeddings, a nested memory (depth 2), full history |
+| `pruned.ndb` | after `PRUNE HISTORY` — `Statement::Snapshot` entries in history, incl. a nested store's own snapshot |
+| `statements.json` | every `Statement` tag (0–12) as `{name, tag, hex, json}` — `hex` = postcard bytes (§5.7), `json` = serde's externally-tagged form (`json: null` for `Snapshot`: `Store.tables` inside statements is `serde(skip)`ed and `RecordId` map keys are not JSON-representable — tag 11's bytes are covered by `pruned.ndb`/`rich.ndb` history) |
 | `manifest.json` | per-fixture section table (tag/offset/len/crc32) + counts — independent expectations for other implementations |

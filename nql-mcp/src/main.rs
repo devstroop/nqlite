@@ -2,7 +2,7 @@
 //!
 //! ```
 //! nql-mcp                 # in-memory database
-//! nql-mcp --db memory.nql # persistent single-file store
+//! nql-mcp --db memory.ndb # persistent single-file store
 //! ```
 //!
 //! Speaks the Model Context Protocol over stdio (the standard transport for

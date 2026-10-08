@@ -284,7 +284,7 @@ mod tests {
         // table (exists only as a history statement) and a memory-block table.
         let dir = std::env::temp_dir().join(format!("nqlite-server-db-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("store.nql");
+        let path = dir.join("store.ndb");
 
         {
             let mut s = Server::open(&path).expect("first open");
@@ -377,7 +377,7 @@ mod tests {
         // protocol instead of silently returning a partial view.
         let dir = std::env::temp_dir().join(format!("nqlite-server-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("store.nql");
+        let path = dir.join("store.ndb");
 
         {
             let mut s = Server::open(&path).expect("first open");

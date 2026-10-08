@@ -3,7 +3,7 @@
     {
       "bytes": 144,
       "edges": 0,
-      "file": "empty.nql",
+      "file": "empty.ndb",
       "history": 0,
       "memories": 0,
       "records": 0,
@@ -35,7 +35,7 @@
     {
       "bytes": 272,
       "edges": 0,
-      "file": "plain.nql",
+      "file": "plain.ndb",
       "history": 0,
       "memories": 0,
       "records": 2,
@@ -67,7 +67,7 @@
     {
       "bytes": 25096,
       "edges": 4,
-      "file": "rich.nql",
+      "file": "rich.ndb",
       "history": 18,
       "memories": 1,
       "records": 8,
@@ -134,7 +134,7 @@
     {
       "bytes": 8335,
       "edges": 0,
-      "file": "pruned.nql",
+      "file": "pruned.ndb",
       "history": 2,
       "memories": 1,
       "records": 2,

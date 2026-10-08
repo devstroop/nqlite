@@ -153,8 +153,8 @@ SELECT turn (1 rows)
 Persist the session to a single file (sidecar WAL, ACID crash-safety):
 
 ```bash
-cargo run -q -p nql-cli -- --db memory.nql        # REPL backed by memory.nql
-cargo run -q -p nql-cli -- --db memory.nql --script session.nql   # script mode
+cargo run -q -p nql-cli -- --db memory.ndb        # REPL backed by memory.nql
+cargo run -q -p nql-cli -- --db memory.ndb --script session.nql   # script mode
 # :flush inside the REPL checkpoints the WAL into the main file
 ```
 
@@ -162,7 +162,7 @@ Expose the database to AI agents over the Model Context Protocol (stdio):
 
 ```bash
 cargo run -q -p nql-mcp                 # in-memory
-cargo run -q -p nql-mcp -- --db memory.nql   # persistent
+cargo run -q -p nql-mcp -- --db memory.ndb   # persistent
 ```
 
 `nql-mcp` serves tools (`execute_nql`, `create_table`, `insert_record`,
@@ -180,13 +180,13 @@ printf 'MEMORY core; CREATE TABLE note; MEMORY core; INSERT INTO note:1 { "text"
   | cargo run -q -p nql-server -- --stdio
 ```
 
-Add `--db memory.nql` (either mode) to serve a **persistent** store — same
+Add `--db memory.ndb` (either mode) to serve a **persistent** store — same
 semantics as `nql-cli --db`, including the single-writer lock; without it the
 server is in-memory and everything is lost on exit:
 
 ```bash
-cargo run -q -p nql-server -- --db memory.nql            # TCP on :7878
-cargo run -q -p nql-server -- --db memory.nql --stdio    # line protocol on stdio
+cargo run -q -p nql-server -- --db memory.ndb            # TCP on :7878
+cargo run -q -p nql-server -- --db memory.ndb --stdio    # line protocol on stdio
 ```
 
 Or in Rust, programmatically:

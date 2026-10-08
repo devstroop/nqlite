@@ -573,7 +573,7 @@ fn statements_json() -> String {
             let hexed = hex(&postcard::to_allocvec(&s).expect("postcard sample"));
             // SnapshotState maps records by RecordId — serde_json only
             // accepts string keys, so the JSON twin is null for tag 11;
-            // its semantics are pinned by pruned.nql / rich.nql history.
+            // its semantics are pinned by pruned.ndb / rich.ndb history.
             let json = if stmt_name(&s) == "Snapshot" {
                 serde_json::Value::Null
             } else {
@@ -621,7 +621,7 @@ fn manifest_json() -> serde_json::Value {
                 })
                 .collect();
             serde_json::json!({
-                "file": format!("{name}.nql"),
+                "file": format!("{name}.ndb"),
                 "bytes": bytes.len(),
                 "tables": store.tables.len(),
                 "records": store.records.len(),
@@ -712,7 +712,7 @@ fn canonical_record_order() {
 fn fixtures_roundtrip_and_match_files() {
     for (name, store) in fixture_stores() {
         let bytes = encode_v4(&store).expect(name);
-        write_or_verify(&fixtures_dir().join(format!("{name}.nql")), &bytes, name);
+        write_or_verify(&fixtures_dir().join(format!("{name}.ndb")), &bytes, name);
         let dec = decode_v4(&bytes).unwrap_or_else(|e| panic!("{name}: decode: {e}"));
         assert_eq!(
             encode_v4(&dec).unwrap(),

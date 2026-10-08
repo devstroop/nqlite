@@ -101,18 +101,18 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 /// WAL. `append` logs one mutating statement; `checkpoint` compacts.
 ///
 /// **Single-writer enforcement (issue #84):** opening takes an exclusive
-/// cross-process lock on the sidecar `<name>.nql.lock` and holds it until the
+/// cross-process lock on the sidecar `<name>.ndb.lock` and holds it until the
 /// store is dropped. A second opener — another process, or another handle in
 /// the same process — fails with [`StorageError::Locked`] instead of silently
 /// racing the first writer to a checkpoint (which lost acknowledged writes).
 #[derive(Debug)]
 pub struct StoreFile {
     dir: PathBuf,
-    /// Main file path `<dir>/<name>.nql`.
+    /// Main file path `<dir>/<name>.ndb`.
     main: PathBuf,
-    /// WAL path `<dir>/<name>.nql.wal`.
+    /// WAL path `<dir>/<name>.ndb.wal`.
     wal: PathBuf,
-    /// Lock path `<dir>/<name>.nql.lock`.
+    /// Lock path `<dir>/<name>.ndb.lock`.
     _lock_path: PathBuf,
     /// Held lock file (RAII): the fd keeps the advisory lock alive (unix);
     /// underscore-prefixed because nothing on unix reads it back — the drop
@@ -234,7 +234,7 @@ fn acquire_lock(lock_path: &Path) -> Result<File> {
 }
 
 impl StoreFile {
-    /// Open (or create) the store at `path` (e.g. `data.nql`).
+    /// Open (or create) the store at `path` (e.g. `data.ndb`).
     /// Creates the parent directory if missing.
     ///
     /// Fails with [`StorageError::Locked`] when another handle currently owns
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn roundtrip_main_file() {
         let dir = temp_dir("roundtrip");
-        let path = dir.join("db.nql");
+        let path = dir.join("db.ndb");
         let mut sf = StoreFile::open(&path).unwrap();
         sf.checkpoint(&sample_store()).unwrap();
         drop(sf); // single-writer: release the store lock before reopening
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn wal_replay_applies_mutations() {
         let dir = temp_dir("wal");
-        let path = dir.join("db.nql");
+        let path = dir.join("db.ndb");
         let mut sf = StoreFile::open(&path).unwrap();
         let mut store = Store::default();
         let create = Statement::CreateTable {
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn torn_frame_is_truncated() {
         let dir = temp_dir("torn");
-        let path = dir.join("db.nql");
+        let path = dir.join("db.ndb");
         let mut sf = StoreFile::open(&path).unwrap();
         let create = Statement::CreateTable {
             table: "t".into(),
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn deterministic_bytes() {
         let dir = temp_dir("det");
-        let path = dir.join("db.nql");
+        let path = dir.join("db.ndb");
         let mut sf = StoreFile::open(&path).unwrap();
         sf.checkpoint(&sample_store()).unwrap();
         let a = fs::read(&path).unwrap();
@@ -621,7 +621,7 @@ mod tests {
         // process, or another handle in this one) must fail loudly instead of
         // racing the first writer to a checkpoint.
         let dir = temp_dir("lock");
-        let path = dir.join("db.nql");
+        let path = dir.join("db.ndb");
         let sf = StoreFile::open(&path).unwrap();
         let err = StoreFile::open(&path).unwrap_err();
         assert!(
