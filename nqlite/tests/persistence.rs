@@ -632,3 +632,71 @@ fn threshold_checkpoint_on_lazy_reopen_preserves_history() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn engine_reads_v4_and_checkpoint_preserves_it() {
+    // #157: the engine opens format v4 (nql-migrate output), answers
+    // queries — including temporal reads (history decodes eagerly on
+    // this path) — and checkpoints must re-encode as v4, never
+    // silently downgrading a migrated file to a v3 core frame.
+    let dir = std::env::temp_dir().join(format!("nqlite-v4-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.nql");
+
+    // A real v4 file: build the store, encode with the promoted codec.
+    {
+        let mut src = Database::new(nqlite::Store::default());
+        src.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"a\": 1 };
+                 INSERT INTO t:2 { \"a\": 2 };
+                 FORGET t:2;",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let bytes = nqlite::v4::encode_store(src.store()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
+    }
+
+    // Open: records + EAGER history + temporal answers + flush stays v4.
+    {
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.store().records.len(), 1, "t:1 survives the FORGET");
+        assert_eq!(
+            db.store().history.len(),
+            4,
+            "v4 decodes history eagerly (create@1 + inserts@2,3 + forget@4)"
+        );
+        let past = db
+            .execute(&parse("SELECT * FROM t AS OF 3;").unwrap())
+            .unwrap();
+        assert_eq!(past[0].rows.len(), 2, "AS OF sees both rows pre-FORGET");
+
+        db.flush().unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+            4,
+            "checkpoint must not downgrade v4 to v3"
+        );
+        let back = nqlite::v4::decode_store(&raw).unwrap();
+        assert_eq!(back.records.len(), 1, "records intact after flush");
+        assert_eq!(back.history.len(), 4, "history complete after flush");
+
+        // WAL append onto the v4 store, then reopen (replay path).
+        db.execute(&parse("INSERT INTO t:3 { \"a\": 3 };").unwrap())
+            .unwrap();
+    }
+    {
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.store().records.len(), 2, "WAL replay onto v4 main");
+        let now = db.execute(&parse("SELECT * FROM t;").unwrap()).unwrap();
+        assert_eq!(now[0].rows.len(), 2, "t:1 and t:3 live");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Format v4 open + version-preserving checkpoint (#157)** — `load_main`
+  accepts `V4_VERSION` through `nqlite::v4::decode_store` (full store,
+  eager history — zig owns the v4-native lazy path), with a new
+  `StorageError::V4` for codec failures; checkpoints of a v4 store
+  re-encode as **v4** (an `is_v4` marker on `StoreFile`) instead of
+  silently downgrading a migrated file to a v3 core frame. `nql-server`
+  / `nql` / `nql-mcp` can now serve `nql-migrate` output; other
+  versions still fail `BadVersion` loudly.
 - **`nql-migrate`** — bulk v2/v3 → format v4 conversion (spec §5.8): loads
   through the existing reader (WAL replay included, WAL-only stores
   supported), writes the canonical v4 container atomically (tmp + fsync +
