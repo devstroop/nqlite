@@ -243,3 +243,15 @@ python3 -m venv /tmp/bench-venv
 - **Single-writer, in-memory engine.** Everything above is one process, one
   writer, no persistence. Concurrent-writer and disk-backed numbers do not
   exist yet in this phase — do not extrapolate them from this page.
+
+## Cross-implementation (nqlite-zig)
+
+The experimental Zig port runs the same wire-level benchmarks through the
+shared harness (`nqlite-experiments`): its M8 numbers — bound to
+machine/profile/commit, ReleaseFast, ladder through 100k rows — live in
+`nqlite-zig/docs/BENCHMARKING.md` (workspace sibling, not published).
+Cross-implementation correctness is gated by
+`nqlite-experiments/scripts/compare_impls.py`, which diffs per-variant
+`transcript_sha256` of this crate's `nql-server` against the port's
+server; the current run is byte-identical across all 11 experiments
+(57/57 digests, `--all` exit 0).
