@@ -149,13 +149,6 @@ impl Database {
             self.ensure_history()?;
         }
         let results = execute_plan(&mut self.store, plan)?;
-        // A threshold checkpoint rewrites `store.history` into the main
-        // file: claim the lazy tail first (without this, chunked ingest
-        // sessions drop the file-era history on EVERY checkpoint — the
-        // E08 100k importer proof surfaced a store with `history = 0`).
-        if matches!(&self.file, Some(f) if f.needs_checkpoint()) {
-            self.ensure_history()?;
-        }
         if let Some(file) = &mut self.file {
             let mut logged = false;
             for stmt in plan {
@@ -172,7 +165,17 @@ impl Database {
                 // later frame during WAL replay.
                 file.append(&Statement::ContextReset)?;
             }
-            if file.needs_checkpoint() {
+        }
+        // Threshold checkpoint, decided AFTER the appends (wal_len must
+        // reflect THIS plan — a pre-append check never fires for a
+        // single-plan session, which is exactly how chunked ingest grows
+        // the WAL). The checkpoint re-serializes `store.history` into the
+        // main file: claim the lazy tail first, or the file era is
+        // rewritten as absent (found by the E08 100k importer proof —
+        // migrated store reported `history = 0`).
+        if matches!(&self.file, Some(f) if f.needs_checkpoint()) {
+            self.ensure_history()?;
+            if let Some(file) = &mut self.file {
                 file.checkpoint(&self.store)?;
             }
         }
