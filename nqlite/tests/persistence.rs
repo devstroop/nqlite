@@ -580,3 +580,55 @@ fn flush_on_lazy_reopen_preserves_history() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn threshold_checkpoint_on_lazy_reopen_preserves_history() {
+    // The OTHER checkpoint path: `Database::execute`'s threshold fire must
+    // be decided AFTER this plan's appends (a pre-append check never fires
+    // for a single-plan session — exactly the E08 100k chunked-ingest
+    // shape, which rewrote history with the current session's entries only).
+    let dir = std::env::temp_dir().join(format!("nqlite-threshold-lazy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1 (fresh → eager): a small history, checkpointed into main.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(&parse("CREATE TABLE t;\nINSERT INTO t:1 { \"a\": 1 };").unwrap())
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    // Session 2 (lazy tail): ONE plan that crosses the 1 MiB WAL threshold
+    // (fat bodies: 4000 × ~330B) — the threshold fires inside this execute.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let mut prog = String::new();
+        for i in 0..4000 {
+            let pad = "x".repeat(300);
+            prog.push_str(&format!("INSERT INTO t:{i} {{ \"pad\": \"{pad}\" }};\n"));
+        }
+        db.execute(&parse(&prog).unwrap()).unwrap();
+    }
+
+    // Session 3: the file-era entries were claimed before the checkpoint.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let past = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(
+            past[0].rows.len(),
+            1,
+            "file-era view survives the threshold checkpoint"
+        );
+        assert_eq!(
+            db.store().history.len(),
+            4002,
+            "2 file-era entries + 4000 from the threshold session"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
