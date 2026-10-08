@@ -97,9 +97,12 @@ pub fn migrate(
         }
     };
 
-    // Load the full committed state (WAL replay included); consuming the
-    // Database releases the single-writer lock before we write.
-    let db = Database::open(input)?;
+    // Load the full committed state (WAL replay + the lazy history tail —
+    // `into_store` alone hands back a never-ensured store, and the output
+    // would silently carry EMPTY history); consuming the Database releases
+    // the single-writer lock before we write.
+    let mut db = Database::open(input)?;
+    db.ensure_history().map_err(Error::Storage)?;
     let store = db.into_store();
 
     if output != input && output.exists() && !force {
