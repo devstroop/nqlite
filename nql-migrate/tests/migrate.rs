@@ -195,3 +195,47 @@ fn migrate_is_idempotent_and_guards_output() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn migrate_reads_history_from_checkpointed_v3_input() {
+    // Regression (E08 100k importer proof): a CHECKPOINTED v3 input hands
+    // `Database::open` a pending history tail (issue #133). Migrate must
+    // claim it (`ensure_history`) or the output silently carries EMPTY
+    // history — `into_store` alone used to hand back the never-ensured store.
+    let dir = std::env::temp_dir().join(format!("nql-migrate-lazy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let v3 = dir.join("store.nql");
+    let v4_path = dir.join("store_v4.nql");
+
+    seed(&v3);
+    // Checkpoint the WAL into a real v3 main file (history becomes a lazy
+    // tail for every subsequent open).
+    {
+        let mut db = Database::open(&v3).expect("open for flush");
+        db.flush().expect("flush → main file");
+    }
+
+    // Expected history = what a claiming open sees.
+    let mut src = Database::open(&v3).expect("reopen");
+    src.ensure_history().expect("claim tail");
+    let expected = src.store().history.len();
+    assert!(expected > 0, "seeded store has history");
+    drop(src); // release the single-writer lock before migrate opens it
+
+    let report = nql_migrate::migrate(&v3, &v4_path, false).expect("migrate");
+    assert_eq!(
+        report.history, expected,
+        "migrated report carries the file-era history (pre-fix: 0)"
+    );
+
+    let raw = std::fs::read(&v4_path).unwrap();
+    let back = nqlite::v4::decode_store(&raw).expect("decode migrated v4");
+    assert_eq!(
+        back.history.len(),
+        expected,
+        "v4 output carries the history"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

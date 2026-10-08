@@ -523,3 +523,60 @@ fn first_temporal_read_decodes_the_history_tail() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn flush_on_lazy_reopen_preserves_history() {
+    // Regression (found via the E08 100k importer proof): `flush` and the
+    // threshold checkpoint re-serialize `store.history` into the main file —
+    // on a lazily reopened store (issue #133 tail pending) that used to
+    // REWRITE the file with an EMPTY history, silently killing every
+    // temporal read. Checkpoint must claim the tail first (`ensure_history`).
+    let dir = std::env::temp_dir().join(format!("nqlite-flush-lazy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.nql");
+
+    // Session 1 (fresh → eager): history is in-memory, flush writes it.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(
+            &parse(
+                "CREATE TABLE t;
+                 INSERT INTO t:1 { \"a\": 1 };
+                 INSERT INTO t:2 { \"a\": 2 };",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.flush().unwrap();
+    }
+
+    // Session 2 (reopen → the file era is a PENDING tail): a non-temporal
+    // plan never claims it; the flush must do so instead of dropping it.
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.execute(&parse("INSERT INTO t:3 { \"a\": 3 };").unwrap())
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    // Session 3: the full log (4 entries) and temporal answers survive.
+    {
+        let mut db = Database::open(&path).unwrap();
+        let past = db
+            .execute(&parse("SELECT * FROM t AS OF 2;").unwrap())
+            .unwrap();
+        assert_eq!(
+            past[0].rows.len(),
+            1,
+            "AS OF 2 sees create+first insert — file era was preserved"
+        );
+        assert_eq!(
+            db.store().history.len(),
+            4,
+            "create@1 + inserts@2..4 all present after the lazy flush"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

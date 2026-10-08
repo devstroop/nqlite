@@ -87,6 +87,10 @@ impl Database {
 
     /// Checkpoint the WAL into the main file (no-op for in-memory databases).
     pub fn flush(&mut self) -> std::result::Result<(), StorageError> {
+        // Claim the lazy tail FIRST: a checkpoint rewrites
+        // `store.history` into the main file, so flushing a never-ensured
+        // session would silently drop the file-era history.
+        self.ensure_history()?;
         if let Some(file) = &mut self.file {
             file.checkpoint(&self.store)?;
         }
@@ -98,7 +102,13 @@ impl Database {
     /// touches it. File entries all predate anything WAL replay appended
     /// (load runs before replay), so prepending keeps timestamps ascending.
     /// In-memory databases and legacy (v2) files have no pending tail.
-    fn ensure_history(&mut self) -> Result<()> {
+    ///
+    /// Idempotent (the range is taken once). **Public because anything that
+    /// serializes `store.history`** (flush / threshold checkpoint,
+    /// `nql-migrate`) **must claim the tail first** — otherwise the file era
+    /// is silently rewritten as empty (found via the E08 100k importer
+    /// proof: chunked `:flush` produced a store with `history = 0`).
+    pub fn ensure_history(&mut self) -> std::result::Result<(), StorageError> {
         let Some(file) = self.file.as_ref() else {
             return Ok(());
         };
@@ -139,6 +149,13 @@ impl Database {
             self.ensure_history()?;
         }
         let results = execute_plan(&mut self.store, plan)?;
+        // A threshold checkpoint rewrites `store.history` into the main
+        // file: claim the lazy tail first (without this, chunked ingest
+        // sessions drop the file-era history on EVERY checkpoint — the
+        // E08 100k importer proof surfaced a store with `history = 0`).
+        if matches!(&self.file, Some(f) if f.needs_checkpoint()) {
+            self.ensure_history()?;
+        }
         if let Some(file) = &mut self.file {
             let mut logged = false;
             for stmt in plan {
