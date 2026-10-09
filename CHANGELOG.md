@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes unchanged).
 
 ### Changed
+- **kNN/SELECT pipeline borrows candidates (#144, L1)** — `run_select` no
+  longer deep-clones every matching record per query: candidates are
+  `Vec<&Record>` through filtering, scoring, ordering, offset and limit,
+  and only the ≤limit survivors are cloned into owned rows. Results are
+  unchanged (`tests/exact_parity.rs` + experiments digest parity 57/57
+  across exp01–exp11). Standing spike bench (dim-64, k=10, criterion):
+  10k 25.3→11.5 ms, 50k 170.3→95.4 ms, **100k 357.0→213.3 ms (−40%)** —
+  first step of the L1→L2→L3 ladder approved on #144.
 - Cross-DB recall column wired (bench-compare): the sqlite-vec driver now
   computes `rec@10` — mean over 30 queries vs exact cosine top-10 on the
   shared corpus (vec0 is L2-only, so vectors are unit-normalized at insert to

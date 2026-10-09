@@ -35,6 +35,19 @@ pub struct ScoredRecord {
     pub score: f32,
 }
 
+/// A pipeline row that *borrows* its record — `run_select`'s working form.
+///
+/// Filtering, scoring, ordering, offset and limit all run over these
+/// references; only the ≤limit rows that survive are cloned into owned
+/// [`ScoredRecord`]s (issue #144, L1): candidates must never be deep-cloned
+/// wholesale per query — a dim-64 embedding plus body strings made that
+/// `.collect()` the single largest cost of an exact kNN SELECT.
+#[derive(Debug, Clone, Copy)]
+struct ScoredRef<'a> {
+    record: &'a Record,
+    score: f32,
+}
+
 /// What produced a [`QueryResult`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryKind {
@@ -293,7 +306,9 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 /// configured [`VectorIndex`] (default: exact [`BruteForceVectorIndex`])
 /// rather than an inline cosine scan. The index is rebuilt from the filtered
 /// candidates on every call, so the result stays a pure, deterministic
-/// function of `(store, select)`. A temporal read whose cutoff predates the
+/// function of `(store, select)`. Candidates borrow the store's records
+/// end-to-end; only the ≤limit rows that survive ordering are cloned
+/// (issue #144, L1). A temporal read whose cutoff predates the
 /// store's history snapshot returns [`Error::HistoryPruned`] (issue #95).
 fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
     // Temporal read (`AS OF T`): replay the mutation history up to the
@@ -308,12 +323,15 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
         None => store,
     };
 
-    let candidates: Vec<Record> = target
+    // Candidates BORROW the store's records (issue #144, L1): filtering
+    // never needs owned rows, and deep-cloning every match up front made
+    // this `.collect()` the largest single cost of an exact kNN SELECT.
+    // Owned `Record`s materialize only for the ≤limit surviving rows below.
+    let candidates: Vec<&Record> = target
         .records
         .values()
         .filter(|r| r.id.table == sel.table)
         .filter(|r| matches_filter(r, sel.filter.as_ref()))
-        .cloned()
         .collect();
 
     // `SELECT COUNT(*)` (spec §2.3, issue #94): one `{"count": n}` row with
@@ -342,7 +360,7 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
     // pure function of `(store, select)`.
     let bm25: Option<(Bm25Index, Vec<String>)> = match sel.filter.as_ref() {
         Some(Filter::Bm25 { field, query, .. }) => {
-            let index = Bm25Index::new(field, candidates.iter());
+            let index = Bm25Index::new(field, candidates.iter().copied());
             let query_tokens = tokenize(query);
             Some((index, query_tokens))
         }
@@ -397,18 +415,18 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
         _ => None,
     };
 
-    let mut rows: Vec<ScoredRecord> = candidates
+    let mut rows: Vec<ScoredRef> = candidates
         .into_iter()
         .map(|record| {
             let score = compute_score(
                 target,
                 sel,
-                &record,
+                record,
                 knn_sims.as_ref(),
                 bm25.as_ref(),
                 hybrid.as_ref(),
             );
-            ScoredRecord { record, score }
+            ScoredRef { record, score }
         })
         .collect();
 
@@ -442,6 +460,17 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
     if let Some(limit) = effective_limit(sel) {
         rows.truncate(limit);
     }
+
+    // Materialize the survivors (issue #144, L1): at most `limit` deep
+    // clones instead of one per candidate up front — same bytes, same
+    // scores, same order.
+    let mut rows: Vec<ScoredRecord> = rows
+        .into_iter()
+        .map(|r| ScoredRecord {
+            record: r.record.clone(),
+            score: r.score,
+        })
+        .collect();
 
     // Field projection (spec §2.3 step 8, issue #91): keep only the listed
     // body keys — presentation only, after all filtering/scoring/ordering, so
@@ -839,7 +868,10 @@ fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
 /// This is the engine's swap point for alternative [`VectorIndex`]
 /// implementations (e.g. the feature-gated, approximate `HnswVectorIndex`):
 /// swap the concrete type here and the rest of the engine is unchanged.
-fn build_default_index(records: &[Record]) -> Box<dyn VectorIndex> {
+///
+/// Candidates arrive as borrowed records (issue #144, L1); the per-call
+/// embedding clone in `upsert` is the index-rebuild cost L2 removes.
+fn build_default_index(records: &[&Record]) -> Box<dyn VectorIndex> {
     let mut index = BruteForceVectorIndex::default();
     for r in records {
         if let Some(emb) = &r.embedding {
@@ -852,7 +884,11 @@ fn build_default_index(records: &[Record]) -> Box<dyn VectorIndex> {
 /// Apply the select's deterministic ordering. Stable sorts guarantee equal
 /// keys keep their (BTree) input order; we additionally tie-break by
 /// ascending [`RecordId`] so the final order is total and reproducible.
-fn order_rows(rows: &mut [ScoredRecord], sel: &Select) {
+///
+/// Runs over borrowed pipeline rows ([`ScoredRef`]) — the same field names
+/// as [`ScoredRecord`] keep this one copy of the ordering semantics for both
+/// forms (issue #144, L1).
+fn order_rows(rows: &mut [ScoredRef<'_>], sel: &Select) {
     // `ORDER BY <field> [DESC]` (issue #117): explicit structural sort, same
     // precedence as `::recency` — it wins over the score-based modes below.
     // Absent/explicit-null fields rank as `null` (lowest) under
