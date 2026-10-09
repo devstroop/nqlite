@@ -208,6 +208,22 @@ create_index   = 'CREATE' 'INDEX' ident 'ON' ident '(' ident ')' ;
 6. **Offset / Limit** — `OFFSET n` skips the first `n` rows after ordering;
    then keep the first N (or the kNN/BM25 `k` cap, whichever is smallest) of
    what remains (issues #93/#94).
+
+   **Output-cap invariant — kNN-only path (issue #144, L3).** When the
+   query carries `vector::similarity … AND k = N`, has no `::bm25` (so no
+   hybrid), and orders by the mode's own score (the default — similarity
+   desc — or the explicit `ORDER BY ::similarity`), the rows observable
+   after steps 6–8 are exactly the top `OFFSET + C` candidates under the
+   §2.1 total order — similarity desc, RecordId asc, with candidates that
+   carry no embedding scoring `0` and participating in that order — where
+   `C` is the cap step 6 applies. Rows outside that window can never
+   appear in the result (their scores are never observable), so an engine
+   may score, order, and materialize only those candidates and remain
+   byte-identical to computing every one. Every other case — a score-based
+   `ORDER BY ::op` (whose own score ranks all rows), a structural
+   `ORDER BY` (`::recency`, `<field>` — data outside the mode score), and
+   bm25/hybrid relevance — considers every candidate before step 6's cap
+   applies.
 7. **Aggregate** — `SELECT COUNT(*)` returns ONE row `{"count": <n>}`
    instead of records: `n` is the number of records that passed step 2's
    filter, so ordering, offset, limit, and projection never affect it (a
