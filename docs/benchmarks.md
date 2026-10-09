@@ -204,6 +204,58 @@ Compatibility (tested in `nqlite/tests/persistence.rs`): legacy **v2** files
 still load (inline postcard layout, tables rebuilt), **v1 / v99** are rejected
 with `BadVersion (supported: 2, 3)`, truncated v3 frames with `Truncated`.
 
+## Latency distribution & plan-size sweep (issue #170)
+
+Criterion's console output leads with mean/median; the tails live in its JSON
+artifacts. `scripts/bench-percentiles.py` is a pure function of those
+artifacts — per-operation samples (`times[i]/iters[i]`, linear-interpolation
+percentiles, ops/s = throughput-elements / mean):
+
+```sh
+cargo bench -p nqlite              # release-optimized criterion harness
+python3 scripts/bench-percentiles.py            # text table
+python3 scripts/bench-percentiles.py --markdown # paste-ready rows
+```
+
+Tables below are that script's output, reference box, release profile,
+2026-10-09 (shared VM — expect ±10–30% run-to-run; the *shapes* reproduce,
+the exact decimals don't).
+
+**Plan-size sweep** (`plan_size` group in `nqlite/benches/bench.rs`): plans of
+1/10/100/1000 inserts per `execute`. `mem/*` isolates the engine's per-plan
+cost; `wal/*` measures the durable plan (fresh tempdir + open + execute, so
+the single per-plan fsync from #164 is inside the measured path). Latency is
+per plan (p50), rate per statement:
+
+| plan size | mem latency | mem rate | wal latency | wal rate |
+|----------:|------------|---------:|------------:|---------:|
+| 1 | 1.356 µs | 653.8 K/s | 869.8 µs | 1.150 K/s |
+| 10 | 10.95 µs | 903.3 K/s | 947.1 µs | 10.51 K/s |
+| 100 | 126.8 µs | 770.8 K/s | 1.398 ms | 70.79 K/s |
+| 1000 | 1.551 ms | 635.3 K/s | 5.367 ms | 195.5 K/s |
+
+Reading: the engine's per-plan overhead is negligible (mem rate flat
+~635–903 K/s across sizes). The durable plan has a ~0.87 ms floor at size 1
+(open + serialize + one fsync) that amortizes away — wal rate climbs
+1.15 K/s → 195 K/s, and at size 1000 the durable plan (5.37 ms) costs only
+~3.5× the in-memory plan (1.55 ms). Batching the WAL write per plan (#164)
+is what makes this curve flat-ish instead of fsync-per-statement.
+
+**Spike kNN distribution re-quote** (`spike_knn_dim64`, dim-64, k=10 —
+same run as above; rows/s = rows scanned per second):
+
+| rows | mean | p50 | p95 | p99 | max | rows/s |
+|-----:|------|-----|-----|-----|-----|-------:|
+| 10 000 | 1.929 ms | 1.848 ms | 2.297 ms | 2.766 ms | 2.773 ms | 5.183 M/s |
+| 50 000 | 16.25 ms | 16.19 ms | 17.27 ms | 17.66 ms | 18.25 ms | 3.077 M/s |
+| 100 000 | 37.26 ms | 35.67 ms | 46.32 ms | 53.54 ms | 63.06 ms | 2.684 M/s |
+
+Attribution split at 100k (`spike_parts`): build 84.55 ms mean / 126.5 ms
+p99 (1.183 M rows/s), scan 14.92 ms mean / 22.29 ms p99 (6.701 M rows/s) —
+the tail sits in build + pipeline, not the scan loop. (These means sit below
+the #144 L3 medians quoted in the changelog — same box, lighter load at
+measure time. Quote the shape and the method, not the decimals.)
+
 ## Reproduce
 
 ```sh
@@ -245,9 +297,10 @@ python3 -m venv /tmp/bench-venv
   reproducible commands produce; release would be substantially faster, but
   then every reader would need the same `--release` flags to compare. State
   the build whenever quoting these numbers.
-- **Single-writer, in-memory engine.** Everything above is one process, one
-  writer, no persistence. Concurrent-writer and disk-backed numbers do not
-  exist yet in this phase — do not extrapolate them from this page.
+- **Single-writer engine.** Everything above is one process, one writer.
+  Disk-backed durable-plan numbers now exist (the §170 plan-size sweep —
+  single fsync per plan); concurrent-writer numbers do not exist yet in this
+  phase — do not extrapolate them from this page.
 
 ## Cross-implementation (nqlite-zig)
 
