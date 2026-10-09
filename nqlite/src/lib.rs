@@ -35,7 +35,8 @@ pub mod v4;
 
 pub use bm25::{tokenize, Bm25Index, B, K1};
 pub use engine::{
-    cosine_similarity, execute_plan, execute_statement, QueryKind, QueryResult, ScoredRecord,
+    cosine_similarity, execute_plan, execute_statement, IndexCache, QueryKind, QueryResult,
+    ScoredRecord,
 };
 pub use error::{Error, Result};
 #[cfg(feature = "hnsw")]
@@ -55,6 +56,9 @@ pub use nql_ir::*;
 #[derive(Debug)]
 pub struct Database {
     store: Store,
+    /// Memoized whole-table kNN vector index (issue #144, L2) — lazily
+    /// invalidated by the store's identity + `clock` (see [`engine::IndexCache`]).
+    index_cache: engine::IndexCache,
     /// Present when opened via [`Database::open`] — the persisted store file.
     file: Option<storage::StoreFile>,
 }
@@ -68,7 +72,11 @@ impl Default for Database {
 impl Database {
     /// Open a database over an existing (possibly non-empty) in-memory store.
     pub fn new(store: Store) -> Self {
-        Self { store, file: None }
+        Self {
+            store,
+            index_cache: engine::IndexCache::default(),
+            file: None,
+        }
     }
 
     /// Open (or create) a persistent database at `path` (e.g. `data.ndb`).
@@ -81,6 +89,7 @@ impl Database {
         let (store, _replayed) = file.load()?;
         Ok(Self {
             store,
+            index_cache: engine::IndexCache::default(),
             file: Some(file),
         })
     }
@@ -148,7 +157,7 @@ impl Database {
         if plan.iter().any(needs_history) {
             self.ensure_history()?;
         }
-        let results = execute_plan(&mut self.store, plan)?;
+        let results = execute_plan(&mut self.store, plan, Some(&mut self.index_cache))?;
         if let Some(file) = &mut self.file {
             let mut logged = false;
             for stmt in plan {
