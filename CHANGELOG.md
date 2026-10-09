@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes unchanged).
 
 ### Changed
+- **WAL append batched per plan — one fsync per `execute` (#164)** —
+  `Database::execute` no longer fsyncs once per mutating statement (N+1
+  syncs for an N-insert plan): the plan's mutating statements plus the
+  `ContextReset` marker are serialized first, then appended with **one
+  write + one fsync** (`StoreFile::append_batch`; `append` is now its
+  single-statement wrapper). Every frame is byte-identical to a
+  per-statement append (same crc32/len/payload layout — replay and the
+  torn-frame contract are unchanged), and a serialization failure now
+  leaves the WAL untouched instead of a durable statement prefix.
+  Measured (release, ext4, this box): 10k-insert plan **2.65–2.88 s →
+  0.08–0.09 s (≈32×)**; strace fsync count for a 1001-statement plan
+  **1002 → 1** for the plan itself (4 vs 1005 execute+flush — the +3 is
+  the unchanged checkpoint path). Probe:
+  `cargo run --release -p nqlite --example wal_fsync_probe`.
+  Gates: byte-identity unit test + workspace tests + experiments parity
+  57/57 ✓.
 - **k-capped exact kNN (#144, L3)** — on the kNN-only path (kNN present, no
   `::bm25`, order default or `::similarity`), `run_select` windows both the
   index search and the row build to `OFFSET + cap` candidates under the

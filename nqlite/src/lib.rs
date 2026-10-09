@@ -148,9 +148,11 @@ impl Database {
     /// create tables, insert records, relate edges, and query them in one
     /// pass. Execution is deterministic for a given input plan + store.
     ///
-    /// For a persistent database, every mutating statement is appended to the
-    /// WAL (fsync'd) before this returns, and an automatic checkpoint happens
-    /// once the WAL crosses `CHECKPOINT_THRESHOLD`.
+    /// For a persistent database, all of the plan's mutating statements are
+    /// appended to the WAL and fsynced **once per plan** before this returns
+    /// (issue #164; `spec/file-format.md` §2: one `execute` call = one
+    /// transaction), and an automatic checkpoint happens once the WAL
+    /// crosses `CHECKPOINT_THRESHOLD`.
     pub fn execute(&mut self, plan: &[Statement]) -> Result<Vec<QueryResult>> {
         // Lazy history (issue #133): temporal statements claim the history
         // tail's decode once per session; current-state queries skip it.
@@ -159,20 +161,20 @@ impl Database {
         }
         let results = execute_plan(&mut self.store, plan, Some(&mut self.index_cache))?;
         if let Some(file) = &mut self.file {
-            let mut logged = false;
-            for stmt in plan {
-                if is_mutating(stmt) {
-                    file.append(stmt)?;
-                    logged = true;
-                }
-            }
-            if logged {
+            // One write + fsync per plan (issue #164 — the granularity
+            // `spec/file-format.md` §2 already specifies): collect the
+            // mutating statements, add the plan-boundary marker, and append
+            // the whole batch in a single durable write.
+            let mut batch: Vec<&Statement> = plan.iter().filter(|s| is_mutating(s)).collect();
+            if !batch.is_empty() {
                 // Plan-boundary marker (issue #109): replay must reset the
                 // memory context exactly where the runtime did — every plan
                 // starts at the root (spec §2.8), and a plan that ends inside
                 // a MEMORY block would otherwise leak its context into every
                 // later frame during WAL replay.
-                file.append(&Statement::ContextReset)?;
+                let context_reset = Statement::ContextReset;
+                batch.push(&context_reset);
+                file.append_batch(&batch)?;
             }
         }
         // Threshold checkpoint, decided AFTER the appends (wal_len must
