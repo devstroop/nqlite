@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Seeded crash-point sweep for WAL/replay (#165)** — `nqlite/tests/
+  crash_sweep.rs`: seeded plans (inserts/relates/forgets/selects/prunes
+  over small tables) run lockstep durable-vs-shadow, with sandbox crash
+  probes on every plan (WAL truncation at seeded offsets incl. both batch
+  edges, lost-rename after flush). Oracles: result/store lockstep,
+  complete-prefix recovery by from-scratch re-execution, select digests
+  across clean reopens. Fixed seeds in CI (<1 s); `NQL_CRASH_SEED` /
+  `NQL_CRASH_PLANS` + `--ignored` drive the nightly random sweep (seed
+  printed, replay instructions in the module docs). Caught a genuine bug
+  on its first run (below).
 - **Bench percentiles + plan-size sweep (#170)** — criterion's console
   output led with mean/median only; `scripts/bench-percentiles.py` now
   reports p50/p95/p99/max + ops/s as a pure function of its JSON
@@ -304,6 +314,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   means embeddings-as-first-class-data, not engine intelligence.
 
 ### Deprecated / Removed / Fixed / Security
+- Fixed: `PRUNE HISTORY` replayed from the WAL after a checkpoint no longer
+  compacts WAL-era-only history — replay claims the lazy file-era tail
+  before a prune frame (the same gate `Database::execute` performs via
+  `needs_history`), so the retention horizon, declaration retention, and
+  `HISTORY SINCE` deltas hold across crash recovery exactly as on the live
+  path. Without this, a prune surviving only in un-checkpointed WAL kept
+  the pre-prune prefix alive: `AS OF` below the snapshot succeeded instead
+  of `HistoryPruned`, and the growth bound was defeated for the cycle.
+  Found by the #165 sweep (spec `file-format.md` §2 documents the claim).
+  ([#165](https://github.com/devstroop/nqlite/issues/165))
 - Removed dead `tracing` dependency.
 - Fixed: `::bm25` now reachable from the grammar (`WHERE ::bm25(...)`), MATCH
   edge-property filters, and vote-score colon mismatch (above).

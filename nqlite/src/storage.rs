@@ -362,6 +362,25 @@ impl StoreFile {
                     // means a corrupt frame — treat it as torn. Memory
                     // statements carry the context switch so MEMORY scoping
                     // survives reopen.
+                    //
+                    // Compaction must see the FULL log (issue #165): the
+                    // file-era history tail is still lazy at this point, and
+                    // pruning against WAL-era-only history would neither
+                    // retain the `CreateTable` declarations nor establish the
+                    // retention horizon — the file-era prefix would survive a
+                    // prune it postdates (resurrected `HISTORY SINCE` deltas,
+                    // a weakened `HistoryPruned` horizon, unbounded growth).
+                    // Claim the tail first: the same gate
+                    // `Database::execute` performs via `needs_history`
+                    // (temporal reads never appear in the WAL — only
+                    // `PruneHistory` can reach this arm).
+                    if matches!(stmt, Statement::PruneHistory) {
+                        if let Some((offset, len)) = self.hist_range.take() {
+                            let mut file_era = self.read_history(offset, len)?;
+                            file_era.append(&mut store.history);
+                            store.history = file_era;
+                        }
+                    }
                     let _ =
                         crate::engine::execute_in_context(store, &stmt, &mut current_memory, None);
                     replayed.push(stmt);
