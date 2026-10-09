@@ -68,7 +68,10 @@ frame  : crc32 = u32 LE, len = u32 LE, payload = len bytes of postcard(Statement
   `fsync`ed after each batch (one `execute` call = one transaction).
 - On open, the WAL is replayed in order against the loaded store. Replay stops
   at the first frame whose `len` is out of bounds or whose CRC32 mismatches —
-  that is a torn/crash frame; the WAL is truncated there.
+  that is a torn/crash frame; the WAL is truncated there. Before executing a
+  `PRUNE HISTORY` frame, replay claims the lazy file-era history tail, so
+  compaction sees the full log (retention horizon and declaration retention
+  hold across crash recovery exactly as on the live path).
 - A `Statement` that is not mutating (Select) is never logged.
 
 ## 3. Checkpoint
