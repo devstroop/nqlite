@@ -169,10 +169,13 @@ release ladder — full numbers and method on issue #115):
   touch; ~0.54 s CLI end-to-end). The store file splits 31.5 MB core / 31.0 MB
   history tail: current-state queries decode only the core, and the first
   temporal read pays the deferred tail once per session. (Was ~0.7 s load /
-  ~0.875 s CLI before #133.) The "milliseconds" wording stays **retired**:
-  exact-scan queries floor at 75–140 ms @100K — sub-10 ms needs the ANN path
-  (#96's gate). (E08's earlier "1.8 s" figure included ~0.9 s of harness-side
-  output parsing, not engine time.)
+  ~0.875 s CLI before #133.) The "milliseconds" wording stays **retired**,
+  and the exact-scan floor itself moved: after the #144 L1→L3 stream
+  (borrow candidates → memoized index → k-capped windowed search, behind
+  the spec §2.3 output-cap invariant) a k=10 exact kNN @100K measures
+  **52 ms under load / ≈40–45 ms idle** (release build; was 75–140 ms).
+  Sub-10 ms still needs the ANN path (#96's gate). (E08's earlier "1.8 s"
+  figure included ~0.9 s of harness-side output parsing, not engine time.)
 - **kNN recall@10 >= 0.95**: met at 5k rows (**0.96**, CI gate in #114);
   degrades at 50k (0.81) with default params — sweep flags exist; the gate
   pins the 5k target.

@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes unchanged).
 
 ### Changed
+- **k-capped exact kNN (#144, L3)** — on the kNN-only path (kNN present, no
+  `::bm25`, order default or `::similarity`), `run_select` windows both the
+  index search and the row build to `OFFSET + cap` candidates under the
+  **spec §2.3 output-cap invariant** (merged spec-first as #162): the
+  window is the top-`need` embedded rows ∪ the first `need` non-embedded
+  by id (their `0.0` fallback competes — it can outrank negative
+  similarities), then the shared order/drain/truncate tail — byte-
+  identical, pinned by a negative-sim + zero-norm + non-embedded
+  interleaving test. `BruteForceVectorIndex::search` ranks over borrowed
+  ids (clones only the ≤k survivors — was one string alloc per vector,
+  100k per query) and picks small windows with `select_nth_unstable` under
+  the total order (score desc, id asc ⇒ unique prefix; window < n/8).
+  Hybrid/BM25, score-based and structural orders keep the full path.
+  Spike bench (dim-64, k=10, box under load ≈27): 10k 15.1→**3.3 ms**,
+  50k 76.0→**25.9 ms**, **100k 158.9→52.5 ms (−67%)** — idle projection
+  ≈40–45 ms @100k (stream total: 357→…→~40; the 75–140 ms floor story in
+  `docs/decisions.md` / `docs/benchmarks.md` updated). Gates:
+  `exact_parity` + workspace tests + experiments parity 57/57 + hnsw ✓.
 - **kNN index memoized per store-version (#144, L2)** — `run_select` no
   longer rebuilds the brute-force vector index (embedding re-clone + BTree
   inserts) on every kNN query: the whole-table build now lives in an

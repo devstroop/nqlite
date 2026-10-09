@@ -330,7 +330,9 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 /// rebuilt from the filtered candidates on every call. Either way the
 /// result stays a pure, deterministic function of `(store, select)`.
 /// Candidates borrow the store's records end-to-end; only the ≤limit rows
-/// that survive ordering are cloned (issue #144, L1). A temporal read
+/// that survive ordering are cloned (issue #144, L1). On the kNN-only path
+/// (spec §2.3 output-cap invariant) the search and row build are windowed
+/// to `OFFSET + cap` candidates (issue #144, L3). A temporal read
 /// whose cutoff predates the store's history snapshot returns
 /// [`Error::HistoryPruned`] (issue #95).
 fn run_select(
@@ -381,32 +383,56 @@ fn run_select(
         return Ok(vec![count_row(&sel.table, candidates.len() as u64)]);
     }
 
+    // The index (memoized or rebuilt) is acquired once — both the windowed
+    // kNN-only path and the full path rank through it (issue #144, L2/L3).
+    let fallback;
+    let index: Option<&dyn VectorIndex> = match sel.knn.as_ref() {
+        Some(_) => Some(match cache {
+            Some(memo) => {
+                memo.get_or_build(target, &sel.table, || build_default_index(&candidates))
+            }
+            None => {
+                fallback = build_default_index(&candidates);
+                &*fallback
+            }
+        }),
+        None => None,
+    };
+
+    // kNN-only window (spec §2.3 output-cap invariant, issue #144, L3): when
+    // the query ranks by the mode's own score — kNN without `::bm25`, order
+    // default or `::similarity` — only the top `OFFSET + cap` candidates can
+    // ever be observed, so the search and the row build are windowed to that
+    // size. Every other case (score-based/structural orders, bm25/hybrid)
+    // ranks ALL rows and keeps the full path below, byte-identical to before.
+    let window: Option<usize> = if sel.knn.is_some()
+        && !matches!(sel.filter.as_ref(), Some(Filter::Bm25 { .. }))
+        && matches!(sel.order.as_ref(), None | Some(Order::Similarity))
+    {
+        Some(
+            sel.offset
+                .unwrap_or(0)
+                .saturating_add(effective_limit(sel).unwrap_or(0)),
+        )
+    } else {
+        None
+    };
+
     // Rank every embedded candidate against the query through the index.
     // Non-embedded records are absent from the index and fall back to a
     // similarity of `0.0`, exactly as the inline scan did. On a memo hit
     // the cached whole-table index IS what a rebuild would produce (same
     // records → same BTree contents → identical search output), so rows
-    // are bit-identical either way (issue #144, L2).
-    let knn_sims: Option<BTreeMap<RecordId, f32>> = match sel.knn.as_ref() {
-        Some(knn) => {
-            let fallback;
-            let index: &dyn VectorIndex = match cache {
-                Some(memo) => {
-                    memo.get_or_build(target, &sel.table, || build_default_index(&candidates))
-                }
-                None => {
-                    fallback = build_default_index(&candidates);
-                    &*fallback
-                }
-            };
-            Some(
-                index
-                    .search(&knn.query, candidates.len())
-                    .into_iter()
-                    .collect(),
-            )
-        }
-        None => None,
+    // are bit-identical either way (issue #144, L2). Windowed on the
+    // kNN-only path, full corpus otherwise (hybrid's RRF ranks everything).
+    let knn_sims: Option<BTreeMap<RecordId, f32>> = match (&sel.knn, &index) {
+        (Some(knn), Some(index)) => Some(
+            index
+                .search(&knn.query, window.unwrap_or(candidates.len()))
+                .into_iter()
+                .collect(),
+        ),
+        _ => None,
     };
 
     // A `Filter::Bm25` turns the SELECT into lexical retrieval: build one
@@ -471,20 +497,47 @@ fn run_select(
         _ => None,
     };
 
-    let mut rows: Vec<ScoredRef> = candidates
-        .into_iter()
-        .map(|record| {
-            let score = compute_score(
-                target,
-                sel,
-                record,
-                knn_sims.as_ref(),
-                bm25.as_ref(),
-                hybrid.as_ref(),
-            );
-            ScoredRef { record, score }
-        })
-        .collect();
+    let mut rows: Vec<ScoredRef> = match window {
+        // Windowed build (spec §2.3 output-cap invariant): the observable
+        // rows are exactly the top-`need` embedded (present in the windowed
+        // sims map) plus the first `need` non-embedded by id (score `0.0` —
+        // their fallback can outrank negative similarities, so they compete
+        // for the window too). Every true-window row is in that pool: an
+        // embedded row outside the index's top-`need` has ≥`need` embedded
+        // rows ahead of it, and a non-embedded row beyond the first `need`
+        // by id already has `need` equal-score rows ahead of it.
+        Some(need) => {
+            let mut rows = Vec::with_capacity(need.saturating_mul(2).min(candidates.len()));
+            let mut nonemb = 0usize;
+            for &record in &candidates {
+                if record.embedding.is_some() {
+                    if let Some(&score) = knn_sims.as_ref().and_then(|m| m.get(&record.id)) {
+                        rows.push(ScoredRef { record, score });
+                    }
+                } else if nonemb < need {
+                    rows.push(ScoredRef { record, score: 0.0 });
+                    nonemb += 1;
+                }
+            }
+            rows
+        }
+        // Full path: score every candidate (hybrid/BM25/order arms below
+        // keep their all-rows semantics — unchanged).
+        None => candidates
+            .into_iter()
+            .map(|record| {
+                let score = compute_score(
+                    target,
+                    sel,
+                    record,
+                    knn_sims.as_ref(),
+                    bm25.as_ref(),
+                    hybrid.as_ref(),
+                );
+                ScoredRef { record, score }
+            })
+            .collect(),
+    };
 
     // `ORDER BY <field>` typo guard (issue #117): if this query returns rows
     // but NO record of the table carries the key, the sort would be silently
@@ -1571,6 +1624,65 @@ mod tests {
         // Back at root: the memory insert must not have bled through.
         let root_again = db.execute(&[knn_select(None)]).unwrap();
         assert_eq!(root_again[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn knn_window_matches_total_order_with_negatives_and_gaps() {
+        // Spec §2.3 output-cap invariant (issue #144, L3): the windowed
+        // kNN-only path returns exactly the top OFFSET+cap rows under
+        // (similarity desc, id asc) — including the 0.0 rows (non-embedded
+        // AND zero-norm embeddings) that outrank negative similarities, and
+        // with id tie-breaks interleaving embedded and non-embedded rows.
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(1)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("v".into(), num(1))]),
+                Some(vec![-1.0]),
+            )),
+            Statement::Insert(record("t:2", BTreeMap::from([("v".into(), num(2))]), None)),
+            Statement::Insert(record(
+                "t:3",
+                BTreeMap::from([("v".into(), num(3))]),
+                Some(vec![0.0]),
+            )),
+            Statement::Insert(record(
+                "t:4",
+                BTreeMap::from([("v".into(), num(4))]),
+                Some(vec![1.0]),
+            )),
+            Statement::Insert(record("t:5", BTreeMap::from([("v".into(), num(5))]), None)),
+        ])
+        .unwrap();
+        let knn = |k: usize, offset: Option<usize>| {
+            Statement::Select(Select {
+                table: "t".into(),
+                knn: Some(Knn {
+                    query: vec![1.0],
+                    k,
+                }),
+                offset,
+                ..Select::default()
+            })
+        };
+
+        // Total order over query [1.0]: t:4 (1.0), then the 0.0 tie — t:2
+        // (non-emb), t:3 (zero-norm), t:5 (non-emb) by id — then t:1 (−1.0).
+        // k=2: window = top-2 embedded (t:4, t:3) ∪ first-2 non-emb (t:2,
+        // t:5) → sorted → [t:4, t:2] (t:2 wins the 0.0 tie by id).
+        let r = db.execute(&[knn(2, None)]).unwrap();
+        let ids: Vec<String> = r[0].rows.iter().map(|x| x.record.id.to_string()).collect();
+        assert_eq!(ids, ["t:4", "t:2"]);
+        assert_eq!(r[0].rows[0].score, 1.0);
+        assert_eq!(r[0].rows[1].score, 0.0);
+
+        // k=1 + OFFSET 1: window = top-1 embedded (t:4) ∪ first-1 non-emb
+        // (t:2) → [t:4, t:2] → drain(1) → [t:2] (cap 1).
+        let r = db.execute(&[knn(1, Some(1))]).unwrap();
+        let ids: Vec<String> = r[0].rows.iter().map(|x| x.record.id.to_string()).collect();
+        assert_eq!(ids, ["t:2"]);
+        assert_eq!(r[0].rows[0].score, 0.0);
     }
 
     #[test]
