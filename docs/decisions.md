@@ -173,7 +173,8 @@ release ladder — full numbers and method on issue #115):
   and the exact-scan floor itself moved: after the #144 L1→L3 stream
   (borrow candidates → memoized index → k-capped windowed search, behind
   the spec §2.3 output-cap invariant) a k=10 exact kNN @100K measures
-  **52 ms under load / ≈40–45 ms idle** (release build; was 75–140 ms).
+  **35.6 ms idle-box mean (39.0 ms p99) / ~52 ms under load** (release
+  build; was 75–140 ms).
   Sub-10 ms still needs the ANN path (#96's gate). (E08's earlier "1.8 s"
   figure included ~0.9 s of harness-side output parsing, not engine time.)
 - **kNN recall@10 >= 0.95**: met at 5k rows (**0.96**, CI gate in #114);

@@ -282,7 +282,8 @@ micro-benchmarks: `cargo bench -p nqlite`).
 
 Headline (reference box, release build): **100K-record reopen ≈ 0.26 s**
 (core-only lazy load; ≈ 0.54 s CLI end-to-end), ingest 100K in **3.74 s**
-in-process, exact-scan queries floor at 75–140 ms @100K — sub-10 ms needs the
+in-process, exact kNN queries ≈ 36 ms @100K idle mean (39 ms p99; ~52 ms
+under load) — sub-10 ms needs the
 feature-gated ANN path (recall@10 ≥ 0.95 CI gate at 5k rows). Cross-DB
 quality matrix (sqlite-vec / LanceDB / Chroma): [scripts/bench-compare/](scripts/bench-compare/).
 

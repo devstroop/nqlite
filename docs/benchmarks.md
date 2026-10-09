@@ -242,19 +242,23 @@ Reading: the engine's per-plan overhead is negligible (mem rate flat
 is what makes this curve flat-ish instead of fsync-per-statement.
 
 **Spike kNN distribution re-quote** (`spike_knn_dim64`, dim-64, k=10 —
-same run as above; rows/s = rows scanned per second):
+idle-box run, loadavg ~4 on 24 cores, 2026-10-09; rows/s = rows scanned per
+second). This is the clean re-measure the #144 stream owed: 100k lands at
+**35.6 ms mean / 39.0 ms p99**, inside the sign-off's 35–40 ms target
+(stream total 357 → ~36 ms, ~10×, determinism contract untouched):
 
 | rows | mean | p50 | p95 | p99 | max | rows/s |
 |-----:|------|-----|-----|-----|-----|-------:|
-| 10 000 | 1.929 ms | 1.848 ms | 2.297 ms | 2.766 ms | 2.773 ms | 5.183 M/s |
-| 50 000 | 16.25 ms | 16.19 ms | 17.27 ms | 17.66 ms | 18.25 ms | 3.077 M/s |
-| 100 000 | 37.26 ms | 35.67 ms | 46.32 ms | 53.54 ms | 63.06 ms | 2.684 M/s |
+| 10 000 | 1.776 ms | 1.759 ms | 1.921 ms | 2.121 ms | 2.146 ms | 5.630 M/s |
+| 50 000 | 15.78 ms | 15.47 ms | 17.54 ms | 24.44 ms | 24.59 ms | 3.168 M/s |
+| 100 000 | 35.64 ms | 35.18 ms | 37.79 ms | 38.96 ms | 63.61 ms | 2.806 M/s |
 
-Attribution split at 100k (`spike_parts`): build 84.55 ms mean / 126.5 ms
-p99 (1.183 M rows/s), scan 14.92 ms mean / 22.29 ms p99 (6.701 M rows/s) —
-the tail sits in build + pipeline, not the scan loop. (These means sit below
-the #144 L3 medians quoted in the changelog — same box, lighter load at
-measure time. Quote the shape and the method, not the decimals.)
+Attribution split at 100k (`spike_parts`, same idle run): build 83.04 ms
+mean / 123.1 ms p99 (1.204 M rows/s), scan 14.13 ms mean / 15.75 ms p99
+(7.076 M rows/s) — the tail sits in build + pipeline, not the scan loop.
+(An earlier same-day run under heavier load read 37.26 ms mean / 53.54 ms
+p99 @100k — same shape, load-shifted. Quote the shape and the method, not
+the decimals.)
 
 ## Reproduce
 
@@ -284,11 +288,11 @@ python3 -m venv /tmp/bench-venv
 - **kNN is an exact brute-force scan by default — no ANN index.** After the
   #144 L1→L3 stream (borrow candidates → memoized index → k-capped windowed
   search, behind the spec §2.3 output-cap invariant), a single k=10 exact
-  kNN query costs **~52 ms @100k rows** on this box under load (≈40–45 ms
-  idle, release build) and ~3.3 ms @10k — exact, deterministic,
-  byte-identical output. ANN-backed stores (sqlite-vec/LanceDB/Chroma) still
-  win at larger scales; that is the trade for exactness. (The previous
-  "~140 ms @10k, 1–2 orders slower" claim predates the stream.) The upside
+  kNN query costs **35.6 ms @100k rows idle-box mean (39.0 ms p99; ~52 ms
+  under load)** and ~1.8 ms @10k — exact, deterministic, byte-identical
+  output. ANN-backed stores (sqlite-vec/LanceDB/Chroma) still win at larger
+  scales; that is the trade for exactness. (The previous "~140 ms @10k, 1–2
+  orders slower" claim predates the stream.) The upside
   is that the exact index is on by default and ANN (feature-gated HNSW) can
   be opted into — its
   recall@10 vs exact is now measured (0.96 at 5k rows, see **Recall** above)
