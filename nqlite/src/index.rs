@@ -68,9 +68,13 @@ pub trait VectorIndex: Send + Sync {
 ///
 /// Vectors are stored in a [`BTreeMap`] keyed by [`RecordId`], so iteration
 /// order is stable. `search` scores every vector with the shared
-/// [`cosine_similarity`], sorts by score descending (ties by `RecordId`
+/// [`cosine_similarity`], ranks by score descending (ties by `RecordId`
 /// ascending — the same total order the engine applies to query results),
-/// and truncates to `k`.
+/// and keeps the best `k`. Ranking borrows the ids and clones only the ≤k
+/// survivors; when `k < n/8` a windowed selection picks the top-k under
+/// that total order instead of sorting the whole corpus — the window is the
+/// prefix of the full sort, byte-identical (spec §2.3 output-cap invariant,
+/// issue #144, L3).
 #[derive(Debug, Clone, Default)]
 pub struct BruteForceVectorIndex {
     vectors: BTreeMap<RecordId, Vec<f32>>,
@@ -86,18 +90,36 @@ impl VectorIndex for BruteForceVectorIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Vec<(RecordId, f32)> {
-        let mut scored: Vec<(RecordId, f32)> = self
+        let k = k.min(self.vectors.len());
+        if k == 0 {
+            return Vec::new();
+        }
+        // Borrow while ranking: the old code cloned every RecordId (a string
+        // alloc per vector) before it knew which ones survived — 100k allocs
+        // per query (issue #144, L3).
+        let mut scored: Vec<(&RecordId, f32)> = self
             .vectors
             .iter()
-            .map(|(id, v)| (id.clone(), cosine_similarity(v, query)))
+            .map(|(id, v)| (id, cosine_similarity(v, query)))
             .collect();
-        scored.sort_by(|a, b| {
+        // Total order (score desc, RecordId asc): the sorted sequence is
+        // unique, so a windowed selection for small k yields exactly the
+        // prefix a full sort would (spec §2.3 output-cap invariant).
+        let rank = |a: &(&RecordId, f32), b: &(&RecordId, f32)| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+                .then_with(|| a.0.cmp(b.0))
+        };
+        if k < scored.len() / 8 {
+            scored.select_nth_unstable_by(k - 1, rank);
+            scored.truncate(k);
+        }
+        scored.sort_by(rank);
         scored.truncate(k);
         scored
+            .into_iter()
+            .map(|(id, score)| (id.clone(), score))
+            .collect()
     }
 
     fn len(&self) -> usize {

@@ -229,11 +229,16 @@ python3 -m venv /tmp/bench-venv
 
 ## Where nqlite is weak (honest)
 
-- **kNN is an exact brute-force scan by default — no ANN index.** At 10k rows
-  a single k=10 kNN query costs ~140 ms; that is the price of exact,
-  deterministic results, and it is 1–2 orders of magnitude slower than
-  sqlite-vec/LanceDB/Chroma on the same data. The upside is that the exact
-  index is on by default and ANN (feature-gated HNSW) can be opted into — its
+- **kNN is an exact brute-force scan by default — no ANN index.** After the
+  #144 L1→L3 stream (borrow candidates → memoized index → k-capped windowed
+  search, behind the spec §2.3 output-cap invariant), a single k=10 exact
+  kNN query costs **~52 ms @100k rows** on this box under load (≈40–45 ms
+  idle, release build) and ~3.3 ms @10k — exact, deterministic,
+  byte-identical output. ANN-backed stores (sqlite-vec/LanceDB/Chroma) still
+  win at larger scales; that is the trade for exactness. (The previous
+  "~140 ms @10k, 1–2 orders slower" claim predates the stream.) The upside
+  is that the exact index is on by default and ANN (feature-gated HNSW) can
+  be opted into — its
   recall@10 vs exact is now measured (0.96 at 5k rows, see **Recall** above)
   and gated by `cargo test -p nqlite --test recall --features hnsw`.
 - **These are dev-build numbers.** An unoptimized build is what the
