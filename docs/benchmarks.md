@@ -310,6 +310,72 @@ mean / 123.1 ms p99 (1.204 M rows/s), scan 14.13 ms mean / 15.75 ms p99
 p99 @100k — same shape, load-shifted. Quote the shape and the method, not
 the decimals.)
 
+## Predicate selectivity (issue #169)
+
+Do field predicates need a declared secondary index? Measured first (the
+issue's own rule): the `selectivity` group in `nqlite/benches/bench.rs`
+runs four predicates over 10k- and 100k-record stores — no filter (`star`),
+`name =` unique (1 match), `group = 3` (N/10), `group BETWEEN 8 AND 9`
+(2N/10) — each as a `count/*` twin (COUNT after the filter: scan + filter
+only, no materialization) and a `rows/*` twin (return every match: scan +
+filter + materialize). Matched counts are asserted at setup, so the
+recorded selectivities cannot drift silently.
+
+Method: release criterion harness, reference box, 2026-10-09 —
+
+```sh
+cargo bench -p nqlite --bench bench -- selectivity
+python3 scripts/bench-percentiles.py --markdown --filter selectivity
+```
+
+Every shape scans **all N rows** (full BTree walk in `run_select`) — the
+rows/s column is scan throughput, not match throughput. Matched counts:
+star = N, eq-unique = 1, eq-10pct = N/10, range-20pct = 2N/10.
+
+| shape @100k | matched | mean | p50 | p99 | scan rows/s |
+|---|---:|---:|---:|---:|---:|
+| `count/star` | 100 000 | 5.512 ms | 5.258 ms | 7.706 ms | 18.14 M/s |
+| `count/eq-unique` | 1 | 17.90 ms | 17.65 ms | 20.28 ms | 5.587 M/s |
+| `count/eq-10pct` | 10 000 | 16.27 ms | 15.98 ms | 22.69 ms | 6.146 M/s |
+| `count/range-20pct` | 20 000 | 16.05 ms | 15.78 ms | 20.37 ms | 6.232 M/s |
+| `rows/eq-unique` | 1 | 18.05 ms | 17.56 ms | 24.32 ms | 5.540 M/s |
+| `rows/eq-10pct` | 10 000 | 26.44 ms | 26.31 ms | 28.15 ms | 3.782 M/s |
+| `rows/range-20pct` | 20 000 | 36.85 ms | 36.35 ms | 42.63 ms | 2.714 M/s |
+| `rows/star` | 100 000 | 110.4 ms | 109.7 ms | 116.6 ms | 905.9 K/s |
+
+Same shapes @10k: count/star 193 µs · count/eq-unique 573 µs ·
+count/eq-10pct 462 µs · count/range-20pct 499 µs · rows/eq-unique 570 µs ·
+rows/eq-10pct 977 µs · rows/range-20pct 1.54 ms · rows/star 6.33 ms.
+
+**Reading:**
+
+1. **Flat in selectivity** — a predicate matching 1 row in 100 000 costs
+   the same as one matching 10 000 or 20 000 (16–18 ms). Latency is the
+   scan, never the matches.
+2. **Materialization ≈ 1.0 µs per matched row**, consistent across shapes
+   ((26.44−16.27)/10k, (36.85−16.05)/20k, (110.4−5.51)/100k ≈ 1.0–1.05 µs)
+   and zero for count-only reads.
+3. **The predicate costs ≈ 3× the unfiltered scan** (5.5 ms → 16–18 ms
+   @100k ≈ +110 ns/row): per-record body lookup + compare over heap-
+   indirect `BTreeMap` bodies — likely memory-bound, not compare-bound.
+4. **10× rows costs ~28–32× time** (10k → 100k) — the working set leaves
+   cache; expect this to keep worsening past 100k.
+5. **Context:** a unique-field lookup @100k (17.9 ms) is about half a kNN
+   query (35.6 ms, #144) — real, but not the worst line in the profile.
+
+**Decision (issue #169):** measured — real but **S3 at today's scale**
+(≤100k stores, interactive query rates): defer the build; the table above
+is the baseline that reopens it (hot selective lookups in a workload, or
+stores routinely past 100k). Shape when built, so the design half is
+settled now: **lazy, L2 pattern** — per-table field-predicate memo keyed
+by the `log_mutation` clock (rebuild on mismatch; no push-side
+invalidation seam to miss), **eq-only first** (the flat 16–18 ms line),
+`AS OF` replays and `MEMORY` sub-stores build their own, results
+byte-identical with vs without the index (the `exact_parity` digest gate,
+same as #144). Eager groove-style maintenance rejected for v4: the write
+path runs ~0.6–0.9 M inserts/s and would pay index upkeep on every
+Insert/Forget.
+
 ## Reproduce
 
 ```sh
