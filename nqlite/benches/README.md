@@ -18,6 +18,8 @@ given identical input, engine output is always identical.
 | `select_range`| `SELECT WHERE group = 3` (field-equality filter, ~N/10 matches) → QPS   | 1k, 10k |
 | `relate`      | N `RELATE` edges in one plan vs a fresh store → relates/sec             | 1k, 10k |
 | `plan_size`   | Plans of N `INSERT`s per `execute` (N = 1/10/100/1000), in-memory (`mem`) and persistent (`wal`, incl. the single per-plan fsync) → per-plan latency + per-statement rate (amortization curve) | 1, 10, 100, 1000 |
+| `selectivity` | Predicate sweep (issue #169): `count/*` (scan+filter) vs `rows/*` (+materialize) twins for star / eq-unique / eq-10% / range-20% → cost vs selectivity; rows scanned is always N | 10k, 100k |
+| `temporal_cold` / `temporal_warm` | `SELECT COUNT(*) AS OF max` over 10k/50k/100k-mutation history (issue #166): cold reopens per iteration, warm reuses the handle (snapshot ring) | 10k, 50k, 100k |
 
 ## Percentiles & throughput
 
@@ -41,8 +43,9 @@ cargo bench -p nqlite
 # a single group
 cargo bench -p nqlite -- 'knn_bf'
 
-# a quick smoke run (short warmup/measurement, small sample)
-cargo bench -p nqlite -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10
+# a quick smoke run (short warmup/measurement, small sample;
+# --bench bench skips the libtest pass, which rejects criterion flags)
+cargo bench -p nqlite --bench bench -- --warm-up-time 0.5 --measurement-time 1 --sample-size 10
 ```
 
 HTML reports land in `target/criterion/report/index.html` (enabled via the

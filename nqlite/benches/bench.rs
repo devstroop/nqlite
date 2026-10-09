@@ -15,6 +15,11 @@
 //!   store; reports queries/sec (QPS) and per-query latency.
 //! - `select_range` — repeated `SELECT` with `WHERE group = <const>` (field
 //!   equality filter, ~N/10 matches) over N records; reports QPS.
+//! - `selectivity` — predicate-selectivity sweep at 10k/100k (issue #169):
+//!   `count/*` (COUNT after the filter — scan + filter only) and `rows/*`
+//!   (return every match — scan + filter + materialize) twins for
+//!   star / eq-unique / eq-10% / range-20% predicates. Rows scanned is
+//!   always N (full BTree walk); the group isolates what matching costs.
 //! - `relate` — execute one plan of N `RELATE` edges; reports relates/sec.
 //! - `plan_size` — execute plans of 1/10/100/1000 `INSERT`s, in-memory
 //!   (`mem`, engine plan cost) and persistent (`wal`: fresh tempdir + open +
@@ -206,6 +211,97 @@ fn bench_relate(c: &mut Criterion) {
     group.finish();
 }
 
+/// Predicate-selectivity sweep (issue #169 — measure first).
+///
+/// Field predicates are a full scan: `run_select` walks `store.records` in
+/// BTree order and applies `matches_filter` per row, so **rows scanned = N
+/// for every shape** and only the matched count varies. Each predicate is
+/// measured as a `count/*` twin (COUNT(*) after the filter — scan + filter
+/// only, no row materialization) and a `rows/*` twin (return every match —
+/// scan + filter + materialize clones) at three selectivities (1 row, 10%,
+/// 20%) over two store sizes, so docs/benchmarks.md can split scan cost
+/// from materialization cost and say what an index would actually buy.
+///
+/// Match counts are asserted once per store at setup (deterministic
+/// corpus), so the recorded selectivities cannot drift silently.
+fn bench_selectivity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("selectivity");
+    for n in [10_000usize, 100_000] {
+        let mut db = seeded_db(n);
+        let cases: [(&str, Option<Filter>, usize); 4] = [
+            ("star", None, n),
+            (
+                "eq-unique",
+                Some(Filter::FieldEquals {
+                    field: "name".into(),
+                    value: Value::Str(format!("item-{}", n - 1)),
+                }),
+                1,
+            ),
+            (
+                "eq-10pct",
+                Some(Filter::FieldEquals {
+                    field: "group".into(),
+                    value: Value::Int(3),
+                }),
+                n / 10,
+            ),
+            (
+                "range-20pct",
+                Some(Filter::FieldBetween {
+                    field: "group".into(),
+                    lo: Value::Int(8),
+                    hi: Value::Int(9),
+                }),
+                2 * (n / 10),
+            ),
+        ];
+
+        // Pin the selectivities: the corpus is fixed, so every recorded
+        // matched-count must hold or the bench must not run.
+        for (label, filter, expected) in &cases {
+            let probe = Statement::Select(Select {
+                table: "item".into(),
+                filter: filter.clone(),
+                ..Select::default()
+            });
+            let probe = db
+                .execute(std::slice::from_ref(&probe))
+                .expect("selectivity probe");
+            assert_eq!(probe.len(), 1, "one result per SELECT");
+            assert_eq!(
+                probe[0].rows.len(),
+                *expected,
+                "selectivity/{label}/{n} matched"
+            );
+        }
+
+        for (label, filter, _expected) in &cases {
+            let rows_sel = Statement::Select(Select {
+                table: "item".into(),
+                filter: filter.clone(),
+                ..Select::default()
+            });
+            let count_sel = Statement::Select(Select {
+                table: "item".into(),
+                filter: filter.clone(),
+                aggregate: Some(Aggregate::CountStar),
+                ..Select::default()
+            });
+            // Throughput = rows scanned (always N — full walk), so ops/s
+            // converts directly to scans/s in the reporter.
+            group.throughput(Throughput::Elements(n as u64));
+            group.bench_function(format!("count/{label}/{n}"), |b| {
+                b.iter(|| db.execute(std::slice::from_ref(&count_sel)).expect("count"))
+            });
+            group.bench_function(format!("rows/{label}/{n}"), |b| {
+                b.iter(|| db.execute(std::slice::from_ref(&rows_sel)).expect("rows"))
+            });
+        }
+    }
+    group.finish();
+}
+
 /// Monotonic counter so concurrent `plan_wal` iterations never share a dir.
 static PLAN_WAL_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -356,6 +452,7 @@ criterion_group!(
     bench_select_range,
     bench_relate,
     bench_plan_size,
+    bench_selectivity,
     bench_temporal
 );
 criterion_main!(benches);
