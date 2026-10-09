@@ -379,23 +379,48 @@ impl StoreFile {
         Ok(replayed)
     }
 
-    /// Append one mutating statement to the WAL and fsync.
+    /// Append one statement to the WAL — the single-statement wrapper over
+    /// [`StoreFile::append_batch`] (tests and one-off writers).
     pub fn append(&mut self, stmt: &Statement) -> Result<()> {
-        let payload = postcard::to_allocvec(stmt)?;
-        let mut h = crc32fast::Hasher::new();
-        h.update(&(payload.len() as u32).to_le_bytes());
-        h.update(&payload);
-        let crc = h.finalize();
+        self.append_batch(&[stmt])
+    }
 
+    /// Append statements to the WAL with **one write and one fsync** (issue
+    /// #164). Every frame is byte-identical to a per-statement append (same
+    /// crc32/len/payload layout) — only the syscall count changes (N+1 syncs
+    /// → 1), which is exactly what `spec/file-format.md` §2 already
+    /// specifies: "the file is `fsync`ed after each batch (one `execute`
+    /// call = one transaction)".
+    ///
+    /// All payloads are serialized into a buffer **before** the file is
+    /// touched, so a serialization failure leaves the WAL unchanged (the
+    /// per-statement path could leave an earlier statement durable while
+    /// `execute` returned an error). Durability granularity is the batch:
+    /// `Database::execute` returns only after this fsync, and a crash mid-
+    /// batch leaves a complete frame prefix — replay consumes complete
+    /// frames only (torn-frame detection, spec §2).
+    pub fn append_batch(&mut self, stmts: &[&Statement]) -> Result<()> {
+        if stmts.is_empty() {
+            return Ok(());
+        }
+        let mut buf = Vec::new();
+        for stmt in stmts {
+            let payload = postcard::to_allocvec(stmt)?;
+            let mut h = crc32fast::Hasher::new();
+            h.update(&(payload.len() as u32).to_le_bytes());
+            h.update(&payload);
+            let crc = h.finalize();
+            buf.extend_from_slice(&crc.to_le_bytes());
+            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&payload);
+        }
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.wal)?;
-        f.write_all(&crc.to_le_bytes())?;
-        f.write_all(&(payload.len() as u32).to_le_bytes())?;
-        f.write_all(&payload)?;
+        f.write_all(&buf)?;
         f.sync_all()?;
-        self.wal_len += 8 + payload.len() as u64;
+        self.wal_len += buf.len() as u64;
         Ok(())
     }
 
@@ -558,6 +583,70 @@ mod tests {
         assert_eq!(loaded, store, "WAL replay reconstructs the store");
         assert_eq!(replayed.len(), 2, "both statements replayed");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_batch_writes_byte_identical_wal() {
+        // Issue #164: a per-plan batch must produce the exact bytes
+        // per-statement appends would (frame layout unchanged) — only the
+        // syscall count differs. Both WALs must replay to the same store.
+        let build = |s: &mut Store| -> Vec<Statement> {
+            let create = Statement::CreateTable {
+                table: "t".into(),
+                vector_dim: Some(2),
+            };
+            let insert = Statement::Insert(Record {
+                id: RecordId {
+                    table: "t".into(),
+                    id: Id::Num(1),
+                },
+                body: BTreeMap::from([("name".into(), Value::Str("alpha".into()))]),
+                embedding: Some(vec![0.5, 0.5]),
+                created_at: 0,
+            });
+            crate::engine::execute_statement(s, &create, None).unwrap();
+            crate::engine::execute_statement(s, &insert, None).unwrap();
+            vec![create, insert]
+        };
+
+        // (a) per-statement appends
+        let dir_a = temp_dir("batch-a");
+        let path_a = dir_a.join("db.ndb");
+        let mut store_a = Store::default();
+        let stmts_a = build(&mut store_a);
+        let mut sf_a = StoreFile::open(&path_a).unwrap();
+        for s in &stmts_a {
+            sf_a.append(s).unwrap();
+        }
+        let (wal_a, len_a) = (sf_a.wal.clone(), sf_a.wal_len);
+        drop(sf_a);
+
+        // (b) one batch
+        let dir_b = temp_dir("batch-b");
+        let path_b = dir_b.join("db.ndb");
+        let mut store_b = Store::default();
+        let stmts_b = build(&mut store_b);
+        let mut sf_b = StoreFile::open(&path_b).unwrap();
+        let refs: Vec<&Statement> = stmts_b.iter().collect();
+        sf_b.append_batch(&refs).unwrap();
+        let (wal_b, len_b) = (sf_b.wal.clone(), sf_b.wal_len);
+        drop(sf_b);
+
+        let bytes_a = fs::read(&wal_a).unwrap();
+        let bytes_b = fs::read(&wal_b).unwrap();
+        assert_eq!(
+            bytes_a, bytes_b,
+            "batch WAL = per-statement WAL, byte for byte"
+        );
+        assert_eq!(len_a, len_b, "wal_len accounting identical");
+
+        let (load_a, rep_a) = StoreFile::open(&path_a).unwrap().load().unwrap();
+        let (load_b, rep_b) = StoreFile::open(&path_b).unwrap().load().unwrap();
+        assert_eq!(load_a, load_b, "both WALs replay to the same store");
+        assert_eq!(rep_a.len(), 2, "per-statement replay: both statements");
+        assert_eq!(rep_b.len(), 2, "batch replay: both statements");
+        fs::remove_dir_all(&dir_a).ok();
+        fs::remove_dir_all(&dir_b).ok();
     }
 
     #[test]
