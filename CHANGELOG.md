@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Bounded `AS OF` replay: fast path + snapshot ring (#166)** — temporal
+  reads no longer replay from ts0 unconditionally: a cutoff at or past the
+  current clock returns the current state with zero replayed statements,
+  and time-travelling sessions keep an in-memory ring of history-stripped
+  store states (every 20k mutations, 2 retained) that replays start from.
+  Both are pure caches (results byte-identical either way; stored bytes,
+  history, and the §2.7 contract untouched — `HistoryPruned` semantics,
+  `HISTORY SINCE` deltas, and prune composition all preserved). Capture
+  costs ~5 µs amortized per mutation and starts on the second temporal
+  plan, so ingest-only and single-read sessions pay nothing. Deliberately
+  NOT built: a persisted snapshot sidecar — measured A/B showed
+  postcard-decoding persisted snapshots costs as much as the replay it
+  skips, while cold opens are open+tail dominated anyway. Same-load A/B
+  (warm, fat corpus): `AS OF max` ~220 ms vs `AS OF max-1` (full 100k
+  replay) ~275 ms. New `temporal_cold`/`temporal_warm` criterion groups +
+  `nqlite/tests/snapshots.rs` (prune/horizon/determinism end-to-end) and
+  engine `snapshot_tests` (ring mechanics, base-vs-full view equality
+  across prune/forget/future cutoffs); spec §2.7 notes the accelerators.
 - **Seeded crash-point sweep for WAL/replay (#165)** — `nqlite/tests/
   crash_sweep.rs`: seeded plans (inserts/relates/forgets/selects/prunes
   over small tables) run lockstep durable-vs-shadow, with sandbox crash
