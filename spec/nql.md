@@ -305,6 +305,13 @@ snapshot). Semantics:
   `AS OF` between two upserts of the same id sees the first version; `AS OF`
   before a `FORGET` sees the record again.
 - `AS OF` with a cutoff beyond the last mutation is the full current state.
+- **Replay accelerators, semantics-neutral (issue #166):** a cutoff at or
+  past the current clock returns the current state with zero replay, and
+  engines may start the replay from an in-memory snapshot base taken at an
+  earlier clock (history-stripped state the same history produced) instead
+  of the empty store. Both are pure caches over the replay above: results
+  are byte-identical with or without them, and they never touch stored
+  bytes, the history log, or this contract.
 - The timestamp is the **logical** mutation counter, not a wall-clock
   datetime; a datetime-literal form is future work.
 - **History compaction (`PRUNE HISTORY`, issue #95):** replaces the history

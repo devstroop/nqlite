@@ -20,6 +20,11 @@
 //!   (`mem`, engine plan cost) and persistent (`wal`: fresh tempdir + open +
 //!   execute, so the single per-plan fsync from #164 is in the measured
 //!   path); the amortization curve — per-plan latency vs per-statement rate.
+//! - `temporal_cold` / `temporal_warm` — `SELECT ... AS OF <max>` over stores
+//!   with 10k/50k/100k mutations of history (issue #166): cold reopens the
+//!   store per iteration (open + lazy-tail claim + full replay — the painful
+//!   path), warm reuses one handle (replay only). Slow groups: smoke with
+//!   `--sample-size 10` (see README).
 //!
 //! Run everything: `cargo bench -p nqlite`
 //! Run a subset:   `cargo bench -p nqlite -- 'knn_bf'`
@@ -28,7 +33,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use nql_ir::{Filter, Id, Knn, Record, RecordId, RelationEdge, Select, Statement, Store, Value};
+use nql_ir::{
+    Aggregate, Filter, Id, Knn, Record, RecordId, RelationEdge, Select, Statement, Store, Value,
+};
 use nqlite::Database;
 
 /// Fixed embedding dimension for all synthetic records.
@@ -252,12 +259,103 @@ fn bench_plan_size(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a persistent store with `n` mutations of history (issue #166
+/// microbench): chunked 1k-insert executes with a flush every 10 chunks —
+/// realistic accumulation with checkpoints, so open/replay costs match a
+/// lived-in store. Returns the dir (kept alive by the caller for the
+/// group) and the final clock (the recent-T cutoff: full-history replay).
+/// Mid-build one `AS OF` runs so the snapshot cache primes the way a real
+/// time-travelling session would (captures engage, final flush persists
+/// the sidecar) — cold opens measure the primed path.
+fn build_history_store(n: usize) -> (std::path::PathBuf, i64) {
+    let dir = std::env::temp_dir().join(format!("nqlite-temporal-{n}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temporal dir");
+    let path = dir.join("t.ndb");
+    let mut db = Database::open(&path).expect("open temporal store");
+    db.execute(&[Statement::CreateTable {
+        table: "item".into(),
+        vector_dim: Some(DIM),
+    }])
+    .expect("create table");
+    let mut rng = Rng::new(SEED);
+    let mut done = 0usize;
+    while done < n {
+        let take = (n - done).min(1000);
+        let mut plan = Vec::with_capacity(take);
+        for i in 0..take {
+            plan.push(insert_statement(&mut rng, done + i));
+        }
+        db.execute(&plan).expect("ingest chunk");
+        done += take;
+        if done % 10_000 == 0 {
+            db.flush().expect("checkpoint chunk");
+        }
+    }
+    db.flush().expect("final checkpoint");
+    let clock = db.store().clock;
+    drop(db);
+    (dir, clock)
+}
+
+/// Temporal replay microbench (issue #166): `SELECT COUNT(*) ... AS OF
+/// <max>` (recent T — the full-history worst case) over 10k/50k/100k-
+/// mutation stores. COUNT isolates replay cost (no row materialization).
+/// `cold/*` reopens per iteration (open + lazy-tail claim + replay — the
+/// first-read path); `warm/*` reuses one handle, so the second and later
+/// reads prime the in-session snapshot ring (recent-T replays ~nothing).
+fn bench_temporal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("temporal_cold");
+    for n in [10_000usize, 50_000, 100_000] {
+        let (dir, clock) = build_history_store(n);
+        let path = dir.join("t.ndb");
+        let select = Statement::Select(Select {
+            table: "item".into(),
+            as_of: Some(clock),
+            aggregate: Some(Aggregate::CountStar),
+            ..Select::default()
+        });
+        group.throughput(Throughput::Elements(n as u64 + 1));
+        group.bench_function(format!("asof-max/{n}"), |b| {
+            b.iter(|| {
+                let mut db = Database::open(&path).expect("reopen");
+                db.execute(std::slice::from_ref(&select)).expect("asof");
+            })
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("temporal_warm");
+    for n in [10_000usize, 50_000, 100_000] {
+        let (dir, clock) = build_history_store(n);
+        let path = dir.join("t.ndb");
+        let select = Statement::Select(Select {
+            table: "item".into(),
+            as_of: Some(clock),
+            aggregate: Some(Aggregate::CountStar),
+            ..Select::default()
+        });
+        let mut db = Database::open(&path).expect("open");
+        group.throughput(Throughput::Elements(n as u64 + 1));
+        group.bench_function(format!("asof-max/{n}"), |b| {
+            b.iter(|| {
+                db.execute(std::slice::from_ref(&select)).expect("asof");
+            })
+        });
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_ingest,
     bench_knn_bf,
     bench_select_range,
     bench_relate,
-    bench_plan_size
+    bench_plan_size,
+    bench_temporal
 );
 criterion_main!(benches);

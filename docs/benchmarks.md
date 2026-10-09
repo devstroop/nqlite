@@ -193,6 +193,56 @@ cd ../nqlite-experiments && EXP08_PROFILE=release EXP08_SIZES=1000,5000,20000,50
 | E08 `file_tier` cold-open @100k, WAL | **1338 ms** | ~1810 ms |
 | E08 `file_tier` cold-open @100k, ckpt | **1135 ms** | ~1810 ms |
 
+### Replay snapshots (issue #166)
+
+`AS OF T` used to replay the whole mutation log on every temporal read
+(`replay_as_of` from ts0 — O(history) per read). Two changes, both pure
+caches (results byte-identical either way):
+
+- **Recent-T fast path:** a cutoff at or past the current clock covers the
+  whole log, so the view *is* the current state — zero replayed statements.
+- **In-memory snapshot ring:** every `SNAPSHOT_EVERY` (20k) mutations (at
+  most 2 retained, history-stripped) in time-travelling sessions, so
+  in-session replays start from the newest base at or below the cutoff.
+  Only sessions that run `AS OF` pay capture (~100 ms clone per epoch on a
+  100k store, ~5 µs amortized per mutation); capture starts on the second
+  temporal plan, so single-read sessions pay nothing.
+
+What was deliberately NOT built: a persisted snapshot sidecar. Measured
+A/B (interleaved cold opens, same load): postcard-decoding persisted
+snapshots costs about as much as the replay it skips (both rebuild the
+same record maps), while cold opens are dominated by open + tail-claim
+anyway — net negative for a whole new file, so it stays out (same bar as
+#144's norm-cache ~0%).
+
+**Method:** `temporal_cold` (reopen per iteration: open + tail + replay +
+read) and `temporal_warm` (one handle: replay + read) criterion groups
+over 10k/50k/100k-mutation stores, `SELECT COUNT(*) ... AS OF <max>`
+(recent T — isolates replay; COUNT still materializes rows, so warm
+includes a ~200 ms @100k row-clone floor unrelated to replay):
+
+```sh
+cargo bench -p nqlite --bench bench -- 'temporal'
+python3 scripts/bench-percentiles.py --filter temporal
+```
+
+**Measured 2026-10-09, release criterion profile, reference box (shared VM
+— expect ±20–30% across runs; the A/B below is the load-proof comparison):**
+
+| rows | cold mean | warm mean |
+|-----:|----------:|----------:|
+| 10 000 | 46.3 ms | 18.2 ms |
+| 50 000 | 334.3 ms | 118.4 ms |
+| 100 000 | 805 ms | 300.3 ms |
+
+**Same-load A/B** (one warm handle, interleaved rounds, fat dim-8 corpus):
+`AS OF max` (fast path, 0 replayed) vs `AS OF max-1` (full 100k replay)
+→ **~220 ms vs ~275 ms**, i.e. the fast path removes the ~55 ms replay
+slice; the remainder is the COUNT row-materialization both paths share.
+Residual, by construction: cold opens still pay open + tail-claim (#133's
+domain); old-T cutoffs in sessions without in-epoch snapshots still pay
+full replay (bounded per base once the ring engages).
+
 File layout of the profiled store: 62 511 796 B total = **31 547 635 B core
 frame** + **30 964 137 B history tail**. `open` decodes only the core (records,
 edges, tables) — the history tail is claimed lazily and decoded on the first

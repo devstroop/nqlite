@@ -36,7 +36,7 @@ pub mod v4;
 pub use bm25::{tokenize, Bm25Index, B, K1};
 pub use engine::{
     cosine_similarity, execute_plan, execute_statement, IndexCache, QueryKind, QueryResult,
-    ScoredRecord,
+    ScoredRecord, SnapshotRing, SNAPSHOT_EVERY, SNAPSHOT_RING_CAP,
 };
 pub use error::{Error, Result};
 #[cfg(feature = "hnsw")]
@@ -59,6 +59,20 @@ pub struct Database {
     /// Memoized whole-table kNN vector index (issue #144, L2) — lazily
     /// invalidated by the store's identity + `clock` (see [`engine::IndexCache`]).
     index_cache: engine::IndexCache,
+    /// Replay-accelerator snapshots (issue #166): history-stripped store
+    /// states every [`SNAPSHOT_EVERY`] mutations (at most [`SNAPSHOT_RING_CAP`]
+    /// retained) that `AS OF` replay starts from instead of the empty store.
+    /// Pure cache — a miss only costs replay time, never bytes.
+    snap_ring: engine::SnapshotRing,
+    /// Clock of the newest captured snapshot (`None` = none yet).
+    last_snap_clock: Option<i64>,
+    /// Set once a plan with `AS OF` runs: only time-travelling sessions pay
+    /// snapshot capture — ingest-only sessions never do.
+    temporal_used: bool,
+    /// Count of `AS OF` plans this session: capture starts on the second
+    /// one, so single-read sessions pay no clone tax (their replay already
+    /// ran; the snapshot would serve nothing).
+    temporal_reads: u32,
     /// Present when opened via [`Database::open`] — the persisted store file.
     file: Option<storage::StoreFile>,
 }
@@ -75,6 +89,10 @@ impl Database {
         Self {
             store,
             index_cache: engine::IndexCache::default(),
+            snap_ring: engine::SnapshotRing::default(),
+            last_snap_clock: None,
+            temporal_used: false,
+            temporal_reads: 0,
             file: None,
         }
     }
@@ -90,6 +108,10 @@ impl Database {
         Ok(Self {
             store,
             index_cache: engine::IndexCache::default(),
+            snap_ring: engine::SnapshotRing::default(),
+            last_snap_clock: None,
+            temporal_used: false,
+            temporal_reads: 0,
             file: Some(file),
         })
     }
@@ -159,7 +181,20 @@ impl Database {
         if plan.iter().any(needs_history) {
             self.ensure_history()?;
         }
-        let results = execute_plan(&mut self.store, plan, Some(&mut self.index_cache))?;
+        // Replay snapshots (issue #166): the first `AS OF` plans of a
+        // session mark it time-travelling; capture starts on the second one
+        // (a single read's replay already ran — a snapshot would serve
+        // nothing yet).
+        if plan.iter().any(stmt_has_as_of) {
+            self.temporal_used = true;
+            self.temporal_reads += 1;
+        }
+        let results = execute_plan(
+            &mut self.store,
+            plan,
+            Some(&mut self.index_cache),
+            Some(&self.snap_ring),
+        )?;
         if let Some(file) = &mut self.file {
             // One write + fsync per plan (issue #164 — the granularity
             // `spec/file-format.md` §2 already specifies): collect the
@@ -190,7 +225,29 @@ impl Database {
                 file.checkpoint(&self.store)?;
             }
         }
+        // Snapshot capture (issue #166): at most one history-stripped clone
+        // per plan, only from the second temporal plan on (single-read
+        // sessions pay no clone tax), once the clock crossed another
+        // `SNAPSHOT_EVERY` epoch — O(1) amortized per mutation.
+        if self.temporal_used
+            && self.temporal_reads >= 2
+            && self.store.clock - self.last_snap_clock.unwrap_or(0) >= SNAPSHOT_EVERY
+        {
+            let clock = self.store.clock;
+            self.snap_ring.push(clock, &self.store);
+            self.last_snap_clock = Some(clock);
+        }
         Ok(results)
+    }
+}
+
+/// True when the plan carries an `AS OF` read (issue #166): only these plans
+/// can use replay snapshots, so only these sessions capture them.
+fn stmt_has_as_of(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(s) => s.as_of.is_some(),
+        Statement::Match(p) | Statement::MatchCount(p) | Statement::Closure(p) => p.as_of.is_some(),
+        _ => false,
     }
 }
 

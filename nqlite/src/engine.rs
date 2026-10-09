@@ -13,7 +13,7 @@
 //! feature but is never selected by the engine.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use nql_ir::{
     Aggregate, CmpOp, Filter, Id, MatchDirection, MatchPath, Order, Record, RecordId, RelationEdge,
@@ -105,13 +105,18 @@ pub fn execute_plan(
     store: &mut Store,
     plan: &[Statement],
     mut cache: Option<&mut IndexCache>,
+    snaps: Option<&SnapshotRing>,
 ) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
     let mut current_memory: Option<String> = None;
     for stmt in plan {
-        if let Some(res) =
-            execute_in_context(store, stmt, &mut current_memory, cache.as_deref_mut())?
-        {
+        if let Some(res) = execute_in_context(
+            store,
+            stmt,
+            &mut current_memory,
+            cache.as_deref_mut(),
+            snaps,
+        )? {
             results.push(res);
         }
     }
@@ -131,6 +136,7 @@ pub fn execute_in_context(
     stmt: &Statement,
     current_memory: &mut Option<String>,
     cache: Option<&mut IndexCache>,
+    snaps: Option<&SnapshotRing>,
 ) -> Result<Option<QueryResult>> {
     if let Statement::Memory { name } = stmt {
         store.memories.entry(name.clone()).or_default();
@@ -150,19 +156,24 @@ pub fn execute_in_context(
             // Sub-stores never share the root's memo (issue #144, L2): they
             // live in a `BTreeMap` whose values can move, and they are
             // different stores — pass `None` and keep building per query.
-            execute_statement(memory, stmt, None)
+            // Same rule for replay snapshots (issue #166): a root snapshot
+            // is the wrong base for a memory replay — memories keep full
+            // replay until per-memory rings exist.
+            execute_statement(memory, stmt, None, None)
         }
-        None => execute_statement(store, stmt, cache),
+        None => execute_statement(store, stmt, cache, snaps),
     }
 }
 
 /// Execute a single [`Statement`] against `store`, mutating it for DDL/DML and
 /// returning a [`QueryResult`] for `SELECT`s (`None` otherwise). `cache` is
-/// the optional kNN index memo (issue #144, L2) — see [`execute_plan`].
+/// the optional kNN index memo (issue #144, L2) — see [`execute_plan`];
+/// `snaps` is the optional replay-snapshot ring (issue #166).
 pub fn execute_statement(
     store: &mut Store,
     stmt: &Statement,
     cache: Option<&mut IndexCache>,
+    snaps: Option<&SnapshotRing>,
 ) -> Result<Option<QueryResult>> {
     match stmt {
         Statement::Memory { name } => Err(Error::MemoryWithoutContext { name: name.clone() }),
@@ -253,14 +264,14 @@ pub fn execute_statement(
             Ok(None)
         }
         Statement::Select(sel) => {
-            let rows = run_select(store, sel, cache)?;
+            let rows = run_select(store, sel, cache, snaps)?;
             Ok(Some(QueryResult {
                 kind: QueryKind::Select(sel.clone()),
                 rows,
             }))
         }
         Statement::Match(path) => {
-            let target = temporal_target(store, path.as_of)?;
+            let target = temporal_target(store, path.as_of, snaps)?;
             let rows = run_match(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
@@ -271,7 +282,7 @@ pub fn execute_statement(
             // Walk-count mode (issue #94): one `{"count": n}` row; the query
             // kind stays `Match` so transports label the result unchanged.
             let table = path.start.table.clone();
-            let target = temporal_target(store, path.as_of)?;
+            let target = temporal_target(store, path.as_of, snaps)?;
             let n = run_match_count(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Match(path.clone()),
@@ -279,7 +290,7 @@ pub fn execute_statement(
             }))
         }
         Statement::Closure(path) => {
-            let target = temporal_target(store, path.as_of)?;
+            let target = temporal_target(store, path.as_of, snaps)?;
             let rows = run_closure(&target, path);
             Ok(Some(QueryResult {
                 kind: QueryKind::Closure(path.clone()),
@@ -294,9 +305,13 @@ pub fn execute_statement(
 /// `SELECT ... AS OF` uses — or the current store otherwise. `MATCH`,
 /// `MATCH ... COUNT`, and `CLOSURE` all go through here, so a historical
 /// traversal sees exactly the records and edges that existed at the cutoff.
-fn temporal_target(store: &Store, as_of: Option<i64>) -> Result<Cow<'_, Store>> {
+fn temporal_target<'a>(
+    store: &'a Store,
+    as_of: Option<i64>,
+    snaps: Option<&SnapshotRing>,
+) -> Result<Cow<'a, Store>> {
     match as_of {
-        Some(cutoff) => Ok(Cow::Owned(replay_as_of(store, cutoff)?)),
+        Some(cutoff) => Ok(Cow::Owned(replay_as_of(store, cutoff, snaps)?)),
         None => Ok(Cow::Borrowed(store)),
     }
 }
@@ -339,6 +354,7 @@ fn run_select(
     store: &Store,
     sel: &Select,
     cache: Option<&mut IndexCache>,
+    snaps: Option<&SnapshotRing>,
 ) -> Result<Vec<ScoredRecord>> {
     // Temporal read (`AS OF T`): replay the mutation history up to the
     // cutoff into a fresh store and query THAT — the historical view is a
@@ -346,7 +362,7 @@ fn run_select(
     let replay_store;
     let target = match sel.as_of {
         Some(cutoff) => {
-            replay_store = replay_as_of(store, cutoff)?;
+            replay_store = replay_as_of(store, cutoff, snaps)?;
             &replay_store
         }
         None => store,
@@ -608,7 +624,7 @@ fn compaction_horizon(store: &Store) -> Option<i64> {
         .find_map(|(ts, stmt)| matches!(stmt, Statement::Snapshot(_)).then_some(*ts))
 }
 
-fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
+fn replay_as_of(store: &Store, cutoff: i64, snaps: Option<&SnapshotRing>) -> Result<Store> {
     // Compacted history (issue #95): a cutoff before the snapshot cannot be
     // reconstructed — the pruned prefix is gone. Fail loudly rather than
     // returning a partial (declarations-only) view.
@@ -619,15 +635,34 @@ fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
             });
         }
     }
-    let mut view = Store::default();
+    // Recent-T fast path (issue #166): a cutoff at or past the current clock
+    // covers the whole log, so the view IS the current state — return it
+    // without replaying a single statement. Exact by construction (the live
+    // store is the full replay result); callers only ever read the view.
+    if cutoff >= store.clock {
+        return Ok(store.clone());
+    }
+    // Replay accelerator (issue #166): start from the newest snapshot base
+    // at or below the cutoff instead of the empty store. The base IS the
+    // state replaying `1..=base_clock` produces (captured live, never
+    // edited), so applying `(base_clock..cutoff]` yields exactly the
+    // from-scratch view with fewer statements executed. `None`/miss keeps
+    // the previous full replay.
+    let (mut view, floor) = match snaps.and_then(|r| r.select(cutoff)) {
+        Some((base_clock, base)) => (base.clone(), base_clock),
+        None => (Store::default(), 0),
+    };
     for (ts, stmt) in &store.history {
         if *ts > cutoff {
             break;
         }
+        if *ts <= floor {
+            continue;
+        }
         // Replay is total on a valid store (mutating statements cannot fail
         // once their preconditions were met); a failure here would mean a
         // corrupt history, so panic loudly rather than silently truncate.
-        let _ = execute_statement(&mut view, stmt, None).expect("history replay is total");
+        let _ = execute_statement(&mut view, stmt, None, None).expect("history replay is total");
     }
     Ok(view)
 }
@@ -1069,6 +1104,77 @@ fn build_default_index(records: &[&Record]) -> Box<dyn VectorIndex> {
         }
     }
     Box::new(index)
+}
+
+/// Mutations between persisted replay snapshots (issue #166): the ring
+/// holds postcard-cheap history-stripped clones, so worst-case replay is
+/// bounded by this instead of the full history length. Tuned against the
+/// temporal microbench (`temporal_cold`/`temporal_warm` in benches/bench.rs):
+/// a clone costs ~100 ms on a 100k-record store, amortized to ~5 µs per
+/// mutation at this cadence — noise next to WAL fsync on persistent stores.
+pub const SNAPSHOT_EVERY: i64 = 20000;
+/// Retained snapshots per database handle (issue #166): the newest wins for
+/// recent cutoffs; older ones cover older cutoffs until evicted.
+pub const SNAPSHOT_RING_CAP: usize = 2;
+
+/// In-memory ring of replay-accelerator snapshots (issue #166): full store
+/// states (history stripped — replay consumes the live log, never the
+/// snapshot's) keyed by clock. A pure cache in the [`IndexCache`] spirit: a
+/// snapshot at clock C is by construction the state replaying mutations
+/// `1..=C` produces, so replaying `(C..cutoff]` on top yields exactly the
+/// from-scratch view — a miss or a loss only costs speed, never bytes.
+/// Passed as `Option<&SnapshotRing>` down the execute chain — `None` keeps
+/// the previous replay-from-scratch behavior everywhere (WAL replay,
+/// memory sub-stores, direct engine callers).
+#[derive(Debug, Default)]
+pub struct SnapshotRing {
+    snaps: VecDeque<(i64, Store)>,
+}
+
+impl SnapshotRing {
+    /// Newest snapshot at or below `cutoff`, if any.
+    pub fn select(&self, cutoff: i64) -> Option<(i64, &Store)> {
+        self.snaps
+            .iter()
+            .rev()
+            .find(|(clock, _)| *clock <= cutoff)
+            .map(|(clock, store)| (*clock, store))
+    }
+
+    /// Record the current store as a snapshot at `clock` (history stripped —
+    /// see above). Resets on clock regression (a different lineage must never
+    /// inherit bases); evicts oldest beyond [`SNAPSHOT_RING_CAP`].
+    pub fn push(&mut self, clock: i64, store: &Store) {
+        if self.snaps.back().is_some_and(|(c, _)| clock <= *c) {
+            self.snaps.clear();
+        }
+        self.snaps.push_back((clock, strip_history(store)));
+        while self.snaps.len() > SNAPSHOT_RING_CAP {
+            self.snaps.pop_front();
+        }
+    }
+}
+
+/// Clone a store without its mutation history (issue #166): snapshot bases
+/// carry state only — replay always consumes the live log, so embedded
+/// histories would be dead weight (roughly half the bytes on history-heavy
+/// stores). Built field-by-field so the history (and sub-histories) are
+/// never cloned in the first place — memories are stripped recursively for
+/// the same reason.
+fn strip_history(store: &Store) -> Store {
+    Store {
+        records: store.records.clone(),
+        edges: store.edges.clone(),
+        vector_dims: store.vector_dims.clone(),
+        clock: store.clock,
+        history: Vec::new(),
+        memories: store
+            .memories
+            .iter()
+            .map(|(name, sub)| (name.clone(), strip_history(sub)))
+            .collect(),
+        tables: store.tables.clone(),
+    }
 }
 
 /// Apply the select's deterministic ordering. Stable sorts guarantee equal
@@ -5140,6 +5246,7 @@ mod memory_tests {
             &mut store,
             &Statement::Memory { name: "x".into() },
             None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -5176,5 +5283,127 @@ mod memory_tests {
         assert_eq!(ids(&ra[1]), ids(&rb[1]));
         assert_eq!(ra[0].rows.len(), 1);
         assert_eq!(ra[1].rows.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    //! Issue #166: replay-snapshot ring mechanics + replay-from-base
+    //! correctness (fast, always-on). The in-session capture plumbing
+    //! (`Database` counters/epochs) is exercised by the temporal bench
+    //! groups and the experiments parity runs.
+
+    use std::collections::BTreeMap;
+
+    use nql_ir::{Record, RecordId, Statement, Store, Value};
+
+    use super::{execute_statement, replay_as_of, strip_history, SnapshotRing};
+
+    fn insert(id: &str, v: i64) -> Statement {
+        Statement::Insert(Record {
+            id: RecordId::parse(id).unwrap(),
+            body: BTreeMap::from([("v".into(), Value::Int(v))]),
+            embedding: None,
+            created_at: 0,
+        })
+    }
+
+    #[test]
+    fn ring_selects_newest_base_at_or_below_cutoff() {
+        let mut ring = SnapshotRing::default();
+        assert!(ring.select(100).is_none());
+        let s50 = Store {
+            clock: 50,
+            ..Store::default()
+        };
+        let s80 = Store {
+            clock: 80,
+            ..Store::default()
+        };
+        ring.push(50, &s50);
+        ring.push(80, &s80);
+        assert!(ring.select(49).is_none());
+        assert_eq!(ring.select(50).map(|(c, _)| c), Some(50));
+        assert_eq!(ring.select(79).map(|(c, _)| c), Some(50));
+        assert_eq!(ring.select(80).map(|(c, _)| c), Some(80));
+        assert_eq!(ring.select(10_000).map(|(c, _)| c), Some(80));
+    }
+
+    #[test]
+    fn ring_evicts_oldest_and_resets_on_regression() {
+        let mut ring = SnapshotRing::default();
+        for c in [10i64, 20, 30] {
+            let s = Store {
+                clock: c,
+                ..Store::default()
+            };
+            ring.push(c, &s);
+        }
+        // Cap is SNAPSHOT_RING_CAP (2): the oldest base is evicted.
+        assert!(ring.select(15).is_none());
+        assert_eq!(ring.select(20).map(|(c, _)| c), Some(20));
+        // Clock regression (a different lineage) resets the ring.
+        let s = Store {
+            clock: 5,
+            ..Store::default()
+        };
+        ring.push(5, &s);
+        assert!(ring.select(4).is_none());
+        assert_eq!(ring.select(25).map(|(c, _)| c), Some(5));
+    }
+
+    // Replaying from a snapshot base yields exactly the from-scratch view —
+    // across appends, a mid-history PRUNE (the #165 bug class: bases must
+    // compose with Snapshot installs), FORGETs, and a future cutoff (the
+    // recent-T fast path).
+    #[test]
+    fn replay_from_base_matches_full_replay() {
+        let stmts = vec![
+            Statement::CreateTable {
+                table: "t".into(),
+                vector_dim: None,
+            },
+            insert("t:1", 1),
+            insert("t:2", 2),
+            Statement::PruneHistory,
+            insert("t:3", 3),
+            Statement::Forget {
+                id: RecordId::parse("t:1").unwrap(),
+            },
+        ];
+        let mut store = Store::default();
+        for stmt in &stmts {
+            execute_statement(&mut store, stmt, None, None).unwrap();
+        }
+        // Bases at two interior clocks (prefix states, as live capture
+        // would record them).
+        let mut ring = SnapshotRing::default();
+        for upto in [2usize, 4] {
+            let mut prefix = Store::default();
+            for stmt in &stmts[..=upto] {
+                execute_statement(&mut prefix, stmt, None, None).unwrap();
+            }
+            let clock = prefix.clock;
+            ring.push(clock, &prefix);
+        }
+        let max_ts = store.history.iter().map(|(ts, _)| *ts).max().unwrap();
+        for cutoff in [0, 1, 2, 3, 4, 5, 6, 7, max_ts, max_ts + 100] {
+            let full = replay_as_of(&store, cutoff, None);
+            let based = replay_as_of(&store, cutoff, Some(&ring));
+            match (full, based) {
+                // Views are transient (rows read state only): compare
+                // history-stripped states. Histories legitimately differ —
+                // a replayed `Snapshot` entry installs state (wiping the
+                // view's accumulated log) while a base starts log-free —
+                // but records, edges, clocks, and tables must coincide.
+                (Ok(a), Ok(b)) => assert_eq!(
+                    strip_history(&a),
+                    strip_history(&b),
+                    "cutoff {cutoff}: snapshot-base view diverged from full replay"
+                ),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!("cutoff {cutoff}: ok/err split: {a:?} vs {b:?}"),
+            }
+        }
     }
 }

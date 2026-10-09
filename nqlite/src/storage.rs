@@ -381,8 +381,13 @@ impl StoreFile {
                             store.history = file_era;
                         }
                     }
-                    let _ =
-                        crate::engine::execute_in_context(store, &stmt, &mut current_memory, None);
+                    let _ = crate::engine::execute_in_context(
+                        store,
+                        &stmt,
+                        &mut current_memory,
+                        None,
+                        None,
+                    );
                     replayed.push(stmt);
                     pos = start + len;
                     good_until = pos;
@@ -590,8 +595,8 @@ mod tests {
             created_at: 0,
         };
         let insert = Statement::Insert(rec);
-        crate::engine::execute_statement(&mut store, &create, None).unwrap();
-        crate::engine::execute_statement(&mut store, &insert, None).unwrap();
+        crate::engine::execute_statement(&mut store, &create, None, None).unwrap();
+        crate::engine::execute_statement(&mut store, &insert, None, None).unwrap();
         sf.append(&create).unwrap();
         sf.append(&insert).unwrap();
         drop(sf); // single-writer: release the store lock before reopening
@@ -623,8 +628,8 @@ mod tests {
                 embedding: Some(vec![0.5, 0.5]),
                 created_at: 0,
             });
-            crate::engine::execute_statement(s, &create, None).unwrap();
-            crate::engine::execute_statement(s, &insert, None).unwrap();
+            crate::engine::execute_statement(s, &create, None, None).unwrap();
+            crate::engine::execute_statement(s, &insert, None, None).unwrap();
             vec![create, insert]
         };
 
