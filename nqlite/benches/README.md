@@ -17,6 +17,20 @@ given identical input, engine output is always identical.
 | `knn_bf`      | Brute-force kNN `SELECT` (k=10) over an N-record store → QPS, latency   | 1k, 10k |
 | `select_range`| `SELECT WHERE group = 3` (field-equality filter, ~N/10 matches) → QPS   | 1k, 10k |
 | `relate`      | N `RELATE` edges in one plan vs a fresh store → relates/sec             | 1k, 10k |
+| `plan_size`   | Plans of N `INSERT`s per `execute` (N = 1/10/100/1000), in-memory (`mem`) and persistent (`wal`, incl. the single per-plan fsync) → per-plan latency + per-statement rate (amortization curve) | 1, 10, 100, 1000 |
+
+## Percentiles & throughput
+
+Criterion's console output leads with mean/median; `scripts/bench-percentiles.py`
+reads its JSON artifacts (`target/criterion/**/new/sample.json` +
+`benchmark.json`) and prints p50/p95/p99/max + ops/s per benchmark — a pure
+function of the samples, deterministic for a given run:
+
+```sh
+cargo bench -p nqlite
+python3 scripts/bench-percentiles.py            # text table
+python3 scripts/bench-percentiles.py --markdown # paste-ready for docs/benchmarks.md
+```
 
 ## Running
 

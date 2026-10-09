@@ -16,11 +16,16 @@
 //! - `select_range` — repeated `SELECT` with `WHERE group = <const>` (field
 //!   equality filter, ~N/10 matches) over N records; reports QPS.
 //! - `relate` — execute one plan of N `RELATE` edges; reports relates/sec.
+//! - `plan_size` — execute plans of 1/10/100/1000 `INSERT`s, in-memory
+//!   (`mem`, engine plan cost) and persistent (`wal`: fresh tempdir + open +
+//!   execute, so the single per-plan fsync from #164 is in the measured
+//!   path); the amortization curve — per-plan latency vs per-statement rate.
 //!
 //! Run everything: `cargo bench -p nqlite`
 //! Run a subset:   `cargo bench -p nqlite -- 'knn_bf'`
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use nql_ir::{Filter, Id, Knn, Record, RecordId, RelationEdge, Select, Statement, Store, Value};
@@ -194,11 +199,65 @@ fn bench_relate(c: &mut Criterion) {
     group.finish();
 }
 
+/// Monotonic counter so concurrent `plan_wal` iterations never share a dir.
+static PLAN_WAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Fresh persistent path per `plan_wal` iteration (setup — the open itself
+/// is part of the measured durable-plan cost, the dir bookkeeping is not
+/// timed separately from it).
+fn fresh_sweep_path() -> std::path::PathBuf {
+    let seq = PLAN_WAL_SEQ.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("nqlite-plan-sweep-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create plan sweep dir");
+    dir.join("sweep.ndb")
+}
+
+/// Plan-size sweep: 1/10/100/1000 inserts per `execute` (issue #170).
+///
+/// `mem/*` isolates the engine's per-plan cost (no durability); `wal/*`
+/// measures the durable plan (open + execute + the single per-plan fsync
+/// from #164 — no explicit flush, the WAL stays well under the checkpoint
+/// threshold at these sizes). Throughput is per statement; latency is per
+/// plan — together they are the amortization curve.
+fn bench_plan_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("plan_size");
+    for n in [1usize, 10, 100, 1000] {
+        let mut rng = Rng::new(SEED);
+        let mut plan = Vec::with_capacity(n + 1);
+        plan.push(Statement::CreateTable {
+            table: "item".into(),
+            vector_dim: Some(DIM),
+        });
+        for i in 0..n {
+            plan.push(insert_statement(&mut rng, i));
+        }
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_function(format!("mem/{n}"), |b| {
+            b.iter(|| {
+                let mut db = Database::new(Store::default());
+                db.execute(&plan).expect("execute mem plan");
+            })
+        });
+        group.bench_function(format!("wal/{n}"), |b| {
+            b.iter(|| {
+                let path = fresh_sweep_path();
+                let mut db = Database::open(&path).expect("open sweep db");
+                db.execute(&plan).expect("execute wal plan");
+                drop(db);
+                std::fs::remove_dir_all(path.parent().expect("sweep parent")).ok();
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_ingest,
     bench_knn_bf,
     bench_select_range,
-    bench_relate
+    bench_relate,
+    bench_plan_size
 );
 criterion_main!(benches);

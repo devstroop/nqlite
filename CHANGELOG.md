@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Bench percentiles + plan-size sweep (#170)** — criterion's console
+  output led with mean/median only; `scripts/bench-percentiles.py` now
+  reports p50/p95/p99/max + ops/s as a pure function of its JSON
+  artifacts (`target/criterion/**/new/sample.json` + `benchmark.json` —
+  no re-running, deterministic for a given run, `--markdown` rows paste
+  straight into docs). The spike benches gain `Throughput::Elements`
+  (rows/s on every kNN/build/scan row), and `nqlite/benches/bench.rs`
+  gains a `plan_size` group: 1/10/100/1000 inserts per `execute`,
+  in-memory (`mem`, flat ~635–903 K/s per statement) and durable
+  (`wal`, fresh tempdir + open + execute with #164's single per-plan
+  fsync inside the measured path — 1.15 K/s at size 1 → 195.5 K/s at
+  size 1000, ~0.87 ms per-plan floor amortized away).
+  `docs/benchmarks.md` gains the sweep table plus the spike kNN
+  distribution re-quote (100k: 37.26 ms mean / 53.54 ms p99 this run —
+  box-load-dependent, quote shape + method). The zig median-of-7
+  benches get the same treatment in a nqlite-zig follow-up.
 - **Format v4 open + version-preserving checkpoint (#157)** — `load_main`
   accepts `V4_VERSION` through `nqlite::v4::decode_store` (full store,
   eager history — zig owns the v4-native lazy path), with a new

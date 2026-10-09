@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use nql_ir::{Id, Knn, Record, RecordId, Select, Statement, Store, Value};
 use nqlite::Database;
 
@@ -72,6 +72,7 @@ fn bench_knn_dim64(c: &mut Criterion) {
             knn: Some(Knn { query, k: KNN_K }),
             ..Select::default()
         });
+        group.throughput(Throughput::Elements(n as u64));
         group.bench_function(format!("k={KNN_K}/{n}"), |b| {
             b.iter(|| {
                 db.execute(std::slice::from_ref(&select))
@@ -93,6 +94,7 @@ fn bench_parts(c: &mut Criterion) {
 
     // (a) index construction as the engine does it per SELECT.
     let mut group = c.benchmark_group("spike_parts_build");
+    group.throughput(Throughput::Elements(n as u64));
     group.bench_function(format!("build/{n}"), |b| {
         b.iter(|| {
             let mut index = BruteForceVectorIndex::default();
@@ -115,6 +117,7 @@ fn bench_parts(c: &mut Criterion) {
     }
     let query: Vec<f32> = (0..DIM).map(|d| (d as f32) / DIM as f32 - 0.5).collect();
     let mut group = c.benchmark_group("spike_parts_scan");
+    group.throughput(Throughput::Elements(n as u64));
     group.bench_function(format!("scan/{n}"), |b| {
         b.iter(|| std::hint::black_box(index.search(&query, KNN_K)))
     });
