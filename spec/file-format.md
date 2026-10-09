@@ -308,3 +308,58 @@ oracle**.
 - Size caps are `u32` (`body_len`, `id_len`); a violation is an open-time
   error, never truncation-without-error (§4 spirit).
 - Directory counts are `u64` — no practical record-count cap.
+
+## 6. Threat model (v4, issue #168)
+
+CRC-in-frame is **accident integrity, not authenticity and not position
+integrity**: each frame's CRC covers its own `len` + payload, so a frame is
+self-validating wherever it happens to sit.
+
+**Defended (with the test that proves it):**
+
+- Bitrot / torn or crash-mid-frame writes — detected at the first bad frame
+  on open; the WAL is truncated there (§2, §4). Covered by the torn-frame
+  and CRC unit suites plus the seeded crash-point sweep
+  (`nqlite/tests/crash_sweep.rs`, issue #165: truncation at seeded offsets,
+  lost-rename after flush, complete-prefix recovery).
+- Process crashes at any storage boundary — single-writer lock excludes a
+  second writer (#84); the WAL batch is fsynced before `execute` returns
+  (#164); checkpoint order is tmp-write → file fsync → rename → dir fsync
+  (`storage.rs`), so losing the rename at most replays the full WAL over
+  the old main (the sweep's lost-rename probe pins this).
+- Adversarial file editing is explicitly OUT of scope: anyone who can write
+  the file can forge CRC32s trivially. CRC answers "did the disk lie by
+  accident", never "did someone lie on purpose".
+
+**NOT defended — whole-frame displacement and reorder.** Swapping two
+adjacent WAL frames replays silently: every CRC still validates (each frame
+carries its own), but history order — and everything derived from replay
+order (`created_at` stamps, `AS OF` views, `HISTORY SINCE` deltas) — is
+corrupted. Demonstrated, not theorized: a two-insert WAL with its insert
+frames exchanged reopens with history `[I3, I2, I1]` instead of
+`[I1, I2, I3]`, zero errors. The same blindness covers misdirected reads
+(serving the wrong block) and journaling reorder below the filesystem:
+internally-consistent-elsewhere bytes are accepted wherever found.
+
+TigerBeetle defends this class with checksums stored OUTSIDE the block they
+cover (a reference is `(index, checksum)` held in a different block),
+superblock quorum, and a u128 MAC. Three deliberate non-adoptions for v4:
+
+1. **No external frame index / trailer.** It is the local form of TB's
+   out-of-block checksum and would close the demonstrated gap — but v4
+   bytes are frozen (golden fixtures pin them; the zig reader shares the
+   layout), so it is scheduled for **v5** (home: issue #167), not retrofitted.
+2. **No checksum upgrade.** CRC32 stays for v4; u128 is format-breaking and
+   therefore v5-if-ever. CRC32's burst-error limits are accepted: the
+   defense it provides (torn frames, random bitrot) is the defense v4 needs.
+3. **No replica/quorum machinery.** nqlite is a single-node embedded store
+   on a filesystem, not raw disks with replicas — the failure class TB's
+   quorum answers (a bad disk outvoted by good ones) has no counterpart here.
+
+**Residual risk, explicitly accepted:** a lying storage layer that relocates
+whole intact frames (or whole files) is undetected by v4. Mitigating factors
+recorded: the realistic embedded failure modes (bitrot, torn writes, process
+crash, lost rename) are all covered and swept; filesystem-level replication
+or checksumming (ZFS/btrfs, RAID) sits below us for whoever needs it; v5
+carries the index item. Revisit only with field evidence of displacement-class
+corruption, or inside the v5 format effort.
