@@ -5312,8 +5312,14 @@ mod snapshot_tests {
     fn ring_selects_newest_base_at_or_below_cutoff() {
         let mut ring = SnapshotRing::default();
         assert!(ring.select(100).is_none());
-        let s50 = Store { clock: 50, ..Store::default() };
-        let s80 = Store { clock: 80, ..Store::default() };
+        let s50 = Store {
+            clock: 50,
+            ..Store::default()
+        };
+        let s80 = Store {
+            clock: 80,
+            ..Store::default()
+        };
         ring.push(50, &s50);
         ring.push(80, &s80);
         assert!(ring.select(49).is_none());
@@ -5327,14 +5333,20 @@ mod snapshot_tests {
     fn ring_evicts_oldest_and_resets_on_regression() {
         let mut ring = SnapshotRing::default();
         for c in [10i64, 20, 30] {
-            let s = Store { clock: c, ..Store::default() };
+            let s = Store {
+                clock: c,
+                ..Store::default()
+            };
             ring.push(c, &s);
         }
         // Cap is SNAPSHOT_RING_CAP (2): the oldest base is evicted.
         assert!(ring.select(15).is_none());
         assert_eq!(ring.select(20).map(|(c, _)| c), Some(20));
         // Clock regression (a different lineage) resets the ring.
-        let s = Store { clock: 5, ..Store::default() };
+        let s = Store {
+            clock: 5,
+            ..Store::default()
+        };
         ring.push(5, &s);
         assert!(ring.select(4).is_none());
         assert_eq!(ring.select(25).map(|(c, _)| c), Some(5));
