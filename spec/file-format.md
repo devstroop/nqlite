@@ -363,3 +363,116 @@ crash, lost rename) are all covered and swept; filesystem-level replication
 or checksumming (ZFS/btrfs, RAID) sits below us for whoever needs it; v5
 carries the index item. Revisit only with field evidence of displacement-class
 corruption, or inside the v5 format effort.
+
+## 7. Version 5 sketch — compressed history (candidate; issue #167)
+
+Status: **sketch, not adopted.** Nothing writes or reads version 5; v4
+remains the adopted target (§5) and v3 the shipped layout (§1). This
+section pins the two format items earlier decisions parked for v5 —
+history-tail compression (issue #167 proper) and §6's external frame
+index — implementable by any engine (nqlite, nqlite-zig) without
+re-litigating design. Normative only when a `V5_VERSION` adoption lands,
+with its own golden-fixture set (v4 fixtures stay byte-frozen).
+
+### 7.1 History-tail compression (HC0)
+
+**Scope.** The history payload only: v3's tail (§1) and v4's `HISTORY`
+section (§5.6). The core frame/sections, the WAL (§2), and every rule
+around claiming are unchanged — lazy first-temporal-read decode,
+`PRUNE HISTORY` snapshots riding inside the history, `HistoryPruned`
+horizon (§2.7). Compression is presentation-only: decoding yields the
+exact same `(i64, Statement)` sequence, so `AS OF` / `HISTORY SINCE`
+semantics, replay determinism, and the nql-migrate byte-verify rule are
+untouched. Nothing is dropped: history compaction remains exactly what
+`PRUNE HISTORY` already allows.
+
+**Block framing.** The (decompressed) tail splits into blocks of at most
+65536 bytes; the compressed payload is a sequence of block frames:
+
+```
+block := raw_len    u32 LE   bytes before compression (<= 65536)
+         comp_len   u32 LE   payload bytes that follow
+         crc32      u32 LE   CRC-32 (IEEE, same polynomial as WAL frames)
+         flags      u8       bit0 = 1: HC0-LZSS payload; 0: raw, verbatim
+         payload    comp_len bytes
+```
+
+A CRC mismatch at claim time is an integrity error — same class as
+today's tail corruption, never a partial decode. A block whose
+compression would not shrink is stored verbatim (flag 0): the format
+never pays to compress.
+
+**Codec (HC0-LZSS) — parameters pinned, implement exactly:**
+
+- Window 32768 (dist 1..=32768, stored as `dist - 1` u16 LE), min match
+  3, max match 64.
+- Token stream: control byte, bits consumed LSB-first (bit `t` governs
+  token `t`); bit 0 = literal (1 raw byte), bit 1 = match (3 bytes:
+  `u16 LE dist-1`, then `u8 len`). Bits past the last token of a block
+  are zero padding, ignored by the decoder.
+- Hash: `h = ((b0 as u32) << 16 | (b1 as u32) << 8 | b2 as u32)
+  .wrapping_mul(0x9E37_79B1) >> 17` → 15-bit slot table
+  (32768 × u32, `pos + 1`, 0 = empty). One slot per 3-gram; every
+  position — including interiors of emitted matches — overwrites its
+  slot before the encoder advances past it.
+- Matching: greedy, single candidate: look up the slot for the 3-grams
+  at position `i`; a match requires `dist <= window` and byte equality;
+  take the common prefix up to `max_match`. No backtracking, no
+  longest-of-many search — the parse is a pure function of the block.
+
+**Determinism requirements.** HC0 is a pure function of its input bytes:
+no library dependence, no parameters outside this list, no clock or
+locale state. Therefore (a) identical histories compress to identical
+bytes on every implementation; (b) `compress(decompress(c)) == c` for any
+valid `c` — nql-migrate's "re-encodes byte-identically" verify carries
+over; (c) fixtures can pin compressed output bytes at adoption.
+
+**Measured** (prototype `nqlite/examples/history_compress_proto.rs`,
+release profile, reference box, 2026-10-09; asserts roundtrip +
+byte-identical re-encode on every run):
+
+| store | history tail | HC0 | ratio |
+|---|---:|---:|---:|
+| profile-equivalent v3 (exp08 corpus, 100k docs, dim-64 word-mean embeds) | 32 295 253 B | 11 771 653 B | **2.743x** |
+| same store, v4 via `nql-migrate` (tail adopted verbatim, §5.6) | 32 295 253 B | 11 771 653 B | **2.743x** |
+| dim-8 text store (smaller tail) | 7 425 248 B | 2 565 650 B | 2.894x |
+
+Throughput: compress 52–85 MB/s, decompress 187–230 MB/s (decompress is
+the claim-path cost — small next to replay). Offline reference probes on
+the same tail: zlib-9 37.0x, bz2 20.5x, lzma 81.3x — LZSS-only HC0 is
+the floor of what this corpus yields; a canonical-Huffman stage over HC0
+tokens is the cheap next step if v5 wants more, at the cost of pinning a
+second table-construction algorithm. Honest spectrum: random-float
+corpora (spike regime, ~7.2 bits/byte unigram) compress poorly with any
+LZ-class codec — the issue's >=2x is a property of the *profile corpus*
+(word-derived, 6-decimal embeddings), and the framing is block-tagged
+precisely so the codec can be revisited per version.
+
+**Reproduce:** build the profile-equivalent store with exp08's corpus
+(`nqlite-experiments/experiments/exp08_scale_ladder.py` `_inserts`,
+`CREATE TABLE doc VECTOR<f32, 64>`, chunked through `nql --db … --script …`
+until a checkpointed v3 file exists), then:
+
+```sh
+cargo run --release -p nqlite --example history_compress_proto -- <store.ndb>
+```
+
+### 7.2 External frame index (parked by §6; same adoption)
+
+§6 item 1's local form of TigerBeetle's out-of-block checksum: a trailer
+written at checkpoint holding `(offset, crc32)` for every frame/section
+the reference does NOT live inside, verified at open — closes the
+whole-frame displacement gap §6 records as residual. Sketch level only:
+exact trailer shape, placement, and its own coverage CRC are deferred to
+the v5 adoption work alongside §7.1. The u128 checksum upgrade (§6 item
+2) remains v5-if-ever and out of scope here.
+
+### 7.3 Compatibility (when adopted)
+
+- `version = 5`; pre-v5 binaries reject v5 files with `BadVersion` —
+  loud, never partial (§1/§5.8 spirit); v5 readers report
+  `BadVersion (supported: 2, 3, 4, 5)`.
+- Upgrade follows the established pattern: a non-v5-aware build
+  re-encodes history uncompressed at its next checkpoint; the WAL (§2) is
+  version-independent and replays into either layout.
+- v5 ships its own golden-fixture set; v4 fixtures stay byte-frozen.

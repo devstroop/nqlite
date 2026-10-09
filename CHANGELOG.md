@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **v5 history-compression sketch + HC0 prototype (#167)** —
+  `spec/file-format.md` §7 pins the candidate v5 story: block-framed
+  (≤64 KiB, per-block CRC32) history-tail compression with the fully
+  specified HC0-LZSS codec — zero-dependency, pure function of its input,
+  so `compress(decompress(c)) == c` and the nql-migrate byte-identical
+  verify rule carries over — plus §7.2's sketch of the external frame
+  index §6 parked for v5, and §7.3 compatibility notes. Prototype
+  `examples/history_compress_proto.rs`: profile-equivalent store tail
+  32 295 253 B → 11 771 653 B (**2.743×**, the issue's ≥2× target),
+  identical result through the v4 conversion (tail adopted verbatim per
+  §5.6), roundtrip + re-encode asserted on every run; reference probes
+  (zlib-9 37.0×, lzma 81.3×) recorded as headroom for a future entropy
+  stage. Nothing writes v5 — v4 stays the adopted target.
 - **Bounded `AS OF` replay: fast path + snapshot ring (#166)** — temporal
   reads no longer replay from ts0 unconditionally: a cutoff at or past the
   current clock returns the current state with zero replayed statements,
