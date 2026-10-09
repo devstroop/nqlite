@@ -31,12 +31,18 @@ use crate::engine::cosine_similarity;
 
 /// A searchable index over record embeddings.
 ///
-/// Implementations decide their own storage and retrieval strategy; the
+/// Implementations decide on their own storage and retrieval strategy; the
 /// engine only relies on the contract below. Exact implementations must
 /// return results ordered by descending cosine similarity with ties broken
 /// by ascending [`RecordId`]; approximate implementations should at least
 /// return a deterministic ranking for a given index state.
-pub trait VectorIndex {
+///
+/// `Send + Sync` supertraits keep `Box<dyn VectorIndex>` thread-safe — the
+/// engine's [`crate::Database`] hands its memoized index
+/// ([`crate::engine::IndexCache`], issue #144 L2) across MCP/server request
+/// boundaries, so the trait object must stay `Send + Sync` like the rest of
+/// the store.
+pub trait VectorIndex: Send + Sync {
     /// Insert `v` for `id`, replacing any previous vector for the same id.
     fn upsert(&mut self, id: RecordId, v: Vec<f32>);
 

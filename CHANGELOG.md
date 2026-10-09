@@ -28,6 +28,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes unchanged).
 
 ### Changed
+- **kNN index memoized per store-version (#144, L2)** — `run_select` no
+  longer rebuilds the brute-force vector index (embedding re-clone + BTree
+  inserts) on every kNN query: the whole-table build now lives in an
+  `engine::IndexCache` field on `Database`, validated **lazily** against
+  the store's identity + `clock` — every record mutation bumps the clock
+  (`log_mutation`), so there is no push-side invalidation to miss and a
+  stale hit is structurally impossible. `AS OF` replays, `MEMORY`
+  sub-stores and pruning filters bypass the memo and keep building per
+  query; `execute_plan` / `execute_in_context` / `execute_statement` take
+  an optional `IndexCache` (`None` = previous behavior); `VectorIndex`
+  gains `Send + Sync` supertraits so the memoized trait object stays safe
+  for the MCP/server paths. Spike bench, back-to-back under identical
+  load: 10k 29.5→15.1 ms, 50k 151.2→76.0 ms, **100k 257.2→158.9 ms
+  (−38%)** (unchanged-code control `parts_scan` +3.6%); idle-box
+  projection ≈213→~134 ms. Gates: `exact_parity` + experiments parity
+  57/57 (exp01–exp11) + workspace tests/fmt/clippy + a cache
+  invalidation/isolation regression test.
 - **kNN/SELECT pipeline borrows candidates (#144, L1)** — `run_select` no
   longer deep-clones every matching record per query: candidates are
   `Vec<&Record>` through filtering, scoring, ordering, offset and limit,

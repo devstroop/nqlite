@@ -362,7 +362,8 @@ impl StoreFile {
                     // means a corrupt frame — treat it as torn. Memory
                     // statements carry the context switch so MEMORY scoping
                     // survives reopen.
-                    let _ = crate::engine::execute_in_context(store, &stmt, &mut current_memory);
+                    let _ =
+                        crate::engine::execute_in_context(store, &stmt, &mut current_memory, None);
                     replayed.push(stmt);
                     pos = start + len;
                     good_until = pos;
@@ -545,8 +546,8 @@ mod tests {
             created_at: 0,
         };
         let insert = Statement::Insert(rec);
-        crate::engine::execute_statement(&mut store, &create).unwrap();
-        crate::engine::execute_statement(&mut store, &insert).unwrap();
+        crate::engine::execute_statement(&mut store, &create, None).unwrap();
+        crate::engine::execute_statement(&mut store, &insert, None).unwrap();
         sf.append(&create).unwrap();
         sf.append(&insert).unwrap();
         drop(sf); // single-writer: release the store lock before reopening

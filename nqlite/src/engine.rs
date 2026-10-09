@@ -96,11 +96,22 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Execute a whole `Plan` against `store`, applying statements in order and
 /// collecting one [`QueryResult`] per query statement (`SELECT`, `MATCH`,
 /// `CLOSURE`; DML/DDL statements contribute nothing to the output).
-pub fn execute_plan(store: &mut Store, plan: &[Statement]) -> Result<Vec<QueryResult>> {
+///
+/// When `cache` is `Some`, kNN SELECTs memoize their whole-table vector
+/// index against it (issue #144, L2); `None` keeps the build-per-query
+/// behavior. The cache belongs to the root `store` argument — sub-store
+/// (`MEMORY`) reads never see it (see [`execute_in_context`]).
+pub fn execute_plan(
+    store: &mut Store,
+    plan: &[Statement],
+    mut cache: Option<&mut IndexCache>,
+) -> Result<Vec<QueryResult>> {
     let mut results = Vec::new();
     let mut current_memory: Option<String> = None;
     for stmt in plan {
-        if let Some(res) = execute_in_context(store, stmt, &mut current_memory)? {
+        if let Some(res) =
+            execute_in_context(store, stmt, &mut current_memory, cache.as_deref_mut())?
+        {
             results.push(res);
         }
     }
@@ -119,6 +130,7 @@ pub fn execute_in_context(
     store: &mut Store,
     stmt: &Statement,
     current_memory: &mut Option<String>,
+    cache: Option<&mut IndexCache>,
 ) -> Result<Option<QueryResult>> {
     if let Statement::Memory { name } = stmt {
         store.memories.entry(name.clone()).or_default();
@@ -135,15 +147,23 @@ pub fn execute_in_context(
     match current_memory {
         Some(name) => {
             let memory = store.memories.get_mut(name).expect("memory created above");
-            execute_statement(memory, stmt)
+            // Sub-stores never share the root's memo (issue #144, L2): they
+            // live in a `BTreeMap` whose values can move, and they are
+            // different stores — pass `None` and keep building per query.
+            execute_statement(memory, stmt, None)
         }
-        None => execute_statement(store, stmt),
+        None => execute_statement(store, stmt, cache),
     }
 }
 
 /// Execute a single [`Statement`] against `store`, mutating it for DDL/DML and
-/// returning a [`QueryResult`] for `SELECT`s (`None` otherwise).
-pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<QueryResult>> {
+/// returning a [`QueryResult`] for `SELECT`s (`None` otherwise). `cache` is
+/// the optional kNN index memo (issue #144, L2) — see [`execute_plan`].
+pub fn execute_statement(
+    store: &mut Store,
+    stmt: &Statement,
+    cache: Option<&mut IndexCache>,
+) -> Result<Option<QueryResult>> {
     match stmt {
         Statement::Memory { name } => Err(Error::MemoryWithoutContext { name: name.clone() }),
         // WAL-only marker: intercepted by `execute_in_context` before this
@@ -233,7 +253,7 @@ pub fn execute_statement(store: &mut Store, stmt: &Statement) -> Result<Option<Q
             Ok(None)
         }
         Statement::Select(sel) => {
-            let rows = run_select(store, sel)?;
+            let rows = run_select(store, sel, cache)?;
             Ok(Some(QueryResult {
                 kind: QueryKind::Select(sel.clone()),
                 rows,
@@ -304,13 +324,20 @@ fn validate_embedding(store: &Store, rec: &Record) -> Result<()> {
 ///
 /// When the select carries a kNN clause, similarity is produced by the
 /// configured [`VectorIndex`] (default: exact [`BruteForceVectorIndex`])
-/// rather than an inline cosine scan. The index is rebuilt from the filtered
-/// candidates on every call, so the result stays a pure, deterministic
-/// function of `(store, select)`. Candidates borrow the store's records
-/// end-to-end; only the ≤limit rows that survive ordering are cloned
-/// (issue #144, L1). A temporal read whose cutoff predates the
-/// store's history snapshot returns [`Error::HistoryPruned`] (issue #95).
-fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
+/// rather than an inline cosine scan. With an [`IndexCache`] supplied
+/// (issue #144, L2), the whole-table build is memoized per store-version;
+/// otherwise — and always for `AS OF` reads and pruning filters — it is
+/// rebuilt from the filtered candidates on every call. Either way the
+/// result stays a pure, deterministic function of `(store, select)`.
+/// Candidates borrow the store's records end-to-end; only the ≤limit rows
+/// that survive ordering are cloned (issue #144, L1). A temporal read
+/// whose cutoff predates the store's history snapshot returns
+/// [`Error::HistoryPruned`] (issue #95).
+fn run_select(
+    store: &Store,
+    sel: &Select,
+    cache: Option<&mut IndexCache>,
+) -> Result<Vec<ScoredRecord>> {
     // Temporal read (`AS OF T`): replay the mutation history up to the
     // cutoff into a fresh store and query THAT — the historical view is a
     // pure function of (history, T). Everything below runs against `target`.
@@ -322,6 +349,18 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
         }
         None => store,
     };
+
+    // L2 memo scope (issue #144): current-state, whole-table reads only.
+    // `AS OF` queries a fresh replay view (never shared with anyone), and a
+    // pruning filter narrows the candidate set below the whole table — both
+    // bypass the memo and keep building per query. `MEMORY` sub-stores
+    // never receive a cache at all (see `execute_in_context`).
+    let cache =
+        if sel.as_of.is_none() && matches!(sel.filter.as_ref(), None | Some(Filter::Bm25 { .. })) {
+            cache
+        } else {
+            None
+        };
 
     // Candidates BORROW the store's records (issue #144, L1): filtering
     // never needs owned rows, and deep-cloning every match up front made
@@ -344,14 +383,31 @@ fn run_select(store: &Store, sel: &Select) -> Result<Vec<ScoredRecord>> {
 
     // Rank every embedded candidate against the query through the index.
     // Non-embedded records are absent from the index and fall back to a
-    // similarity of `0.0`, exactly as the inline scan did.
-    let knn_sims: Option<BTreeMap<RecordId, f32>> = sel.knn.as_ref().map(|knn| {
-        let index = build_default_index(&candidates);
-        index
-            .search(&knn.query, candidates.len())
-            .into_iter()
-            .collect()
-    });
+    // similarity of `0.0`, exactly as the inline scan did. On a memo hit
+    // the cached whole-table index IS what a rebuild would produce (same
+    // records → same BTree contents → identical search output), so rows
+    // are bit-identical either way (issue #144, L2).
+    let knn_sims: Option<BTreeMap<RecordId, f32>> = match sel.knn.as_ref() {
+        Some(knn) => {
+            let fallback;
+            let index: &dyn VectorIndex = match cache {
+                Some(memo) => {
+                    memo.get_or_build(target, &sel.table, || build_default_index(&candidates))
+                }
+                None => {
+                    fallback = build_default_index(&candidates);
+                    &*fallback
+                }
+            };
+            Some(
+                index
+                    .search(&knn.query, candidates.len())
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        None => None,
+    };
 
     // A `Filter::Bm25` turns the SELECT into lexical retrieval: build one
     // deterministic BM25 index over the filtered candidates' text field and
@@ -518,7 +574,7 @@ fn replay_as_of(store: &Store, cutoff: i64) -> Result<Store> {
         // Replay is total on a valid store (mutating statements cannot fail
         // once their preconditions were met); a failure here would mean a
         // corrupt history, so panic loudly rather than silently truncate.
-        let _ = execute_statement(&mut view, stmt).expect("history replay is total");
+        let _ = execute_statement(&mut view, stmt, None).expect("history replay is total");
     }
     Ok(view)
 }
@@ -862,6 +918,85 @@ fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
     }
 }
 
+/// Memo of the whole-table vector index for one root [`Store`] (issue #144, L2).
+///
+/// Rebuilding the index (embedding re-clone + BTree inserts) on every kNN
+/// query cost ~79 ms of a 213 ms exact kNN @100k — L2 keeps one built
+/// index per table instead. Invalidation is **lazy and total**: every
+/// record-affecting statement the engine executes goes through
+/// [`Store::log_mutation`] (`clock += 1`), so an entry is served only while
+/// BOTH the store's address and its `clock` match the ones it was built
+/// against — there is no push-side invalidation to miss (the Zig ingest
+/// lesson: missed seams fail loudly here by rebuilding, never by serving
+/// stale bytes).
+///
+/// Correctness rules, enforced by the call chain:
+///
+/// - **Root store only.** Sub-stores (`MEMORY <name>`) live in a `BTreeMap`
+///   whose values can move; `execute_in_context` passes `None` for them.
+/// - **Current state only.** `AS OF` replays into a fresh view and
+///   `run_select` drops the memo whenever `sel.as_of` is set.
+/// - **Whole-table candidate sets only.** The memo equals
+///   `build_default_index` over every record of the table — exactly the
+///   candidate set for `filter == None` and `Filter::Bm25` (both pass every
+///   record); any pruning filter still builds per query.
+///
+/// `PRUNE HISTORY` never changes records (same clock ⇒ still valid);
+/// `Statement::Snapshot` installs happen only during replay, into stores
+/// this memo never serves. Passed as `Option<&mut IndexCache>` down the
+/// execute chain — `None` keeps the previous build-per-query behavior.
+#[derive(Default)]
+pub struct IndexCache {
+    /// Address of the store these indexes were built from.
+    store_addr: usize,
+    /// That store's `clock` at build time.
+    clock: i64,
+    /// Table name → index over the table's embedded records.
+    by_table: HashMap<String, Box<dyn VectorIndex>>,
+}
+
+impl std::fmt::Debug for IndexCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `Box<dyn VectorIndex>` is not `Debug`; expose what invalidation
+        // depends on plus the cached table names.
+        f.debug_struct("IndexCache")
+            .field("store_addr", &self.store_addr)
+            .field("clock", &self.clock)
+            .field("tables", &self.by_table.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl IndexCache {
+    /// Drop everything cached for a different store or a stale `clock`.
+    fn sync(&mut self, store: &Store) {
+        let addr = store as *const Store as usize;
+        if self.store_addr != addr || self.clock != store.clock {
+            self.by_table.clear();
+            self.store_addr = addr;
+            self.clock = store.clock;
+        }
+    }
+
+    /// The memoized index for `table`, building it once via `build` on a miss.
+    ///
+    /// The returned reference is tied to `&mut self`; a caller that keeps it
+    /// across mutations gets exactly what a rebuild would have produced at
+    /// that clock, because any mutation invalidates first.
+    pub fn get_or_build(
+        &mut self,
+        store: &Store,
+        table: &str,
+        build: impl FnOnce() -> Box<dyn VectorIndex>,
+    ) -> &dyn VectorIndex {
+        self.sync(store);
+        if !self.by_table.contains_key(table) {
+            self.by_table.insert(table.to_string(), build());
+        }
+        &*self.by_table[table]
+    }
+}
+
 /// Build the default vector index (exact brute-force) over the embeddings of
 /// the given candidate records.
 ///
@@ -869,8 +1004,10 @@ fn matches_edge_props(edge: &RelationEdge, filter: Option<&Filter>) -> bool {
 /// implementations (e.g. the feature-gated, approximate `HnswVectorIndex`):
 /// swap the concrete type here and the rest of the engine is unchanged.
 ///
-/// Candidates arrive as borrowed records (issue #144, L1); the per-call
-/// embedding clone in `upsert` is the index-rebuild cost L2 removes.
+/// Candidates arrive as borrowed records (issue #144, L1). The engine
+/// memoizes this build per table through [`IndexCache`] (issue #144, L2),
+/// so the `upsert` clones run once per store-version instead of once per
+/// query.
 fn build_default_index(records: &[&Record]) -> Box<dyn VectorIndex> {
     let mut index = BruteForceVectorIndex::default();
     for r in records {
@@ -1343,6 +1480,97 @@ mod tests {
             table: table.to_string(),
             ..Select::default()
         }
+    }
+
+    #[test]
+    fn knn_index_cache_serves_hits_and_tracks_mutations() {
+        // Issue #144, L2: the memoized whole-table index must serve the same
+        // bytes as a fresh build, observe mutations (every record change
+        // bumps `clock` — the cache's invalidation signal), bypass `AS OF`,
+        // and never leak across MEMORY sub-stores.
+        let mut db = Database::default();
+        db.execute(&[
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("v".into(), num(1))]),
+                Some(vec![0.5, 0.5]),
+            )),
+            Statement::Insert(record(
+                "t:2",
+                BTreeMap::from([("v".into(), num(2))]),
+                Some(vec![0.0, 1.0]),
+            )),
+        ])
+        .unwrap();
+        let knn_select = |as_of: Option<i64>| {
+            Statement::Select(Select {
+                table: "t".into(),
+                knn: Some(Knn {
+                    query: vec![1.0, 0.0],
+                    k: 4,
+                }),
+                as_of,
+                ..Select::default()
+            })
+        };
+
+        // First query builds the memo; the second hits it — identical rows.
+        let built = db.execute(&[knn_select(None)]).unwrap();
+        let hit = db.execute(&[knn_select(None)]).unwrap();
+        assert_eq!(built, hit);
+        assert_eq!(built[0].rows.len(), 2);
+
+        // INSERT bumps `clock` → memo invalid → the new record (an exact
+        // match on the query) must be observable and rank first.
+        db.execute(&[Statement::Insert(record(
+            "t:3",
+            BTreeMap::from([("v".into(), num(3))]),
+            Some(vec![1.0, 0.0]),
+        ))])
+        .unwrap();
+        let after_insert = db.execute(&[knn_select(None)]).unwrap();
+        assert_eq!(after_insert[0].rows.len(), 3);
+        assert_eq!(
+            after_insert[0].rows[0].record.id,
+            RecordId::parse("t:3").unwrap(),
+            "invalidated memo must see the fresh insert"
+        );
+
+        // `AS OF` bypasses the memo: the pre-insert view stays intact
+        // (t:3 lands at clock 4; cutoff 3 = create + t:1 + t:2).
+        let past = db.execute(&[knn_select(Some(3))]).unwrap();
+        assert_eq!(past[0].rows.len(), 2);
+
+        // FORGET invalidates too.
+        db.execute(&[Statement::Forget {
+            id: RecordId::parse("t:3").unwrap(),
+        }])
+        .unwrap();
+        let after_forget = db.execute(&[knn_select(None)]).unwrap();
+        assert_eq!(after_forget[0].rows.len(), 2);
+
+        // MEMORY sub-stores never share the root's memo: same table name,
+        // different store, its own clock.
+        db.execute(&[
+            Statement::Memory { name: "m".into() },
+            create("t", Some(2)),
+            Statement::Insert(record(
+                "t:1",
+                BTreeMap::from([("v".into(), num(9))]),
+                Some(vec![0.0, 1.0]),
+            )),
+        ])
+        .unwrap();
+        let in_memory = db
+            .execute(&[Statement::Memory { name: "m".into() }, knn_select(None)])
+            .unwrap();
+        assert_eq!(in_memory[0].rows.len(), 1);
+        assert_eq!(in_memory[0].rows[0].record.body.get("v"), Some(&num(9)));
+
+        // Back at root: the memory insert must not have bled through.
+        let root_again = db.execute(&[knn_select(None)]).unwrap();
+        assert_eq!(root_again[0].rows.len(), 2);
     }
 
     #[test]
@@ -4796,9 +5024,12 @@ mod memory_tests {
         // MEMORY context), so the error is only reachable when a caller uses
         // execute_statement directly with a MEMORY statement.
         let mut store = nql_ir::Store::default();
-        let err =
-            crate::engine::execute_statement(&mut store, &Statement::Memory { name: "x".into() })
-                .unwrap_err();
+        let err = crate::engine::execute_statement(
+            &mut store,
+            &Statement::Memory { name: "x".into() },
+            None,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("MEMORY"),
             "direct Memory statement must error: {err}"
